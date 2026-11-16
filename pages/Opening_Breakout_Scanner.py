@@ -16,8 +16,8 @@ def load_bhavcopy_zip(uploaded_file):
         return None
     if uploaded_file.name.endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
-            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
-            with z.open(csv_files) as f:
+            csv_name = next(f for f in z.namelist() if f.endswith(".csv"))
+            with z.open(csv_name) as f:
                 df = pd.read_csv(f)
     else:
         df = pd.read_csv(uploaded_file)
@@ -39,12 +39,11 @@ def load_bhavcopy_zip(uploaded_file):
 
 
 def resolve_instrument_keys_via_api(access_token, sub_df):
-    """Uses Upstox v2 Instrument Search API to map symbols to instrument_keys without downloading .json.gz."""
+    """Maps Bhavcopy contracts to Upstox instrument_keys using local repo file or Upstox v2 Search API."""
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
     url = "https://upstox.com"
     key_to_inst = {}
 
-    # Check if local NSE.json.gz exists in GitHub repo root first
     if os.path.exists("NSE.json.gz"):
         local_df = pd.read_json("NSE.json.gz", compression="gzip")
         fo_df = local_df[local_df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
@@ -58,7 +57,6 @@ def resolve_instrument_keys_via_api(access_token, sub_df):
         )
         key_to_inst.update(dict(zip(fo_df["key"], fo_df["instrument_key"])))
 
-    # Query Upstox Search API for any remaining unmapped symbols (including SENSEX on BSE_FO)
     missing_df = sub_df[~sub_df["key"].isin(key_to_inst.keys())]
     unique_pairs = missing_df[["TckrSymb", "XpryDt"]].drop_duplicates()
 
@@ -90,7 +88,7 @@ def fetch_live_quotes(access_token, key_to_inst, target_keys):
     inst_to_key = {v: k for k, v in key_to_inst.items() if k in set(target_keys)}
     inst_keys = list(inst_to_key.keys())
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-    url = "https://api.upstox.com/v2/market-quote/quotes"
+    url = "https://upstox.com"
     records = []
 
     for i in range(0, len(inst_keys), 500):
@@ -99,10 +97,10 @@ def fetch_live_quotes(access_token, key_to_inst, target_keys):
         if resp.get("status") == "success":
             for inst_key, data in resp["data"].items():
                 depth = data.get("depth", {})
-                buy_list = depth.get("buy", [])
-                sell_list = depth.get("sell", [])
-                best_bid = buy_list.get("price", 0) if buy_list else 0
-                best_ask = sell_list.get("price", 0) if sell_list else 0
+                buy_item = next(iter(depth.get("buy", [])), {})
+                sell_item = next(iter(depth.get("sell", [])), {})
+                best_bid = buy_item.get("price", 0)
+                best_ask = sell_item.get("price", 0)
                 records.append({
                     "key": inst_to_key.get(inst_key),
                     "ltp": data.get("last_price", 0),
