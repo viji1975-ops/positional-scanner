@@ -1,214 +1,248 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
-import zipfile
 import os
+import json
+import gzip
+import shutil
+import zipfile
+import concurrent.futures
+from datetime import datetime, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    return datetime.now(IST)
 
 st.set_page_config(page_title="Opening Breakout Scanner", layout="wide")
 st.title("🔥 Opening Breakout & Confluence Scanner")
 
+DATA_DIR = "data"
+TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
+NSE_JSON_PATH = "NSE.json"
+BSE_JSON_PATH = "BSE.json"
+
+FILES = {
+    "Monthly": os.path.join(DATA_DIR, "monthly.csv"),
+    "Weekly": os.path.join(DATA_DIR, "weekly.csv"),
+    "Intraday": os.path.join(DATA_DIR, "intraday.csv"),
+}
+
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
 
 
-def load_bhavcopy_zip(uploaded_file):
-    if uploaded_file is None:
-        return None
-    if uploaded_file.name.endswith(".zip"):
-        with zipfile.ZipFile(uploaded_file) as z:
-            csv_name = next(f for f in z.namelist() if f.endswith(".csv"))
-            with z.open(csv_name) as f:
-                df = pd.read_csv(f)
-    else:
-        df = pd.read_csv(uploaded_file)
+def load_saved_token():
+    if "UPSTOX_ACCESS_TOKEN" in st.secrets and st.secrets["UPSTOX_ACCESS_TOKEN"].strip():
+        return st.secrets["UPSTOX_ACCESS_TOKEN"]
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                data = json.load(f)
+                if data.get("date") == get_ist_now().strftime("%Y-%m-%d"):
+                    return data.get("token", "")
+        except Exception:
+            pass
+    return ""
 
-    if "FinInstrmNm" in df.columns and "TckrSymb" not in df.columns:
-        df.rename(columns={"FinInstrmNm": "TckrSymb"}, inplace=True)
 
-    df = df[df["OptnTp"].isin(["CE", "PE"])].copy()
-    df["key"] = (
-        df["TckrSymb"].astype(str).str.strip() + "_" +
-        df["XpryDt"].astype(str).str.strip() + "_" +
-        df["StrkPric"].astype(float).astype(str) + "_" +
-        df["OptnTp"].astype(str).str.strip()
-    )
-    df["Trigger"] = pd.to_numeric(df["ClsPric"], errors="coerce")
-    df["EOD_OI"] = pd.to_numeric(df["OpnIntrst"], errors="coerce")
-    df["Spot_Ref"] = pd.to_numeric(df.get("UndrlygPric", 0), errors="coerce")
-    return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
+def download_json_gz(url, out_path):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    resp = requests.get(url, headers=headers, stream=True, timeout=30)
+    if resp.status_code == 200:
+        with open(out_path, "wb") as f_out:
+            with gzip.GzipFile(fileobj=resp.raw) as f_in:
+                shutil.copyfileobj(f_in, f_out)
+        return True
+    return False
 
 
 @st.cache_data(ttl=3600)
-def load_local_instrument_map():
-    """Loads instrument keys instantly from local NSE.json.gz / BSE.json.gz in repo."""
-    key_to_inst = {}
-    for fname in ["NSE.json.gz", "BSE.json.gz"]:
-        if os.path.exists(fname):
-            local_df = pd.read_json(fname, compression="gzip")
-            fo_df = local_df[local_df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
-            fo_df = fo_df[fo_df["instrument_type"].isin(["CE", "PE"])].copy()
-            
-            # Use asset_symbol or underlying_symbol if present, fallback to name
-            sym_col = "asset_symbol" if "asset_symbol" in fo_df.columns else (
-                "underlying_symbol" if "underlying_symbol" in fo_df.columns else "name"
-            )
-            fo_df["sym"] = fo_df[sym_col].fillna(fo_df["name"]).astype(str).str.strip()
-            fo_df["expiry_dt"] = pd.to_datetime(fo_df["expiry"], unit="ms").dt.strftime("%Y-%m-%d")
-            fo_df["key"] = (
-                fo_df["sym"] + "_" +
-                fo_df["expiry_dt"] + "_" +
-                fo_df["strike_price"].astype(float).astype(str) + "_" +
-                fo_df["instrument_type"].astype(str).str.strip()
-            )
-            key_to_inst.update(dict(zip(fo_df["key"], fo_df["instrument_key"])))
-    return key_to_inst
+def load_instrument_masters():
+    dfs = []
+    if os.path.exists(NSE_JSON_PATH):
+        df_nse = pd.read_json(NSE_JSON_PATH)
+        if "segment" in df_nse.columns:
+            df_nse = df_nse[df_nse["segment"] == "NSE_FO"]
+        df_nse["expiry_dt"] = pd.to_datetime(df_nse["expiry"], unit="ms").dt.normalize()
+        dfs.append(df_nse)
+
+    if os.path.exists(BSE_JSON_PATH):
+        df_bse = pd.read_json(BSE_JSON_PATH)
+        if "segment" in df_bse.columns:
+            df_bse = df_bse[(df_bse["segment"] == "BSE_FO") & (df_bse["underlying_symbol"] == "SENSEX")]
+        df_bse["expiry_dt"] = pd.to_datetime(df_bse["expiry"], unit="ms").dt.normalize()
+        dfs.append(df_bse)
+
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
 
 
-def resolve_missing_via_api(access_token, key_to_inst, sub_df):
-    """Queries Upstox Search API only for missing symbols (e.g., SENSEX if BSE.json.gz isn't local)."""
-    missing_df = sub_df[~sub_df["key"].isin(key_to_inst.keys())]
-    if missing_df.empty:
-        return key_to_inst
+def extract_csv_bytes(uploaded_file):
+    if uploaded_file.name.lower().endswith(".zip"):
+        with zipfile.ZipFile(uploaded_file) as z:
+            csv_name = next(f for f in z.namelist() if f.lower().endswith(".csv"))
+            with z.open(csv_name) as f:
+                return pd.read_csv(f)
+    return pd.read_csv(uploaded_file)
 
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
+
+def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
+    """Extracts near-ATM option strikes (ATM to OTM-3 for Indices, ATM to OTM-1 for Stocks)."""
+    if "FinInstrmNm" in df_bhav.columns and "TckrSymb" not in df_bhav.columns:
+        df_bhav = df_bhav.rename(columns={"FinInstrmNm": "TckrSymb"})
+
+    ist_now = get_ist_now()
+    today = ist_now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+
+    # Get Underlying Spot / Futures reference price
+    futures = df_bhav[df_bhav["FinInstrmTp"].isin(["STF", "IDF"])].copy()
+    futures["XpryDt"] = pd.to_datetime(futures["XpryDt"])
+    futures = futures[futures["XpryDt"] >= today].sort_values("XpryDt")
+    if futures.empty:
+        return pd.DataFrame()
+
+    # Nearest expiry per symbol
+    near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]]
+    near_fut = near_fut.rename(columns={"ClsPric": "RefPrice", "XpryDt": "TargetExpiry"})
+
+    options = df_bhav[df_bhav["OptnTp"].isin(["CE", "PE"])].copy()
+    options["XpryDt"] = pd.to_datetime(options["XpryDt"])
+
+    if is_index:
+        options = options[options["TckrSymb"].isin(INDEX_SYMBOLS)]
+        max_dist_pct = 0.02   # +/- 2% around spot/futures (ATM to OTM-3)
+    else:
+        options = options[~options["TckrSymb"].isin(INDEX_SYMBOLS)]
+        max_dist_pct = 0.04   # +/- 4% around spot/futures (ATM to OTM-1)
+
+    merged = pd.merge(options, near_fut, on="TckrSymb")
+    merged = merged[merged["XpryDt"] == merged["TargetExpiry"]]
+
+    # Filter strike distance from reference price
+    merged["DistPct"] = abs(merged["StrkPric"] - merged["RefPrice"]) / merged["RefPrice"]
+    merged = merged[merged["DistPct"] <= max_dist_pct].copy()
+    merged["XpryDt"] = merged["XpryDt"].dt.normalize()
+
+    # Exact merge logic from your working app.py
+    result = pd.merge(
+        merged,
+        df_json,
+        left_on=["TckrSymb", "StrkPric", "OptnTp", "XpryDt"],
+        right_on=["underlying_symbol", "strike_price", "instrument_type", "expiry_dt"],
+        how="inner",
+    )
+
+    if result.empty:
+        return pd.DataFrame()
+
+    # Camarilla R4 + Trigger calculation
+    result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
+    result["Positional_Trigger"] = result["ClsPric"] * 2
+    result["EOD_OI"] = pd.to_numeric(result.get("OpnIntrst", 0), errors="coerce").fillna(0)
+
+    return result[[
+        "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "RefPrice",
+        "ClsPric", "Camarilla_R4", "Positional_Trigger", "EOD_OI", "instrument_key"
+    ]]
+
+
+def fetch_ltp_v3(instrument_keys, token):
+    """Uses your exact working Upstox v3 LTP batch fetcher."""
+    if not token or not instrument_keys:
+        return {}
+
     url = "https://upstox.com"
-    unique_pairs = missing_df[["TckrSymb", "XpryDt"]].drop_duplicates().head(40)
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    batch_size = 50
+    ltp_map = {}
+    batches = [instrument_keys[i:i + batch_size] for i in range(0, len(instrument_keys), batch_size)]
 
-    for _, row in unique_pairs.iterrows():
-        sym = str(row["TckrSymb"]).strip()
-        exp = str(row["XpryDt"]).strip()
-        exch = "BSE" if sym == "SENSEX" else "NSE"
-        params = {"query": sym, "exchanges": exch, "segments": "FO", "expiry": exp, "records": 50}
+    def fetch_batch(batch):
+        params = {"instrument_key": ",".join(batch)}
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=5).json()
-            if resp.get("status") == "success":
-                for item in resp.get("data", []):
-                    item_sym = str(item.get("asset_symbol") or item.get("underlying_symbol") or item.get("name", "")).strip()
-                    if item_sym == sym and item.get("instrument_type") in ["CE", "PE"]:
-                        k = f"{sym}_{exp}_{float(item['strike_price'])}_{item['instrument_type']}"
-                        key_to_inst[k] = item["instrument_key"]
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success":
+                    out = {}
+                    for _, details in data.get("data", {}).items():
+                        inst_token = details.get("instrument_token")
+                        last_price = details.get("last_price")
+                        if inst_token is not None:
+                            out[inst_token] = last_price
+                    return out
         except Exception:
-            continue
-    return key_to_inst
+            pass
+        return {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(fetch_batch, b) for b in batches]
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if res:
+                ltp_map.update(res)
+    return ltp_map
 
 
-def fetch_live_quotes(access_token, key_to_inst, target_keys):
-    inst_to_key = {v: k for k, v in key_to_inst.items() if k in set(target_keys)}
-    inst_keys = list(inst_to_key.keys())
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-    url = "https://upstox.com"
-    records = []
-
-    for i in range(0, len(inst_keys), 500):
-        batch = ",".join(inst_keys[i:i+500])
-        resp = requests.get(url, headers=headers, params={"instrument_key": batch}, timeout=15).json()
-        if resp.get("status") == "success":
-            for inst_key, data in resp["data"].items():
-                depth = data.get("depth", {})
-                buy_item = next(iter(depth.get("buy", [])), {})
-                sell_item = next(iter(depth.get("sell", [])), {})
-                best_bid = buy_item.get("price", 0)
-                best_ask = sell_item.get("price", 0)
-                records.append({
-                    "key": inst_to_key.get(inst_key),
-                    "ltp": data.get("last_price", 0),
-                    "volume": data.get("volume", 0),
-                    "live_oi": data.get("oi", 0),
-                    "bid": best_bid,
-                    "ask": best_ask
-                })
-    return pd.DataFrame(records)
-
-
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Configuration")
-    access_token = st.text_input("Upstox Access Token", type="password")
+    saved_tok = load_saved_token()
+    access_token = st.text_input("Upstox Access Token", value=saved_tok, type="password")
 
-    st.header("Upload Bhavcopy Files")
-    daily_file = st.file_uploader("1. Intraday / Previous Day Bhavcopy", type=["csv", "zip"])
-    weekly_file = st.file_uploader("2. Weekly Bhavcopy (Optional)", type=["csv", "zip"])
-    monthly_file = st.file_uploader("3. Monthly Bhavcopy (Optional)", type=["csv", "zip"])
+    st.markdown("---")
+    st.header("Instrument Masters")
+    if st.button("🔄 Update NSE & BSE (SENSEX) JSON", use_container_width=True):
+        with st.spinner("Updating NSE.json and BSE.json..."):
+            ok_nse = download_json_gz("https://upstox.com", NSE_JSON_PATH)
+            ok_bse = download_json_gz("https://upstox.com", BSE_JSON_PATH)
+            st.cache_data.clear()
+            if ok_nse:
+                st.success("NSE.json updated!")
+            if ok_bse:
+                st.success("BSE.json (SENSEX) updated!")
 
-col1, col2, col3 = st.columns(3)
-with col1:
+    st.markdown("---")
+    st.header("Bhavcopy Files")
+    st.caption("Automatically uses files uploaded in main app, or upload new ones below:")
+    up_i = st.file_uploader("Intraday / Prev Day Bhavcopy", type=["zip", "csv"], key="ob_i")
+    up_w = st.file_uploader("Weekly Bhavcopy (Optional)", type=["zip", "csv"], key="ob_w")
+    up_m = st.file_uploader("Monthly Bhavcopy (Optional)", type=["zip", "csv"], key="ob_m")
+
+# --- MAIN CONTROLS ---
+c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1])
+with c1:
     segment = st.radio(
         "Segment Focus",
         ["Index Options (NIFTY / BANKNIFTY / SENSEX)", "Stock Options (NSE F&O)"],
-        horizontal=True
+        horizontal=True,
     )
-with col2:
-    require_confluence = st.checkbox("Require Multi-Timeframe Confluence (Weekly + Monthly)", value=True)
-with col3:
-    refresh_btn = st.button("⚡ Refresh Live Quotes", use_container_width=True)
+with c2:
+    trigger_mode = st.selectbox("Trigger Baseline", ["Camarilla R4 (Intraday)", "2x Previous Close (Positional)"])
+with c3:
+    require_confluence = st.checkbox("Require Weekly/Monthly Alignment", value=False)
+with c4:
+    refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
 
-if daily_file and access_token:
-    daily_df = load_bhavcopy_zip(daily_file)
-    weekly_df = load_bhavcopy_zip(weekly_file)
-    monthly_df = load_bhavcopy_zip(monthly_file)
+df_json = load_instrument_masters()
 
-    is_index = "Index" in segment
-    if is_index:
-        sub_df = daily_df[daily_df["TckrSymb"].isin(INDEX_SYMBOLS)].copy()
-        max_dist, min_vol, max_spread = 0.02, 5000, 0.015
-    else:
-        sub_df = daily_df[~daily_df["TckrSymb"].isin(INDEX_SYMBOLS)].copy()
-        max_dist, min_vol, max_spread = 0.05, 300, 0.03
-
-    if (sub_df["Spot_Ref"] > 0).any():
-        sub_df["Dist_Pct"] = abs(sub_df["StrkPric"] - sub_df["Spot_Ref"]) / sub_df["Spot_Ref"]
-        sub_df = sub_df[sub_df["Dist_Pct"] <= max_dist]
-
-    cache_key = f"quotes_{segment}"
-    if refresh_btn or cache_key not in st.session_state or st.session_state[cache_key].empty:
-        with st.spinner("Fetching live Upstox quotes..."):
-            inst_map = load_local_instrument_map()
-            inst_map = resolve_missing_via_api(access_token, inst_map, sub_df)
-            st.session_state[cache_key] = fetch_live_quotes(access_token, inst_map, sub_df["key"].tolist())
-
-    live_df = st.session_state.get(cache_key, pd.DataFrame())
-
-    if not live_df.empty:
-        st.caption(f"Matched {len(live_df)} live contracts from Upstox.")
-        merged = pd.merge(sub_df, live_df, on="key", how="inner")
-        merged.rename(columns={"Trigger": "Daily_Trigger"}, inplace=True)
-
-        merged["Spread_Pct"] = (merged["ask"] - merged["bid"]) / merged["ltp"].replace(0, np.nan)
-        merged = merged[
-            (merged["volume"] >= min_vol) &
-            (merged["Spread_Pct"] <= max_spread) &
-            (merged["live_oi"] > merged["EOD_OI"]) &
-            (merged["ltp"] > merged["Daily_Trigger"])
-        ]
-
-        if weekly_df is not None:
-            wk = weekly_df[["key", "Trigger"]].rename(columns={"Trigger": "Weekly_Trigger"})
-            merged = pd.merge(merged, wk, on="key", how="left")
-            if require_confluence:
-                merged = merged[merged["ltp"] > merged["Weekly_Trigger"]]
-
-        if monthly_df is not None and not is_index:
-            mo = monthly_df[["key", "Trigger"]].rename(columns={"Trigger": "Monthly_Trigger"})
-            merged = pd.merge(merged, mo, on="key", how="left")
-            if require_confluence:
-                merged = merged[merged["ltp"] > merged["Monthly_Trigger"]]
-
-        merged["Change_%"] = ((merged["ltp"] - merged["Daily_Trigger"]) / merged["Daily_Trigger"]) * 100
-        merged = merged.sort_values(by="Change_%", ascending=False)
-
-        display_cols = ["TckrSymb", "XpryDt", "StrkPric", "Daily_Trigger", "ltp", "Change_%", "volume", "live_oi"]
-        if "Weekly_Trigger" in merged.columns:
-            display_cols.insert(4, "Weekly_Trigger")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Calls (CE)")
-            ce_df = merged[merged["OptnTp"] == "CE"]
-            st.dataframe(ce_df[display_cols].style.format({"Change_%": "{:.2f}%"}), use_container_width=True)
-        with c2:
-            st.subheader("Puts (PE)")
-            pe_df = merged[merged["OptnTp"] == "PE"]
-            st.dataframe(pe_df[display_cols].style.format({"Change_%": "{:.2f}%"}), use_container_width=True)
-    else:
-        st.warning("No matching live quotes returned. Check if your Upstox Access Token is active (tokens expire daily at 3:30 AM IST).")
+if df_json.empty:
+    st.error("NSE.json not found. Click '🔄 Update NSE & BSE (SENSEX) JSON' in the sidebar.")
 else:
-    st.info("Enter your Upstox Access Token and upload at least the Intraday/Daily Bhavcopy in the sidebar to begin.")
+    # Load from uploader or existing saved files in data/
+    df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
+    df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
+    df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
+
+    if df_i_raw is None:
+        st.info("Upload your Intraday / Previous Day Bhavcopy in the sidebar (or in the main app page) to begin.")
+    else:
+        is_index = "Index" in segment
+        daily_df = parse_bhavcopy_multi_strike(df_i_raw, df_json, is_index=is_index)
+
+        if daily_df.empty:
+            st.warning("No matching contracts found for this segment. If scanning SENSEX, click '🔄 Update NSE & BSE (SENSEX) JSON' in the sidebar.")
+        else:
