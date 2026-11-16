@@ -12,19 +12,18 @@ st.title("🔥 Opening Breakout & Confluence Scanner")
 
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
 
-# --- HELPER FUNCTIONS ---
-def load_bhavcopy_zip(uploaded_file) -> pd.DataFrame:
+
+def load_bhavcopy_zip(uploaded_file):
     if uploaded_file is None:
         return None
     if uploaded_file.name.endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
             csv_files = [f for f in z.namelist() if f.endswith(".csv")]
-            with z.open(csv_files) as f:
+            with z.open(csv_files[0]) as f:
                 df = pd.read_csv(f)
     else:
         df = pd.read_csv(uploaded_file)
 
-    # Normalize BSE column names if SENSEX BSE Bhavcopy is uploaded
     if "FinInstrmNm" in df.columns and "TckrSymb" not in df.columns:
         df.rename(columns={"FinInstrmNm": "TckrSymb"}, inplace=True)
 
@@ -41,7 +40,7 @@ def load_bhavcopy_zip(uploaded_file) -> pd.DataFrame:
     return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
 
 
-def parse_instrument_bytes(raw_bytes: bytes) -> pd.DataFrame:
+def parse_instrument_bytes(raw_bytes):
     if raw_bytes[:2] == b"\x1f\x8b":
         text = gzip.decompress(raw_bytes).decode("utf-8")
     else:
@@ -50,8 +49,7 @@ def parse_instrument_bytes(raw_bytes: bytes) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def fetch_upstox_instrument_map() -> dict:
-    """Downloads NSE and BSE instrument masters without Authorization header (required by Upstox S3)."""
+def fetch_upstox_instrument_map():
     urls = [
         "https://upstox.com",
         "https://upstox.com"
@@ -82,7 +80,7 @@ def fetch_upstox_instrument_map() -> dict:
     return dict(zip(fo_df["key"], fo_df["instrument_key"]))
 
 
-def build_map_from_uploaded_json(uploaded_files) -> dict:
+def build_map_from_uploaded_json(uploaded_files):
     dfs = [parse_instrument_bytes(f.read()) for f in uploaded_files]
     df = pd.concat(dfs, ignore_index=True)
     fo_df = df[df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
@@ -97,7 +95,7 @@ def build_map_from_uploaded_json(uploaded_files) -> dict:
     return dict(zip(fo_df["key"], fo_df["instrument_key"]))
 
 
-def fetch_live_quotes(access_token: str, key_to_inst: dict, target_keys: list) -> pd.DataFrame:
+def fetch_live_quotes(access_token, key_to_inst, target_keys):
     inst_to_key = {v: k for k, v in key_to_inst.items() if k in set(target_keys)}
     inst_keys = list(inst_to_key.keys())
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
@@ -112,8 +110,8 @@ def fetch_live_quotes(access_token: str, key_to_inst: dict, target_keys: list) -
                 depth = data.get("depth", {})
                 buy_list = depth.get("buy", [])
                 sell_list = depth.get("sell", [])
-                best_bid = buy_list.get("price", 0) if buy_list else 0
-                best_ask = sell_list.get("price", 0) if sell_list else 0
+                best_bid = buy_list[0].get("price", 0) if buy_list else 0
+                best_ask = sell_list[0].get("price", 0) if sell_list else 0
                 records.append({
                     "key": inst_to_key.get(inst_key),
                     "ltp": data.get("last_price", 0),
@@ -125,11 +123,10 @@ def fetch_live_quotes(access_token: str, key_to_inst: dict, target_keys: list) -
     return pd.DataFrame(records)
 
 
-# --- SIDEBAR CONFIGURATION ---
 with st.sidebar:
     st.header("Configuration")
     access_token = st.text_input("Upstox Access Token", type="password")
-    
+
     st.header("Upload Bhavcopy Files")
     daily_file = st.file_uploader("1. Intraday / Previous Day Bhavcopy", type=["csv", "zip"])
     weekly_file = st.file_uploader("2. Weekly Bhavcopy (Optional)", type=["csv", "zip"])
@@ -142,7 +139,6 @@ with st.sidebar:
             accept_multiple_files=True
         )
 
-# --- MAIN UI CONTROLS ---
 col1, col2, col3 = st.columns(3)
 with col1:
     segment = st.radio(
@@ -168,7 +164,6 @@ if daily_file and access_token:
         sub_df = daily_df[~daily_df["TckrSymb"].isin(INDEX_SYMBOLS)].copy()
         max_dist, min_vol, max_spread = 0.05, 300, 0.03
 
-    # Pre-filter by Strike Distance before calling Upstox API to save quota & speed up refresh
     if (sub_df["Spot_Ref"] > 0).any():
         sub_df["Dist_Pct"] = abs(sub_df["StrkPric"] - sub_df["Spot_Ref"]) / sub_df["Spot_Ref"]
         sub_df = sub_df[sub_df["Dist_Pct"] <= max_dist]
@@ -228,3 +223,6 @@ if daily_file and access_token:
                 pe_df = merged[merged["OptnTp"] == "PE"]
                 st.dataframe(pe_df[display_cols].style.format({"Change_%": "{:.2f}%"}), use_container_width=True)
         else:
+            st.warning("No matching live quotes returned. Check if your Upstox Access Token is valid or if market hours are closed.")
+else:
+    st.info("Enter your Upstox Access Token and upload at least the Intraday/Daily Bhavcopy in the sidebar to begin.")
