@@ -40,39 +40,49 @@ def load_bhavcopy_zip(uploaded_file) -> pd.DataFrame:
     return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
 
 
-def download_upstox_json_gz(url: str) -> pd.DataFrame:
-    """Safely downloads and parses Upstox .json.gz files without BadGzipFile errors."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    raw_bytes = resp.content
-    if raw_bytes[:2] == b"\x1f\x8b":
-        decompressed = gzip.decompress(raw_bytes).decode("utf-8")
-        return pd.read_json(io.StringIO(decompressed))
-    else:
-        return pd.read_json(io.StringIO(raw_bytes.decode("utf-8")))
+def download_upstox_instruments_df(access_token: str) -> pd.DataFrame:
+    """Fetches Upstox instrument master reliably via Upstox CDN or API."""
+    urls = [
+        "https://upstox.com",
+        "https://upstox.com"
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json, text/plain, */*",
+        "Authorization": f"Bearer {access_token}"
+    }
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                raw = resp.content
+                if raw[:2] == b"\x1f\x8b":
+                    text = gzip.decompress(raw).decode("utf-8")
+                else:
+                    text = raw.decode("utf-8")
+                if text.lstrip().startswith("[") or text.lstrip().startswith("{"):
+                    return pd.read_json(io.StringIO(text))
+        except Exception:
+            continue
+    raise RuntimeError("Unable to download Upstox Instrument JSON. Please verify your Access Token or try again.")
 
 
 @st.cache_data(ttl=3600)
-def get_upstox_instrument_map() -> dict:
-    nse_url = "https://upstox.com"
-    bse_url = "https://upstox.com"
+def get_upstox_instrument_map(access_token: str) -> dict:
+    df = download_upstox_instruments_df(access_token)
     
-    nse_df = download_upstox_json_gz(nse_url)
-    bse_df = download_upstox_json_gz(bse_url)
+    # Keep NSE_FO and BSE_FO (for SENSEX)
+    fo_df = df[df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
+    fo_df = fo_df[fo_df["instrument_type"].isin(["CE", "PE"])].copy()
     
-    nse_fo = nse_df[nse_df["segment"] == "NSE_FO"]
-    bse_fo = bse_df[(bse_df["segment"] == "BSE_FO") & (bse_df["name"] == "SENSEX")]
-    
-    combined = pd.concat([nse_fo, bse_fo], ignore_index=True)
-    combined["expiry_dt"] = pd.to_datetime(combined["expiry"], unit="ms").dt.strftime("%Y-%m-%d")
-    combined["key"] = (
-        combined["name"].str.strip() + "_" +
-        combined["expiry_dt"] + "_" +
-        combined["strike_price"].astype(float).astype(str) + "_" +
-        combined["instrument_type"].str.strip()
+    fo_df["expiry_dt"] = pd.to_datetime(fo_df["expiry"], unit="ms").dt.strftime("%Y-%m-%d")
+    fo_df["key"] = (
+        fo_df["name"].astype(str).str.strip() + "_" +
+        fo_df["expiry_dt"] + "_" +
+        fo_df["strike_price"].astype(float).astype(str) + "_" +
+        fo_df["instrument_type"].astype(str).str.strip()
     )
-    return dict(zip(combined["key"], combined["instrument_key"]))
+    return dict(zip(fo_df["key"], fo_df["instrument_key"]))
 
 
 def fetch_live_quotes(access_token: str, key_to_inst: dict, target_keys: list) -> pd.DataFrame:
@@ -146,7 +156,7 @@ if daily_file and access_token:
 
     if refresh_btn or "live_quotes" not in st.session_state:
         with st.spinner("Fetching live Upstox quotes..."):
-            inst_map = get_upstox_instrument_map()
+            inst_map = get_upstox_instrument_map(access_token)
             st.session_state["live_quotes"] = fetch_live_quotes(access_token, inst_map, sub_df["key"].tolist())
 
     live_df = st.session_state.get("live_quotes", pd.DataFrame())
