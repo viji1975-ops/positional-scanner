@@ -38,49 +38,57 @@ def load_bhavcopy_zip(uploaded_file):
     return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
 
 
-def resolve_instrument_keys_via_api(access_token, sub_df):
-    """Maps Bhavcopy contracts to Upstox instrument_keys using local repo file or Upstox v2 Search API."""
+@st.cache_data(ttl=3600)
+def load_local_instrument_map():
+    """Loads instrument keys instantly from local NSE.json.gz / BSE.json.gz in repo."""
+    key_to_inst = {}
+    for fname in ["NSE.json.gz", "BSE.json.gz"]:
+        if os.path.exists(fname):
+            local_df = pd.read_json(fname, compression="gzip")
+            fo_df = local_df[local_df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
+            fo_df = fo_df[fo_df["instrument_type"].isin(["CE", "PE"])].copy()
+            
+            # Use asset_symbol or underlying_symbol if present, fallback to name
+            sym_col = "asset_symbol" if "asset_symbol" in fo_df.columns else (
+                "underlying_symbol" if "underlying_symbol" in fo_df.columns else "name"
+            )
+            fo_df["sym"] = fo_df[sym_col].fillna(fo_df["name"]).astype(str).str.strip()
+            fo_df["expiry_dt"] = pd.to_datetime(fo_df["expiry"], unit="ms").dt.strftime("%Y-%m-%d")
+            fo_df["key"] = (
+                fo_df["sym"] + "_" +
+                fo_df["expiry_dt"] + "_" +
+                fo_df["strike_price"].astype(float).astype(str) + "_" +
+                fo_df["instrument_type"].astype(str).str.strip()
+            )
+            key_to_inst.update(dict(zip(fo_df["key"], fo_df["instrument_key"])))
+    return key_to_inst
+
+
+def resolve_missing_via_api(access_token, key_to_inst, sub_df):
+    """Queries Upstox Search API only for missing symbols (e.g., SENSEX if BSE.json.gz isn't local)."""
+    missing_df = sub_df[~sub_df["key"].isin(key_to_inst.keys())]
+    if missing_df.empty:
+        return key_to_inst
+
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
     url = "https://upstox.com"
-    key_to_inst = {}
-
-    if os.path.exists("NSE.json.gz"):
-        local_df = pd.read_json("NSE.json.gz", compression="gzip")
-        fo_df = local_df[local_df["segment"].isin(["NSE_FO", "BSE_FO"])].copy()
-        fo_df = fo_df[fo_df["instrument_type"].isin(["CE", "PE"])].copy()
-        fo_df["expiry_dt"] = pd.to_datetime(fo_df["expiry"], unit="ms").dt.strftime("%Y-%m-%d")
-        fo_df["key"] = (
-            fo_df["name"].astype(str).str.strip() + "_" +
-            fo_df["expiry_dt"] + "_" +
-            fo_df["strike_price"].astype(float).astype(str) + "_" +
-            fo_df["instrument_type"].astype(str).str.strip()
-        )
-        key_to_inst.update(dict(zip(fo_df["key"], fo_df["instrument_key"])))
-
-    missing_df = sub_df[~sub_df["key"].isin(key_to_inst.keys())]
-    unique_pairs = missing_df[["TckrSymb", "XpryDt"]].drop_duplicates()
+    unique_pairs = missing_df[["TckrSymb", "XpryDt"]].drop_duplicates().head(40)
 
     for _, row in unique_pairs.iterrows():
         sym = str(row["TckrSymb"]).strip()
         exp = str(row["XpryDt"]).strip()
         exch = "BSE" if sym == "SENSEX" else "NSE"
-        params = {
-            "query": sym,
-            "exchanges": exch,
-            "segments": "FO",
-            "expiry": exp,
-            "records": 30
-        }
+        params = {"query": sym, "exchanges": exch, "segments": "FO", "expiry": exp, "records": 50}
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=10).json()
+            resp = requests.get(url, headers=headers, params=params, timeout=5).json()
             if resp.get("status") == "success":
                 for item in resp.get("data", []):
-                    if item.get("name", "").strip() == sym and item.get("instrument_type") in ["CE", "PE"]:
+                    item_sym = str(item.get("asset_symbol") or item.get("underlying_symbol") or item.get("name", "")).strip()
+                    if item_sym == sym and item.get("instrument_type") in ["CE", "PE"]:
                         k = f"{sym}_{exp}_{float(item['strike_price'])}_{item['instrument_type']}"
                         key_to_inst[k] = item["instrument_key"]
         except Exception:
             continue
-
     return key_to_inst
 
 
@@ -93,7 +101,7 @@ def fetch_live_quotes(access_token, key_to_inst, target_keys):
 
     for i in range(0, len(inst_keys), 500):
         batch = ",".join(inst_keys[i:i+500])
-        resp = requests.get(url, headers=headers, params={"instrument_key": batch}).json()
+        resp = requests.get(url, headers=headers, params={"instrument_key": batch}, timeout=15).json()
         if resp.get("status") == "success":
             for inst_key, data in resp["data"].items():
                 depth = data.get("depth", {})
@@ -150,14 +158,17 @@ if daily_file and access_token:
         sub_df["Dist_Pct"] = abs(sub_df["StrkPric"] - sub_df["Spot_Ref"]) / sub_df["Spot_Ref"]
         sub_df = sub_df[sub_df["Dist_Pct"] <= max_dist]
 
-    if refresh_btn or "live_quotes" not in st.session_state:
-        with st.spinner("Resolving contracts & fetching live Upstox quotes..."):
-            inst_map = resolve_instrument_keys_via_api(access_token, sub_df)
-            st.session_state["live_quotes"] = fetch_live_quotes(access_token, inst_map, sub_df["key"].tolist())
+    cache_key = f"quotes_{segment}"
+    if refresh_btn or cache_key not in st.session_state or st.session_state[cache_key].empty:
+        with st.spinner("Fetching live Upstox quotes..."):
+            inst_map = load_local_instrument_map()
+            inst_map = resolve_missing_via_api(access_token, inst_map, sub_df)
+            st.session_state[cache_key] = fetch_live_quotes(access_token, inst_map, sub_df["key"].tolist())
 
-    live_df = st.session_state.get("live_quotes", pd.DataFrame())
+    live_df = st.session_state.get(cache_key, pd.DataFrame())
 
     if not live_df.empty:
+        st.caption(f"Matched {len(live_df)} live contracts from Upstox.")
         merged = pd.merge(sub_df, live_df, on="key", how="inner")
         merged.rename(columns={"Trigger": "Daily_Trigger"}, inplace=True)
 
@@ -198,6 +209,6 @@ if daily_file and access_token:
             pe_df = merged[merged["OptnTp"] == "PE"]
             st.dataframe(pe_df[display_cols].style.format({"Change_%": "{:.2f}%"}), use_container_width=True)
     else:
-        st.warning("No matching live quotes returned. Check if your Upstox Access Token is active or if market hours are closed.")
+        st.warning("No matching live quotes returned. Check if your Upstox Access Token is active (tokens expire daily at 3:30 AM IST).")
 else:
     st.info("Enter your Upstox Access Token and upload at least the Intraday/Daily Bhavcopy in the sidebar to begin.")
