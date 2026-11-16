@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import zipfile
+import gzip
 import io
 
 st.set_page_config(page_title="Opening Breakout Scanner", layout="wide")
@@ -16,8 +17,8 @@ def load_bhavcopy_zip(uploaded_file) -> pd.DataFrame:
         return None
     if uploaded_file.name.endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
-            csv_name = [f for f in z.namelist() if f.endswith(".csv")][0]
-            with z.open(csv_name) as f:
+            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
+            with z.open(csv_files[0]) as f:
                 df = pd.read_csv(f)
     else:
         df = pd.read_csv(uploaded_file)
@@ -39,13 +40,26 @@ def load_bhavcopy_zip(uploaded_file) -> pd.DataFrame:
     return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
 
 
+def download_upstox_json_gz(url: str) -> pd.DataFrame:
+    """Safely downloads and parses Upstox .json.gz files without BadGzipFile errors."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    raw_bytes = resp.content
+    if raw_bytes[:2] == b"\x1f\x8b":
+        decompressed = gzip.decompress(raw_bytes).decode("utf-8")
+        return pd.read_json(io.StringIO(decompressed))
+    else:
+        return pd.read_json(io.StringIO(raw_bytes.decode("utf-8")))
+
+
 @st.cache_data(ttl=3600)
 def get_upstox_instrument_map() -> dict:
     nse_url = "https://upstox.com"
     bse_url = "https://upstox.com"
     
-    nse_df = pd.read_json(nse_url, compression="gzip")
-    bse_df = pd.read_json(bse_url, compression="gzip")
+    nse_df = download_upstox_json_gz(nse_url)
+    bse_df = download_upstox_json_gz(bse_url)
     
     nse_fo = nse_df[nse_df["segment"] == "NSE_FO"]
     bse_fo = bse_df[(bse_df["segment"] == "BSE_FO") & (bse_df["name"] == "SENSEX")]
@@ -74,8 +88,10 @@ def fetch_live_quotes(access_token: str, key_to_inst: dict, target_keys: list) -
         if resp.get("status") == "success":
             for inst_key, data in resp["data"].items():
                 depth = data.get("depth", {})
-                best_bid = depth.get("buy", [{}])[0].get("price", 0) if depth.get("buy") else 0
-                best_ask = depth.get("sell", [{}])[0].get("price", 0) if depth.get("sell") else 0
+                buy_list = depth.get("buy", [])
+                sell_list = depth.get("sell", [])
+                best_bid = buy_list[0].get("price", 0) if buy_list else 0
+                best_ask = sell_list[0].get("price", 0) if sell_list else 0
                 records.append({
                     "key": inst_to_key.get(inst_key),
                     "ltp": data.get("last_price", 0),
@@ -98,7 +114,7 @@ with st.sidebar:
     monthly_file = st.file_uploader("3. Monthly Bhavcopy (Optional)", type=["csv", "zip"])
 
 # --- MAIN UI CONTROLS ---
-col1, col2, col3 = st.columns([2, 2, 1])
+col1, col2, col3 = st.columns(3)
 with col1:
     segment = st.radio(
         "Segment Focus",
@@ -175,5 +191,7 @@ if daily_file and access_token:
             st.subheader("Puts (PE)")
             pe_df = merged[merged["OptnTp"] == "PE"]
             st.dataframe(pe_df[display_cols].style.format({"Change_%": "{:.2f}%"}), use_container_width=True)
+    else:
+        st.warning("No matching live quotes returned. Check if your Upstox Access Token is active or if market hours are closed.")
 else:
     st.info("Enter your Upstox Access Token and upload at least the Intraday/Daily Bhavcopy in the sidebar to begin.")
