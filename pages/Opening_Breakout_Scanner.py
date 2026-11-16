@@ -90,21 +90,18 @@ def extract_csv_bytes(uploaded_file):
 
 
 def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
-    """Extracts near-ATM option strikes (ATM to OTM-3 for Indices, ATM to OTM-1 for Stocks)."""
     if "FinInstrmNm" in df_bhav.columns and "TckrSymb" not in df_bhav.columns:
         df_bhav = df_bhav.rename(columns={"FinInstrmNm": "TckrSymb"})
 
     ist_now = get_ist_now()
     today = ist_now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
 
-    # Get Underlying Spot / Futures reference price
     futures = df_bhav[df_bhav["FinInstrmTp"].isin(["STF", "IDF"])].copy()
     futures["XpryDt"] = pd.to_datetime(futures["XpryDt"])
     futures = futures[futures["XpryDt"] >= today].sort_values("XpryDt")
     if futures.empty:
         return pd.DataFrame()
 
-    # Nearest expiry per symbol
     near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]]
     near_fut = near_fut.rename(columns={"ClsPric": "RefPrice", "XpryDt": "TargetExpiry"})
 
@@ -113,20 +110,18 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
 
     if is_index:
         options = options[options["TckrSymb"].isin(INDEX_SYMBOLS)]
-        max_dist_pct = 0.02   # +/- 2% around spot/futures (ATM to OTM-3)
+        max_dist_pct = 0.02
     else:
         options = options[~options["TckrSymb"].isin(INDEX_SYMBOLS)]
-        max_dist_pct = 0.04   # +/- 4% around spot/futures (ATM to OTM-1)
+        max_dist_pct = 0.04
 
     merged = pd.merge(options, near_fut, on="TckrSymb")
     merged = merged[merged["XpryDt"] == merged["TargetExpiry"]]
 
-    # Filter strike distance from reference price
     merged["DistPct"] = abs(merged["StrkPric"] - merged["RefPrice"]) / merged["RefPrice"]
     merged = merged[merged["DistPct"] <= max_dist_pct].copy()
     merged["XpryDt"] = merged["XpryDt"].dt.normalize()
 
-    # Exact merge logic from your working app.py
     result = pd.merge(
         merged,
         df_json,
@@ -138,7 +133,6 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
     if result.empty:
         return pd.DataFrame()
 
-    # Camarilla R4 + Trigger calculation
     result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
     result["Positional_Trigger"] = result["ClsPric"] * 2
     result["EOD_OI"] = pd.to_numeric(result.get("OpnIntrst", 0), errors="coerce").fillna(0)
@@ -150,7 +144,6 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
 
 
 def fetch_ltp_v3(instrument_keys, token):
-    """Uses your exact working Upstox v3 LTP batch fetcher."""
     if not token or not instrument_keys:
         return {}
 
@@ -187,7 +180,6 @@ def fetch_ltp_v3(instrument_keys, token):
     return ltp_map
 
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.header("Configuration")
     saved_tok = load_saved_token()
@@ -212,7 +204,6 @@ with st.sidebar:
     up_w = st.file_uploader("Weekly Bhavcopy (Optional)", type=["zip", "csv"], key="ob_w")
     up_m = st.file_uploader("Monthly Bhavcopy (Optional)", type=["zip", "csv"], key="ob_m")
 
-# --- MAIN CONTROLS ---
 c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1])
 with c1:
     segment = st.radio(
@@ -232,7 +223,6 @@ df_json = load_instrument_masters()
 if df_json.empty:
     st.error("NSE.json not found. Click '🔄 Update NSE & BSE (SENSEX) JSON' in the sidebar.")
 else:
-    # Load from uploader or existing saved files in data/
     df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
     df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
     df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
@@ -246,3 +236,13 @@ else:
         if daily_df.empty:
             st.warning("No matching contracts found for this segment. If scanning SENSEX, click '🔄 Update NSE & BSE (SENSEX) JSON' in the sidebar.")
         else:
+            trig_col = "Camarilla_R4" if "Camarilla" in trigger_mode else "Positional_Trigger"
+            daily_df["Daily_Trigger"] = daily_df[trig_col]
+
+            if df_w_raw is not None:
+                wk_df = parse_bhavcopy_multi_strike(df_w_raw, df_json, is_index=is_index)
+                if not wk_df.empty:
+                    wk_sub = wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"})
+                    daily_df = pd.merge(daily_df, wk_sub, on="instrument_key", how="left")
+
+            if df_m_raw is not None:
