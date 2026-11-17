@@ -17,6 +17,8 @@ DATA_DIR = "data"
 TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
 NSE_JSON_PATH = "NSE.json"
 NSE_GZ_PATH = "NSE.json.gz"
+BSE_JSON_PATH = "BSE.json"
+BSE_GZ_PATH = "BSE.json.gz"
 FILES = {"Monthly": os.path.join(DATA_DIR, "monthly.csv"), "Weekly": os.path.join(DATA_DIR, "weekly.csv"), "Intraday": os.path.join(DATA_DIR, "intraday.csv")}
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
 
@@ -45,44 +47,61 @@ def extract_csv_bytes(uploaded_file):
     return pd.read_csv(uploaded_file)
 
 def save_uploaded_instrument_file(uploaded_file):
-    """Saves user-uploaded NSE.json / NSE.json.gz / BSE.json.gz cleanly to disk."""
     if uploaded_file is None:
         return
     fname = uploaded_file.name.lower()
-    target = "BSE.json" if "bse" in fname else NSE_JSON_PATH
-    if fname.endswith(".gz"):
-        with gzip.open(uploaded_file, "rb") as f_in:
-            with open(target, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
+    if "bse" in fname:
+        target = BSE_GZ_PATH if fname.endswith(".gz") else BSE_JSON_PATH
     else:
-        with open(target, "wb") as f_out:
-            f_out.write(uploaded_file.getbuffer())
+        target = NSE_GZ_PATH if fname.endswith(".gz") else NSE_JSON_PATH
+    with open(target, "wb") as f_out:
+        f_out.write(uploaded_file.getbuffer())
     st.cache_data.clear()
 
 @st.cache_data
-def load_nse_json_exact():
-    if (not os.path.exists(NSE_JSON_PATH) or os.path.getsize(NSE_JSON_PATH) < 50000) and os.path.exists(NSE_GZ_PATH):
-        try:
-            with gzip.open(NSE_GZ_PATH, "rb") as f_in:
-                with open(NSE_JSON_PATH, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-        except Exception:
-            pass
-
-    dfs = []
-    for path, seg in [(NSE_JSON_PATH, "NSE_FO"), ("BSE.json", "BSE_FO")]:
-        if os.path.exists(path) and os.path.getsize(path) > 50000:
+def load_nse_json_fast():
+    """Memory-safe loader: filters only NSE_FO and BSE_FO CE/PE options before building DataFrame."""
+    rows = []
+    sources = [
+        (NSE_GZ_PATH, True, "NSE_FO"),
+        (NSE_JSON_PATH, False, "NSE_FO"),
+        (BSE_GZ_PATH, True, "BSE_FO"),
+        (BSE_JSON_PATH, False, "BSE_FO"),
+    ]
+    loaded_segs = set()
+    for path, is_gz, target_seg in sources:
+        if target_seg in loaded_segs:
+            continue
+        if os.path.exists(path) and os.path.getsize(path) > 10000:
             try:
-                df = pd.read_json(path)
-                if "segment" in df.columns:
-                    df = df[df["segment"] == seg]
-                if seg == "BSE_FO" and "underlying_symbol" in df.columns:
-                    df = df[df["underlying_symbol"] == "SENSEX"]
-                df["expiry_dt"] = pd.to_datetime(df["expiry"], unit="ms").dt.normalize()
-                dfs.append(df)
+                if is_gz:
+                    with gzip.open(path, "rt", encoding="utf-8") as f:
+                        raw_list = json.load(f)
+                else:
+                    with open(path, "r", encoding="utf-8") as f:
+                        raw_list = json.load(f)
+
+                for item in raw_list:
+                    if item.get("segment") == target_seg and item.get("instrument_type") in ("CE", "PE"):
+                        u_sym = str(item.get("underlying_symbol") or item.get("asset_symbol") or item.get("name", "")).strip()
+                        if target_seg == "BSE_FO" and u_sym != "SENSEX":
+                            continue
+                        rows.append({
+                            "underlying_symbol": u_sym,
+                            "strike_price": float(item["strike_price"]),
+                            "instrument_type": item["instrument_type"],
+                            "expiry": item["expiry"],
+                            "instrument_key": item["instrument_key"],
+                        })
+                loaded_segs.add(target_seg)
             except Exception as e:
-                st.error(f"Error loading {path}: {e}")
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+                st.error(f"Error reading {path}: {e}")
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["expiry_dt"] = pd.to_datetime(df["expiry"], unit="ms").dt.normalize()
+    return df
 
 def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
     df_bhav = df_bhav.copy()
@@ -96,7 +115,7 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
     today = ist_now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
     futures = futures[futures["XpryDt"] >= today].sort_values("XpryDt")
     if futures.empty:
-        return pd.DataFrame(), "No future expiries found in uploaded Bhavcopy."
+        return pd.DataFrame(), "No future expiries (>= today) found in uploaded Bhavcopy."
 
     near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]].rename(columns={"ClsPric": "RefPrice", "XpryDt": "TargetExpiry"})
 
@@ -163,7 +182,7 @@ with st.sidebar:
     access_token = st.text_input("Upstox Access Token", value=load_saved_token(), type="password")
     st.markdown("---")
     st.header("Instrument Master (NSE/BSE)")
-    up_json = st.file_uploader("Upload NSE.json / NSE.json.gz / BSE.json.gz", type=["json", "gz"], key="ob_json")
+    up_json = st.file_uploader("Upload NSE.json.gz / BSE.json.gz", type=["json", "gz"], key="ob_json")
     if up_json is not None:
         save_uploaded_instrument_file(up_json)
         st.success(f"Loaded {up_json.name}!")
@@ -183,13 +202,13 @@ with c3:
 with c4:
     refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
 
-df_json = load_nse_json_exact()
+df_json = load_nse_json_fast()
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
 df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
 df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
 
 if df_json.empty:
-    st.warning("Upload NSE.json or NSE.json.gz in the sidebar under 'Instrument Master (NSE/BSE)' to begin.")
+    st.warning("Upload NSE.json.gz (and optionally BSE.json.gz) in the sidebar under 'Instrument Master (NSE/BSE)' to begin.")
 elif df_i_raw is None:
     st.info("Upload your Intraday / Previous Day Bhavcopy in the sidebar to begin.")
 elif not access_token:
@@ -202,12 +221,3 @@ else:
         st.warning(f"No matching contracts found: {status_msg}")
     else:
         daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
-        if df_w_raw is not None:
-            wk_df, _ = parse_bhavcopy_multi_strike(df_w_raw, df_json, is_index=is_index)
-            if not wk_df.empty:
-                wk_sub = wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"})
-                daily_df = pd.merge(daily_df, wk_sub, on="instrument_key", how="left")
-        if df_m_raw is not None:
-            mo_df, _ = parse_bhavcopy_multi_strike(df_m_raw, df_json, is_index=is_index)
-            if not mo_df.empty:
-                mo_sub = mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"})
