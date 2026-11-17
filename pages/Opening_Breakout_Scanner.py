@@ -36,31 +36,13 @@ def load_saved_token():
             pass
     return ""
 
-def download_json_gz(url, out_path):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        resp = requests.get(url, headers=headers, stream=True, timeout=30)
-        if resp.status_code == 200:
-            with open(out_path, "wb") as f_out:
-                with gzip.GzipFile(fileobj=resp.raw) as f_in:
-                    shutil.copyfileobj(f_in, f_out)
-            with open(out_path, "r", encoding="utf-8", errors="ignore") as check_f:
-                first_char = check_f.read(5).lstrip()
-                if first_char.startswith("[") or first_char.startswith("{"):
-                    return True
-            os.remove(out_path)
-    except Exception:
-        if os.path.exists(out_path):
-            os.remove(out_path)
-    return False
-
 @st.cache_data(ttl=3600)
 def load_instrument_masters():
     dfs = []
-    for path, seg in [(NSE_JSON_PATH, "NSE_FO"), (BSE_JSON_PATH, "BSE_FO")]:
+    for path, seg in [(NSE_JSON_PATH, "NSE_FO"), ("NSE.json.gz", "NSE_FO"), (BSE_JSON_PATH, "BSE_FO"), ("BSE.json.gz", "BSE_FO")]:
         if os.path.exists(path) and os.path.getsize(path) > 1000:
             try:
-                df_part = pd.read_json(path)
+                df_part = pd.read_json(path, compression="gzip") if path.endswith(".gz") else pd.read_json(path)
                 if "segment" in df_part.columns:
                     df_part = df_part[df_part["segment"] == seg]
                 if seg == "BSE_FO" and "underlying_symbol" in df_part.columns:
@@ -69,7 +51,7 @@ def load_instrument_masters():
                 dfs.append(df_part)
             except Exception:
                 continue
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["instrument_key"]) if dfs else pd.DataFrame()
 
 def extract_csv_bytes(uploaded_file):
     if uploaded_file.name.lower().endswith(".zip"):
@@ -80,7 +62,7 @@ def extract_csv_bytes(uploaded_file):
     return pd.read_csv(uploaded_file)
 
 def resolve_keys_via_search_api(merged_df, token):
-    """Maps options to Upstox instrument_keys via v2/instruments/search when local JSON isn't present."""
+    """Maps options to Upstox instrument_keys via v2/instruments/search."""
     if not token or merged_df.empty:
         return pd.DataFrame()
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
@@ -93,11 +75,12 @@ def resolve_keys_via_search_api(merged_df, token):
         exp_str = exp_dt.strftime("%Y-%m-%d")
         exch = "BSE" if sym == "SENSEX" else "NSE"
         try:
-            resp = requests.get(url, headers=headers, params={"query": sym, "exchanges": exch, "segments": "FO", "expiry": exp_str, "records": 50}, timeout=8)
+            resp = requests.get(url, headers=headers, params={"query": sym, "exchanges": exch, "segments": "FO", "expiry": exp_str, "records": 100}, timeout=8)
             if resp.status_code == 200 and resp.json().get("status") == "success":
                 for item in resp.json().get("data", []):
+                    tsym = str(item.get("trading_symbol", "")).strip()
                     u_sym = str(item.get("underlying_symbol") or item.get("asset_symbol") or item.get("name", "")).strip()
-                    if u_sym == sym and item.get("instrument_type") in ["CE", "PE"]:
+                    if (u_sym == sym or tsym.startswith(sym + " ")) and item.get("instrument_type") in ["CE", "PE"]:
                         mapping_rows.append({"TckrSymb": sym, "XpryDt": exp_dt.normalize(), "StrkPric": float(item["strike_price"]), "OptnTp": item["instrument_type"], "instrument_key": item["instrument_key"]})
         except Exception:
             continue
@@ -125,10 +108,20 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, token, is_index=True):
     merged["DistPct"] = abs(merged["StrkPric"] - merged["RefPrice"]) / merged["RefPrice"]
     merged = merged[merged["DistPct"] <= max_dist_pct].copy()
     merged["XpryDt"] = merged["XpryDt"].dt.normalize()
+    merged["StrkPric"] = merged["StrkPric"].astype(float)
+
+    result = pd.DataFrame()
     if not df_json.empty:
+        df_json = df_json.copy()
+        df_json["strike_price"] = df_json["strike_price"].astype(float)
         result = pd.merge(merged, df_json, left_on=["TckrSymb", "StrkPric", "OptnTp", "XpryDt"], right_on=["underlying_symbol", "strike_price", "instrument_type", "expiry_dt"], how="inner")
-    else:
-        result = resolve_keys_via_search_api(merged, token)
+
+    # Fallback or supplement via Search API (needed for SENSEX if BSE.json isn't present)
+    if result.empty or (is_index and "SENSEX" in merged["TckrSymb"].values and (result.empty or "SENSEX" not in result["TckrSymb"].values)):
+        api_res = resolve_keys_via_search_api(merged, token)
+        if not api_res.empty:
+            result = pd.concat([result, api_res], ignore_index=True).drop_duplicates(subset=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"])
+
     if result.empty:
         return pd.DataFrame()
     result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
@@ -159,21 +152,6 @@ with st.sidebar:
     st.header("Configuration")
     access_token = st.text_input("Upstox Access Token", value=load_saved_token(), type="password")
     st.markdown("---")
-    st.header("Instrument Masters")
-    if st.button("🔄 Update NSE & BSE (SENSEX) JSON", use_container_width=True):
-        with st.spinner("Updating NSE.json and BSE.json..."):
-            ok_nse = download_json_gz("https://upstox.com", NSE_JSON_PATH)
-            ok_bse = download_json_gz("https://upstox.com", BSE_JSON_PATH)
-            st.cache_data.clear()
-            if ok_nse:
-                st.success("NSE.json updated!")
-            else:
-                st.info("Using Upstox Search API automatically for NSE.")
-            if ok_bse:
-                st.success("BSE.json (SENSEX) updated!")
-            else:
-                st.info("Using Upstox Search API automatically for SENSEX.")
-    st.markdown("---")
     st.header("Bhavcopy Files")
     up_i = st.file_uploader("Intraday / Prev Day Bhavcopy", type=["zip", "csv"], key="ob_i")
     up_w = st.file_uploader("Weekly Bhavcopy (Optional)", type=["zip", "csv"], key="ob_w")
@@ -191,3 +169,17 @@ with c4:
 
 df_json = load_instrument_masters()
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
+df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
+df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
+
+if df_i_raw is None:
+    st.info("Upload your Intraday / Previous Day Bhavcopy in the sidebar to begin.")
+elif not access_token:
+    st.warning("Enter your Upstox Access Token in the sidebar to begin.")
+else:
+    is_index = "Index" in segment
+    with st.spinner("Matching contracts & fetching live LTP..."):
+        daily_df = parse_bhavcopy_multi_strike(df_i_raw, df_json, access_token, is_index=is_index)
+    if daily_df.empty:
+        st.warning("No matching contracts found. Make sure your Bhavcopy file is an NSE/BSE F&O Bhavcopy with future expiry dates.")
+    else:
