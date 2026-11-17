@@ -198,3 +198,5 @@ else:
     with st.spinner("Matching contracts & fetching live LTP..."):
         daily_df, status_msg = parse_bhavcopy_multi_strike(df_i_raw, access_token, is_index=is_index)
     if daily_df.empty:
+        st.warning(f"No matching contracts found: {status_msg}")
+    else:
