@@ -173,9 +173,9 @@ def fetch_ltp_v3(instrument_keys, token):
                             ltp_map[d["instrument_token"]] = price
                         ltp_map[k] = price
                 else:
-                    last_error = f"Upstox API: {data}"
+                    last_error = f"Upstox API Error: {data}"
             else:
-                last_error = f"HTTP {resp.status_code}: {resp.text[:150]}"
+                last_error = f"Upstox HTTP {resp.status_code}: {resp.text[:150] or 'Empty response (check Access Token)'}"
             time.sleep(0.15)
         except Exception as e:
             last_error = str(e)
