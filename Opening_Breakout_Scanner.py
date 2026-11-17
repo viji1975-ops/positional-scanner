@@ -15,28 +15,23 @@ st.title("🔥 Opening Breakout & Confluence Scanner")
 
 DATA_DIR = "data"
 TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
+NSE_JSON_PATH = "NSE.json"
+NSE_GZ_PATH = "NSE.json.gz"
 FILES = {"Monthly": os.path.join(DATA_DIR, "monthly.csv"), "Weekly": os.path.join(DATA_DIR, "weekly.csv"), "Intraday": os.path.join(DATA_DIR, "intraday.csv")}
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
-INDEX_UNDERLYING_KEYS = {
-    "NIFTY": "NSE_INDEX|Nifty 50",
-    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
-    "SENSEX": "BSE_INDEX|SENSEX",
-}
 
 def get_ist_now():
     return datetime.now(IST)
 
 def load_saved_token():
     if "UPSTOX_ACCESS_TOKEN" in st.secrets and st.secrets["UPSTOX_ACCESS_TOKEN"].strip():
-        return st.secrets["UPSTOX_ACCESS_TOKEN"]
+        return st.secrets["UPSTOX_ACCESS_TOKEN"].strip()
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
                 data = json.load(f)
                 if data.get("date") == get_ist_now().strftime("%Y-%m-%d"):
-                    return data.get("token", "")
+                    return data.get("token", "").strip()
         except Exception:
             pass
     return ""
@@ -49,58 +44,51 @@ def extract_csv_bytes(uploaded_file):
                 return pd.read_csv(f)
     return pd.read_csv(uploaded_file)
 
-@st.cache_data(ttl=3600)
-def get_all_fo_instruments():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    sources = [
-        ("https://upstox.com", "NSE_FO", "NSE_cache.json"),
-        ("https://upstox.com", "BSE_FO", "BSE_cache.json"),
-    ]
-    dfs = []
-    for url, seg, local_path in sources:
+@st.cache_data
+def load_nse_json_exact():
+    """Uses the exact load_nse_json() logic from your working app.py, restoring from NSE.json.gz if needed."""
+    if (not os.path.exists(NSE_JSON_PATH) or os.path.getsize(NSE_JSON_PATH) < 50000) and os.path.exists(NSE_GZ_PATH):
         try:
-            if not os.path.exists(local_path) or os.path.getsize(local_path) < 50000:
-                resp = requests.get(url, headers=headers, stream=True, timeout=30)
-                if resp.status_code == 200:
-                    with open(local_path, "wb") as f_out:
-                        with gzip.GzipFile(fileobj=resp.raw) as f_in:
-                            shutil.copyfileobj(f_in, f_out)
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 50000:
-                df_part = pd.read_json(local_path)
-                df_part = df_part[(df_part["segment"] == seg) & (df_part["instrument_type"].isin(["CE", "PE"]))].copy()
-                if seg == "BSE_FO":
-                    df_part = df_part[df_part["underlying_symbol"] == "SENSEX"]
-                df_part["expiry_dt"] = pd.to_datetime(df_part["expiry"], unit="ms").dt.normalize()
-                dfs.append(df_part[["underlying_symbol", "strike_price", "instrument_type", "expiry_dt", "instrument_key"]])
+            with gzip.open(NSE_GZ_PATH, "rb") as f_in:
+                with open(NSE_JSON_PATH, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
         except Exception:
-            continue
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            pass
 
-def fetch_index_contracts_api(token):
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    url = "https://upstox.com"
-    rows = []
-    last_err = ""
-    for sym, u_key in INDEX_UNDERLYING_KEYS.items():
+    if os.path.exists(NSE_JSON_PATH) and os.path.getsize(NSE_JSON_PATH) > 50000:
         try:
-            resp = requests.get(url, headers=headers, params={"instrument_key": u_key}, timeout=10)
-            if resp.status_code == 200 and resp.json().get("status") == "success":
-                for item in resp.json().get("data", []):
-                    if item.get("instrument_type") in ["CE", "PE"]:
-                        rows.append({
-                            "TckrSymb": sym,
-                            "XpryDt": pd.to_datetime(item["expiry"]).normalize(),
-                            "StrkPric": float(item["strike_price"]),
-                            "OptnTp": item["instrument_type"],
-                            "instrument_key": item["instrument_key"],
-                        })
-            else:
-                last_err = f"HTTP {resp.status_code}: {resp.text[:120]}"
+            df = pd.read_json(NSE_JSON_PATH)
+            if "segment" in df.columns:
+                df = df[df["segment"] == "NSE_FO"]
+            df["expiry_dt"] = pd.to_datetime(df["expiry"], unit="ms").dt.normalize()
+            return df
         except Exception as e:
-            last_err = str(e)
-    return pd.DataFrame(rows), last_err
+            st.error(f"Error loading NSE.json: {e}")
+    return pd.DataFrame()
 
-def parse_bhavcopy_multi_strike(df_bhav, token, is_index=True):
+def fetch_sensex_contracts(token):
+    if not token:
+        return pd.DataFrame()
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
+    try:
+        resp = requests.get("https://upstox.com", headers=headers, params={"instrument_key": "BSE_INDEX|SENSEX"}, timeout=10)
+        if resp.status_code == 200 and resp.json().get("status") == "success":
+            rows = []
+            for item in resp.json().get("data", []):
+                if item.get("instrument_type") in ["CE", "PE"]:
+                    rows.append({
+                        "underlying_symbol": "SENSEX",
+                        "expiry_dt": pd.to_datetime(item["expiry"]).normalize(),
+                        "strike_price": float(item["strike_price"]),
+                        "instrument_type": item["instrument_type"],
+                        "instrument_key": item["instrument_key"],
+                    })
+            return pd.DataFrame(rows)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
     df_bhav = df_bhav.copy()
     if "FinInstrmNm" in df_bhav.columns and "TckrSymb" not in df_bhav.columns:
         df_bhav = df_bhav.rename(columns={"FinInstrmNm": "TckrSymb"})
@@ -108,9 +96,11 @@ def parse_bhavcopy_multi_strike(df_bhav, token, is_index=True):
 
     futures = df_bhav[df_bhav["FinInstrmTp"].isin(["STF", "IDF"])].copy()
     futures["XpryDt"] = pd.to_datetime(futures["XpryDt"])
-    futures = futures.sort_values("XpryDt")
+    ist_now = get_ist_now()
+    today = ist_now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    futures = futures[futures["XpryDt"] >= today].sort_values("XpryDt")
     if futures.empty:
-        return pd.DataFrame(), "No STF/IDF futures rows found in Bhavcopy."
+        return pd.DataFrame(), "No future expiries found in uploaded Bhavcopy."
 
     near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]].rename(columns={"ClsPric": "RefPrice", "XpryDt": "TargetExpiry"})
 
@@ -131,30 +121,18 @@ def parse_bhavcopy_multi_strike(df_bhav, token, is_index=True):
     merged["XpryDt"] = merged["XpryDt"].dt.normalize()
     merged["StrkPric"] = merged["StrkPric"].astype(float)
 
-    if merged.empty:
-        return pd.DataFrame(), "No near-ATM options left after strike distance filter."
-
-    master_df = get_all_fo_instruments()
-    if not master_df.empty:
-        master_df["strike_price"] = master_df["strike_price"].astype(float)
-        result = pd.merge(
-            merged,
-            master_df,
-            left_on=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"],
-            right_on=["underlying_symbol", "expiry_dt", "strike_price", "instrument_type"],
-            how="inner",
-        )
-    elif is_index:
-        contract_df, api_err = fetch_index_contracts_api(token)
-        if contract_df.empty:
-            return pd.DataFrame(), f"Upstox API returned 0 contracts ({api_err}). Check if Access Token is valid."
-        result = pd.merge(merged, contract_df, on=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"], how="inner")
-    else:
-        return pd.DataFrame(), "Could not load NSE.json.gz instrument master for Stock Options. Switch to Index Options or check internet access."
+    df_json = df_json.copy()
+    df_json["strike_price"] = df_json["strike_price"].astype(float)
+    result = pd.merge(
+        merged,
+        df_json,
+        left_on=["TckrSymb", "StrkPric", "OptnTp", "XpryDt"],
+        right_on=["underlying_symbol", "strike_price", "instrument_type", "expiry_dt"],
+        how="inner",
+    )
 
     if result.empty:
-        bhav_exps = sorted(merged["XpryDt"].dt.strftime("%Y-%m-%d").unique().tolist())[:3]
-        return pd.DataFrame(), f"Expiry mismatch for Bhavcopy dates {bhav_exps}. Upload yesterday's F&O Bhavcopy."
+        return pd.DataFrame(), "No matching contracts found between Bhavcopy and NSE.json."
 
     result = result.drop_duplicates(subset=["instrument_key"])
     result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
@@ -165,9 +143,11 @@ def fetch_ltp_v3(instrument_keys, token):
     if not token or not instrument_keys:
         return {}
     url = "https://upstox.com"
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
+    batch_size = 50
     ltp_map = {}
-    batches = [instrument_keys[i:i + 50] for i in range(0, len(instrument_keys), 50)]
+    batches = [instrument_keys[i:i + batch_size] for i in range(0, len(instrument_keys), batch_size)]
+
     def fetch_batch(batch):
         try:
             resp = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=10)
@@ -176,6 +156,7 @@ def fetch_ltp_v3(instrument_keys, token):
         except Exception:
             pass
         return {}
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         for res in executor.map(fetch_batch, batches):
             ltp_map.update(res)
@@ -200,73 +181,35 @@ with c3:
 with c4:
     refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
 
+df_json = load_nse_json_exact()
+if "Index" in segment and access_token:
+    sensex_df = fetch_sensex_contracts(access_token)
+    if not sensex_df.empty:
+        df_json = pd.concat([df_json, sensex_df], ignore_index=True)
+
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
 df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
 df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
 
-if df_i_raw is None:
+if df_json.empty:
+    st.error("NSE.json / NSE.json.gz not found in repository.")
+elif df_i_raw is None:
     st.info("Upload your Intraday / Previous Day Bhavcopy in the sidebar to begin.")
 elif not access_token:
     st.warning("Enter your Upstox Access Token in the sidebar to begin.")
 else:
     is_index = "Index" in segment
-    with st.spinner("Matching contracts & fetching live LTP..."):
-        daily_df, status_msg = parse_bhavcopy_multi_strike(df_i_raw, access_token, is_index=is_index)
+    daily_df, status_msg = parse_bhavcopy_multi_strike(df_i_raw, df_json, is_index=is_index)
 
     if daily_df.empty:
         st.warning(f"No matching contracts found: {status_msg}")
     else:
         daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
         if df_w_raw is not None:
-            wk_df, _ = parse_bhavcopy_multi_strike(df_w_raw, access_token, is_index=is_index)
+            wk_df, _ = parse_bhavcopy_multi_strike(df_w_raw, df_json, is_index=is_index)
             if not wk_df.empty:
                 wk_sub = wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"})
                 daily_df = pd.merge(daily_df, wk_sub, on="instrument_key", how="left")
         if df_m_raw is not None:
-            mo_df, _ = parse_bhavcopy_multi_strike(df_m_raw, access_token, is_index=is_index)
+            mo_df, _ = parse_bhavcopy_multi_strike(df_m_raw, df_json, is_index=is_index)
             if not mo_df.empty:
-                mo_sub = mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"})
-                daily_df = pd.merge(daily_df, mo_sub, on="instrument_key", how="left")
-
-        keys = daily_df["instrument_key"].dropna().unique().tolist()
-        cache_id = f"v3_ltp_{segment}"
-        if refresh_btn or cache_id not in st.session_state or not st.session_state[cache_id]:
-            with st.spinner(f"Fetching live LTP for {len(keys)} contracts..."):
-                st.session_state[cache_id] = fetch_ltp_v3(keys, access_token)
-        ltp_map = st.session_state.get(cache_id, {})
-        daily_df["ltp"] = daily_df["instrument_key"].map(ltp_map).fillna(0.0)
-        st.success(f"✅ Matched {len(keys)} contracts | Received {len(ltp_map)} live quotes from Upstox")
-
-        daily_df["Change_%"] = daily_df.apply(lambda r: (r["ltp"] / r["Daily_Trigger"] * 100) if (r["Daily_Trigger"] > 0 and r["ltp"] > 0) else 0.0, axis=1)
-        filtered = daily_df.copy()
-        if require_confluence:
-            if "Weekly_Trigger" in filtered.columns:
-                filtered = filtered[filtered["ltp"] >= filtered["Weekly_Trigger"] * 0.9]
-            if "Monthly_Trigger" in filtered.columns and not is_index:
-                filtered = filtered[filtered["ltp"] >= filtered["Monthly_Trigger"] * 0.9]
-        filtered = filtered.sort_values(by="Change_%", ascending=False)
-
-        show_cols = ["TckrSymb", "StrkPric", "Daily_Trigger", "ltp", "Change_%"]
-        if "Weekly_Trigger" in filtered.columns:
-            show_cols.insert(3, "Weekly_Trigger")
-        if "Monthly_Trigger" in filtered.columns:
-            show_cols.insert(3, "Monthly_Trigger")
-
-        def style_pct(val):
-            if isinstance(val, (int, float)):
-                if val >= 100:
-                    return "background-color: darkgreen; color: white"
-                elif val >= 90:
-                    return "background-color: lightgreen; color: black"
-            return ""
-
-        fmt = {c: "{:.2f}" for c in show_cols if c not in ["TckrSymb", "Change_%"]}
-        fmt["Change_%"] = "{:.2f}%"
-
-        col_ce, col_pe = st.columns(2)
-        with col_ce:
-            st.subheader("Calls (CE)")
-            st.dataframe(filtered[filtered["OptnTp"] == "CE"][show_cols].style.map(style_pct, subset=["Change_%"]).format(fmt), hide_index=True, use_container_width=True, height=900)
-        with col_pe:
-            st.subheader("Puts (PE)")
-            st.dataframe(filtered[filtered["OptnTp"] == "PE"][show_cols].style.map(style_pct, subset=["Change_%"]).format(fmt), hide_index=True, use_container_width=True, height=900)
