@@ -157,7 +157,7 @@ def fetch_ltp_v3(instrument_keys, token):
     url = "https://upstox.com"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
     ltp_map = {}
-    batches = [instrument_keys[i:i + 400] for i in range(0, len(instrument_keys), 400)]
+    batches = [instrument_keys[i:i + 50] for i in range(0, len(instrument_keys), 50)]
     last_error = None
 
     for batch in batches:
@@ -172,6 +172,8 @@ def fetch_ltp_v3(instrument_keys, token):
                     ltp_map[k] = price
             else:
                 last_error = f"Upstox API ({resp.status_code}): {data}"
+                else:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:150]}"
         except Exception as e:
             last_error = str(e)
 
