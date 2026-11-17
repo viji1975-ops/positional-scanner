@@ -196,6 +196,11 @@ else:
         st.warning("No matching active contracts found. Ensure your Bhavcopy file is from the most recent trading day and your Upstox token is active.")
     else:
         daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
-        if df_w_raw is not None:
+    if df_w_raw is not None:
             wk_df = parse_bhavcopy_multi_strike(df_w_raw, access_token, is_index=is_index)
             if not wk_df.empty:
+                daily_df = pd.merge(daily_df, wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"}), on="instrument_key", how="left")
+    if df_m_raw is not None:
+            mo_df = parse_bhavcopy_multi_strike(df_m_raw, access_token, is_index=is_index)
+            if not mo_df.empty:
+                daily_df = pd.merge(daily_df, mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"}), on="instrument_key", how="left")
