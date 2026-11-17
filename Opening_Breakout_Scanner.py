@@ -51,7 +51,6 @@ def extract_csv_bytes(uploaded_file):
 
 @st.cache_data(ttl=3600)
 def get_all_fo_instruments():
-    """Downloads NSE.json.gz and BSE.json.gz using your working app.py streaming method."""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     sources = [
         ("https://upstox.com", "NSE_FO", "NSE_cache.json"),
@@ -151,11 +150,11 @@ def parse_bhavcopy_multi_strike(df_bhav, token, is_index=True):
             return pd.DataFrame(), f"Upstox API returned 0 contracts ({api_err}). Check if Access Token is valid."
         result = pd.merge(merged, contract_df, on=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"], how="inner")
     else:
-        return pd.DataFrame(), "Could not load NSE.json.gz instrument master for Stock Options."
+        return pd.DataFrame(), "Could not load NSE.json.gz instrument master for Stock Options. Switch to Index Options or check internet access."
 
     if result.empty:
         bhav_exps = sorted(merged["XpryDt"].dt.strftime("%Y-%m-%d").unique().tolist())[:3]
-        return pd.DataFrame(), f"Expiry mismatch for Bhavcopy dates {bhav_exps}. Upload the latest trading day's Bhavcopy."
+        return pd.DataFrame(), f"Expiry mismatch for Bhavcopy dates {bhav_exps}. Upload yesterday's F&O Bhavcopy."
 
     result = result.drop_duplicates(subset=["instrument_key"])
     result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
@@ -202,3 +201,4 @@ with c4:
     refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
 
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
+df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
