@@ -180,7 +180,7 @@ if df_w_raw is not None:
             wk_df = parse_bhavcopy_multi_strike(df_w_raw, df_json, access_token, is_index=is_index)
             if not wk_df.empty:
                 daily_df = pd.merge(daily_df, wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"}), on="instrument_key", how="left")
-        if df_m_raw is not None:
+if df_m_raw is not None:
             mo_df = parse_bhavcopy_multi_strike(df_m_raw, df_json, access_token, is_index=is_index)
             if not mo_df.empty:
                 daily_df = pd.merge(daily_df, mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"}), on="instrument_key", how="left")
