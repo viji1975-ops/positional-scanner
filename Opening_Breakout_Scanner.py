@@ -223,7 +223,6 @@ elif not access_token:
 else:
     is_index = "Index" in segment
     daily_df, status_msg = parse_bhavcopy_multi_strike(df_i_raw, df_json, is_index=is_index)
-
 if daily_df.empty:
         st.warning(f"No matching contracts found: {status_msg}")
 else:
