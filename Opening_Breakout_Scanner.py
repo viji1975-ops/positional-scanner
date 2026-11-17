@@ -156,7 +156,11 @@ def fetch_ltp_v3(instrument_keys, token):
     if not token or not instrument_keys:
         return {}
     url = "https://upstox.com"
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token.strip()}",
+        "User-Agent": "Mozilla/5.0",
+    }
     ltp_map = {}
     batches = [instrument_keys[i:i + 50] for i in range(0, len(instrument_keys), 50)]
     last_error = None
@@ -164,21 +168,22 @@ def fetch_ltp_v3(instrument_keys, token):
     for batch in batches:
         try:
             resp = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=15)
-            if resp.status_code == 200 and resp.text.strip():
+            raw_text = resp.text.strip()
+            if resp.status_code == 200 and raw_text:
                 data = resp.json()
                 if data.get("status") == "success":
                     for k, d in data.get("data", {}).items():
-                        price = d.get("last_price", 0.0)
+                        price = float(d.get("last_price") or 0.0)
                         if d.get("instrument_token"):
                             ltp_map[d["instrument_token"]] = price
                         ltp_map[k] = price
                 else:
-                    last_error = f"Upstox API Error: {data}"
+                    last_error = f"API Error: {data}"
             else:
-                last_error = f"Upstox HTTP {resp.status_code}: {resp.text[:150] or 'Empty response (check Access Token)'}"
+                last_error = f"HTTP {resp.status_code} | Sample key: {batch} | Body: {raw_text[:120] or 'EMPTY'}"
             time.sleep(0.15)
         except Exception as e:
-            last_error = str(e)
+            last_error = f"Exception: {e}"
 
     if not ltp_map and last_error:
         st.error(last_error)
