@@ -15,6 +15,13 @@ DATA_DIR = "data"
 TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
 FILES = {"Monthly": os.path.join(DATA_DIR, "monthly.csv"), "Weekly": os.path.join(DATA_DIR, "weekly.csv"), "Intraday": os.path.join(DATA_DIR, "intraday.csv")}
 INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
+INDEX_UNDERLYING_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+    "SENSEX": "BSE_INDEX|SENSEX",
+}
 
 def get_ist_now():
     return datetime.now(IST)
@@ -32,23 +39,6 @@ def load_saved_token():
             pass
     return ""
 
-@st.cache_data(ttl=3600)
-def load_instrument_masters():
-    dfs = []
-    for path, seg in [("NSE.json", "NSE_FO"), ("NSE.json.gz", "NSE_FO"), ("BSE.json", "BSE_FO"), ("BSE.json.gz", "BSE_FO")]:
-        if os.path.exists(path) and os.path.getsize(path) > 1000:
-            try:
-                df_part = pd.read_json(path, compression="gzip") if path.endswith(".gz") else pd.read_json(path)
-                if "segment" in df_part.columns:
-                    df_part = df_part[df_part["segment"] == seg]
-                if seg == "BSE_FO" and "underlying_symbol" in df_part.columns:
-                    df_part = df_part[df_part["underlying_symbol"] == "SENSEX"]
-                df_part["expiry_dt"] = pd.to_datetime(df_part["expiry"], unit="ms").dt.normalize()
-                dfs.append(df_part)
-            except Exception:
-                continue
-    return pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["instrument_key"]) if dfs else pd.DataFrame()
-
 def extract_csv_bytes(uploaded_file):
     if uploaded_file.name.lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
@@ -57,65 +47,96 @@ def extract_csv_bytes(uploaded_file):
                 return pd.read_csv(f)
     return pd.read_csv(uploaded_file)
 
-def resolve_keys_via_search_api(merged_df, token):
-    if not token or merged_df.empty:
-        return pd.DataFrame()
+def fetch_index_contracts_api(token):
+    """Fetches all active NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, and SENSEX option contracts in 5 fast calls."""
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    url = "https://upstox.com"
+    rows = []
+    for sym, u_key in INDEX_UNDERLYING_KEYS.items():
+        try:
+            resp = requests.get(url, headers=headers, params={"instrument_key": u_key}, timeout=10)
+            if resp.status_code == 200 and resp.json().get("status") == "success":
+                for item in resp.json().get("data", []):
+                    if item.get("instrument_type") in ["CE", "PE"]:
+                        rows.append({
+                            "TckrSymb": sym,
+                            "XpryDt": pd.to_datetime(item["expiry"]).normalize(),
+                            "StrkPric": float(item["strike_price"]),
+                            "OptnTp": item["instrument_type"],
+                            "instrument_key": item["instrument_key"],
+                        })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+def fetch_stock_contracts_api(merged_df, token):
+    """Fetches stock option contracts via Upstox Search API."""
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     url = "https://upstox.com"
     unique_pairs = merged_df[["TckrSymb", "XpryDt"]].drop_duplicates().head(60)
-    mapping_rows = []
+    rows = []
     for _, row in unique_pairs.iterrows():
         sym = str(row["TckrSymb"]).strip()
         exp_dt = pd.to_datetime(row["XpryDt"])
         exp_str = exp_dt.strftime("%Y-%m-%d")
-        exch = "BSE" if sym == "SENSEX" else "NSE"
         try:
-            resp = requests.get(url, headers=headers, params={"query": sym, "exchanges": exch, "segments": "FO", "expiry": exp_str, "records": 100}, timeout=8)
+            resp = requests.get(url, headers=headers, params={"query": sym, "exchanges": "NSE", "segments": "FO", "expiry": exp_str, "records": 100}, timeout=8)
             if resp.status_code == 200 and resp.json().get("status") == "success":
                 for item in resp.json().get("data", []):
                     tsym = str(item.get("trading_symbol", "")).strip()
-                    u_sym = str(item.get("underlying_symbol") or item.get("asset_symbol") or item.get("name", "")).strip()
-                    if (u_sym == sym or tsym.startswith(sym + " ")) and item.get("instrument_type") in ["CE", "PE"]:
-                        mapping_rows.append({"TckrSymb": sym, "XpryDt": exp_dt.normalize(), "StrkPric": float(item["strike_price"]), "OptnTp": item["instrument_type"], "instrument_key": item["instrument_key"]})
+                    if tsym.startswith(sym + " ") and item.get("instrument_type") in ["CE", "PE"]:
+                        rows.append({
+                            "TckrSymb": sym,
+                            "XpryDt": exp_dt.normalize(),
+                            "StrkPric": float(item["strike_price"]),
+                            "OptnTp": item["instrument_type"],
+                            "instrument_key": item["instrument_key"],
+                        })
         except Exception:
             continue
-    if not mapping_rows:
-        return pd.DataFrame()
-    map_df = pd.DataFrame(mapping_rows).drop_duplicates(subset=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"])
-    return pd.merge(merged_df, map_df, on=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"], how="inner")
+    return pd.DataFrame(rows)
 
-def parse_bhavcopy_multi_strike(df_bhav, df_json, token, is_index=True):
+def parse_bhavcopy_multi_strike(df_bhav, token, is_index=True):
+    df_bhav = df_bhav.copy()
     if "FinInstrmNm" in df_bhav.columns and "TckrSymb" not in df_bhav.columns:
         df_bhav = df_bhav.rename(columns={"FinInstrmNm": "TckrSymb"})
-    today = get_ist_now().replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    df_bhav["TckrSymb"] = df_bhav["TckrSymb"].astype(str).str.strip()
+
     futures = df_bhav[df_bhav["FinInstrmTp"].isin(["STF", "IDF"])].copy()
     futures["XpryDt"] = pd.to_datetime(futures["XpryDt"])
-    futures = futures[futures["XpryDt"] >= today].sort_values("XpryDt")
+    futures = futures.sort_values("XpryDt")
     if futures.empty:
         return pd.DataFrame()
+
     near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]].rename(columns={"ClsPric": "RefPrice", "XpryDt": "TargetExpiry"})
+
     options = df_bhav[df_bhav["OptnTp"].isin(["CE", "PE"])].copy()
     options["XpryDt"] = pd.to_datetime(options["XpryDt"])
     options = options[options["TckrSymb"].isin(INDEX_SYMBOLS)] if is_index else options[~options["TckrSymb"].isin(INDEX_SYMBOLS)]
     max_dist_pct = 0.02 if is_index else 0.04
+
     merged = pd.merge(options, near_fut, on="TckrSymb")
-    merged = merged[merged["XpryDt"] == merged["TargetExpiry"]]
+    # For indices, keep nearest expiry available in Bhavcopy; for stocks, match monthly expiry
+    if not is_index:
+        merged = merged[merged["XpryDt"] == merged["TargetExpiry"]]
+    else:
+        min_opt_exp = merged.groupby("TckrSymb")["XpryDt"].transform("min")
+        merged = merged[merged["XpryDt"] == min_opt_exp]
+
     merged["DistPct"] = abs(merged["StrkPric"] - merged["RefPrice"]) / merged["RefPrice"]
     merged = merged[merged["DistPct"] <= max_dist_pct].copy()
     merged["XpryDt"] = merged["XpryDt"].dt.normalize()
     merged["StrkPric"] = merged["StrkPric"].astype(float)
-    result = pd.DataFrame()
-    if not df_json.empty:
-        df_json = df_json.copy()
-        df_json["strike_price"] = df_json["strike_price"].astype(float)
-        result = pd.merge(merged, df_json, left_on=["TckrSymb", "StrkPric", "OptnTp", "XpryDt"], right_on=["underlying_symbol", "strike_price", "instrument_type", "expiry_dt"], how="inner")
-    need_api = result.empty or (is_index and "SENSEX" in merged["TckrSymb"].values and "SENSEX" not in result["TckrSymb"].values)
-    if need_api:
-        api_res = resolve_keys_via_search_api(merged, token)
-        if not api_res.empty:
-            result = pd.concat([result, api_res], ignore_index=True).drop_duplicates(subset=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"])
+
+    contract_df = fetch_index_contracts_api(token) if is_index else fetch_stock_contracts_api(merged, token)
+    if contract_df.empty:
+        return pd.DataFrame()
+
+    contract_df = contract_df.drop_duplicates(subset=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"])
+    result = pd.merge(merged, contract_df, on=["TckrSymb", "XpryDt", "StrkPric", "OptnTp"], how="inner")
     if result.empty:
         return pd.DataFrame()
+
     result["Camarilla_R4"] = result["ClsPric"] + (result["HghPric"] - result["LwPric"]) * 1.1 / 2
     result["Positional_Trigger"] = result["ClsPric"] * 2
     return result[["TckrSymb", "XpryDt", "StrkPric", "OptnTp", "RefPrice", "ClsPric", "Camarilla_R4", "Positional_Trigger", "instrument_key"]]
@@ -159,7 +180,6 @@ with c3:
 with c4:
     refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
 
-df_json = load_instrument_masters()
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
 df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
 df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
@@ -171,17 +191,11 @@ elif not access_token:
 else:
     is_index = "Index" in segment
     with st.spinner("Matching contracts & fetching live LTP..."):
-        daily_df = parse_bhavcopy_multi_strike(df_i_raw, df_json, access_token, is_index=is_index)
+        daily_df = parse_bhavcopy_multi_strike(df_i_raw, access_token, is_index=is_index)
     if daily_df.empty:
-        st.warning("No matching contracts found. Make sure your Bhavcopy file is an NSE/BSE F&O Bhavcopy with future expiry dates.")
+        st.warning("No matching active contracts found. Ensure your Bhavcopy file is from the most recent trading day and your Upstox token is active.")
     else:
         daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
-if df_w_raw is not None:
-            wk_df = parse_bhavcopy_multi_strike(df_w_raw, df_json, access_token, is_index=is_index)
+        if df_w_raw is not None:
+            wk_df = parse_bhavcopy_multi_strike(df_w_raw, access_token, is_index=is_index)
             if not wk_df.empty:
-                daily_df = pd.merge(daily_df, wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"}), on="instrument_key", how="left")
-if df_m_raw is not None:
-            mo_df = parse_bhavcopy_multi_strike(df_m_raw, df_json, access_token, is_index=is_index)
-            if not mo_df.empty:
-                daily_df = pd.merge(daily_df, mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"}), on="instrument_key", how="left")
-
