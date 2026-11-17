@@ -178,4 +178,3 @@ else:
     else:
         daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
         if df_w_raw is not None:
-
