@@ -213,3 +213,6 @@ else:
         if df_m_raw is not None:
             mo_df, _ = parse_bhavcopy_multi_strike(df_m_raw, df_json, is_index=is_index)
             if not mo_df.empty:
+                mo_sub = mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"})
+                daily_df = pd.merge(daily_df, mo_sub, on="instrument_key", how="left")
+
