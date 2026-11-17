@@ -158,11 +158,11 @@ def fetch_ltp_v3(instrument_keys, token):
     url = "https://upstox.com"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
     ltp_map = {}
-    batches = [instrument_keys[i:i + 50] for i in range(0, len(instrument_keys), 50)]
+    batches = [instrument_keys[i:i + 400] for i in range(0, len(instrument_keys), 400)]
 
     def fetch_batch(batch):
         try:
-            resp = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=10)
+            resp = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=15)
             data = resp.json()
             if resp.status_code == 200 and data.get("status") == "success":
                 out = {}
@@ -176,7 +176,7 @@ def fetch_ltp_v3(instrument_keys, token):
             pass
         return {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         for res in executor.map(fetch_batch, batches):
             ltp_map.update(res)
     return ltp_map
