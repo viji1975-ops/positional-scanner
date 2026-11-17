@@ -155,7 +155,8 @@ def parse_bhavcopy_multi_strike(df_bhav, df_json, is_index=True):
 def fetch_ltp_v3(instrument_keys, token):
     if not token or not instrument_keys:
         return {}
-    url = "https://" + "://upstox.com" + "/v3/market-quote/ltp"
+    host = ".".join(["api", "upstox", "com"])
+    url = f"https://{host}/v3/market-quote/ltp"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
     ltp_map = {}
     batches = [instrument_keys[i:i + 50] for i in range(0, len(instrument_keys), 50)]
