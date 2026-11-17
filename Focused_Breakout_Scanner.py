@@ -201,3 +201,92 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, group_mode, confluence_key
     with col_ce:
         st.subheader("Calls (CE)")
         ce_df = df_view[df_view["OptnTp"] == "CE"][show_cols]
+with st.sidebar:
+    st.header("Configuration")
+    access_token = st.text_input("Upstox Access Token", value=load_saved_token(), type="password")
+    st.markdown("---")
+    st.header("Instrument Master (NSE/BSE)")
+    up_json = st.file_uploader("Upload NSE.json.gz / BSE.json.gz", type=["json", "gz"], key="ob_json")
+    if up_json is not None:
+        save_uploaded_instrument_file(up_json)
+        st.success(f"Loaded {up_json.name}!")
+    st.markdown("---")
+    st.header("Bhavcopy Files")
+    up_m = st.file_uploader("1. Monthly Bhavcopy", type=["zip", "csv"], key="ob_m")
+    up_w = st.file_uploader("2. Weekly Bhavcopy", type=["zip", "csv"], key="ob_w")
+    up_i = st.file_uploader("3. Intraday / Prev Day Bhavcopy", type=["zip", "csv"], key="ob_i")
+    st.markdown("---")
+    st.header("Potential Strike Filters")
+    smart_filter = st.checkbox("High-Potential Strikes Only (1 per Stock)", value=True)
+    min_ltp = st.number_input("Min Option LTP (₹)", min_value=0.0, value=5.0, step=1.0)
+    min_chg = st.number_input("Min Trigger %", min_value=0.0, value=90.0, step=5.0)
+
+st.title("🎯 Focused Breakout & Positional Scanner")
+
+c_seg, c_conf, c_ref = st.columns([3, 1.3, 0.9])
+with c_seg:
+    segment_choice = st.radio("Select Segment", ["NIFTY / SENSEX (Weekly Expiry)", "BANKNIFTY / FINNIFTY / MIDCPNIFTY (Monthly Expiry)", "Stock Options (NSE F&O Monthly)"], horizontal=True, label_visibility="collapsed")
+with c_conf:
+    confluence_only = st.checkbox("Multi-Timeframe Confluence Only", value=False)
+with c_ref:
+    refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
+
+df_json = load_nse_json_fast()
+df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
+df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
+df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
+
+if df_json.empty:
+    st.warning("Upload NSE.json.gz (and BSE.json.gz for SENSEX) in the sidebar to begin.")
+elif not access_token:
+    st.warning("Enter your Upstox Access Token in the sidebar to begin.")
+else:
+    if "NIFTY / SENSEX" in segment_choice:
+        group_mode = "WEEKLY_IDX"
+    elif "BANKNIFTY" in segment_choice:
+        group_mode = "MONTHLY_IDX"
+    else:
+        group_mode = "STOCKS"
+
+    df_m_parsed, exp_m = parse_bhavcopy_by_group(df_m_raw, df_json, group_mode, is_intraday=False) if group_mode != "WEEKLY_IDX" else (pd.DataFrame(), None)
+    df_w_parsed, exp_w = parse_bhavcopy_by_group(df_w_raw, df_json, group_mode, is_intraday=False)
+    df_i_parsed, exp_i = parse_bhavcopy_by_group(df_i_raw, df_json, group_mode, is_intraday=True)
+
+    all_keys = set()
+    for d in [df_m_parsed, df_w_parsed, df_i_parsed]:
+        if not d.empty:
+            all_keys.update(d["instrument_key"].dropna().unique().tolist())
+
+    cache_id = f"ltp_v3_{group_mode}"
+    if refresh_btn or cache_id not in st.session_state or not st.session_state[cache_id]:
+        if all_keys:
+            with st.spinner(f"Fetching live quotes for {len(all_keys)} contracts..."):
+                st.session_state[cache_id] = fetch_ltp_v3(list(all_keys), access_token)
+
+    ltp_map = st.session_state.get(cache_id, {})
+
+    confluence_keys = None
+    if confluence_only and ltp_map:
+        valid_sets = []
+        for d in ([df_w_parsed, df_i_parsed] if group_mode == "WEEKLY_IDX" else [df_m_parsed, df_w_parsed, df_i_parsed]):
+            if not d.empty:
+                temp = d.copy()
+                temp["ltp"] = temp["instrument_key"].map(ltp_map).fillna(0.0)
+                valid_sets.append(set(temp[temp["ltp"] >= temp["Trigger"] * 0.9]["instrument_key"]))
+        if valid_sets:
+            confluence_keys = set.intersection(*valid_sets)
+
+    if group_mode == "WEEKLY_IDX":
+        tab_w, tab_i = st.tabs(["Weekly", "Intraday"])
+        with tab_w:
+            render_scanner_tables(df_w_parsed, exp_w, ltp_map, group_mode, confluence_keys, smart_filter, min_ltp, min_chg)
+        with tab_i:
+            render_scanner_tables(df_i_parsed, exp_i, ltp_map, group_mode, confluence_keys, smart_filter, min_ltp, min_chg)
+    else:
+        tab_m, tab_w, tab_i = st.tabs(["Monthly", "Weekly", "Intraday"])
+        with tab_m:
+            render_scanner_tables(df_m_parsed, exp_m, ltp_map, group_mode, confluence_keys, smart_filter, min_ltp, min_chg)
+        with tab_w:
+            render_scanner_tables(df_w_parsed, exp_w, ltp_map, group_mode, confluence_keys, smart_filter, min_ltp, min_chg)
+        with tab_i:
+            render_scanner_tables(df_i_parsed, exp_i, ltp_map, group_mode, confluence_keys, smart_filter, min_ltp, min_chg)
