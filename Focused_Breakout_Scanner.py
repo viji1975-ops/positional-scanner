@@ -204,14 +204,14 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, group_mode, confluence_key
         if ce_df.empty:
             st.caption("No CE strikes matching current filters.")
         else:
-            st.dataframe(ce_df.style.applymap(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
+            st.dataframe(ce_df.style.apply(lambda s: [style_pct(v) for v in s], subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
     with col_pe:
         st.subheader("Puts (PE)")
         pe_df = df_view[df_view["OptnTp"] == "PE"][show_cols].reset_index(drop=True)
         if pe_df.empty:
             st.caption("No PE strikes matching current filters.")
         else:
-            st.dataframe(pe_df.style.applymap(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
+            st.dataframe(pe_df.style.apply(lambda s: [style_pct(v) for v in s], subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
 
 with st.sidebar:
     st.header("Configuration")
