@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
-st.set_page_config(page_title="Opening Breakout & Positional Scanner", layout="wide")
+st.set_page_config(page_title="Focused Breakout & Positional Scanner", layout="wide")
 
 st.markdown("<style>.block-container{padding-top:1rem !important;padding-bottom:1rem !important;} h1{font-size:1.8rem !important;margin-bottom:0.2rem !important;} h3{font-size:1.05rem !important;} div[data-testid='stDataFrame']{font-weight:600 !important;}</style>", unsafe_allow_html=True)
 
@@ -178,7 +178,6 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, group_mode, confluence_key
 
     if smart_filter:
         df_view = df_view[(df_view["ltp"] >= min_ltp) & (df_view["change %"] >= min_chg)].copy()
-        # Keep top 1 strike per stock (or top 2 strikes per index) sorted by highest change %
         per_sym_cap = 2 if group_mode != "STOCKS" else 1
         df_view = df_view.sort_values(by=["change %", "ltp"], ascending=[False, False])
         df_view = df_view.groupby(["Symbol", "OptnTp"], as_index=False).head(per_sym_cap)
