@@ -5,7 +5,6 @@ import os
 import json
 import gzip
 import zipfile
-import concurrent.futures
 from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -159,26 +158,25 @@ def fetch_ltp_v3(instrument_keys, token):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
     ltp_map = {}
     batches = [instrument_keys[i:i + 400] for i in range(0, len(instrument_keys), 400)]
+    last_error = None
 
-    def fetch_batch(batch):
+    for batch in batches:
         try:
             resp = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=15)
             data = resp.json()
             if resp.status_code == 200 and data.get("status") == "success":
-                out = {}
                 for k, d in data.get("data", {}).items():
                     price = d.get("last_price", 0.0)
                     if d.get("instrument_token"):
-                        out[d["instrument_token"]] = price
-                    out[k] = price
-                return out
-        except Exception:
-            pass
-        return {}
+                        ltp_map[d["instrument_token"]] = price
+                    ltp_map[k] = price
+            else:
+                last_error = f"Upstox API ({resp.status_code}): {data}"
+        except Exception as e:
+            last_error = str(e)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        for res in executor.map(fetch_batch, batches):
-            ltp_map.update(res)
+    if not ltp_map and last_error:
+        st.error(last_error)
     return ltp_map
 
 with st.sidebar:
@@ -224,58 +222,3 @@ else:
     if daily_df.empty:
         st.warning(f"No matching contracts found: {status_msg}")
     else:
-        daily_df["Daily_Trigger"] = daily_df["Camarilla_R4"] if "Camarilla" in trigger_mode else daily_df["Positional_Trigger"]
-        if df_w_raw is not None:
-            wk_df, _ = parse_bhavcopy_multi_strike(df_w_raw, df_json, is_index=is_index)
-            if not wk_df.empty:
-                wk_sub = wk_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Weekly_Trigger"})
-                daily_df = pd.merge(daily_df, wk_sub, on="instrument_key", how="left")
-        if df_m_raw is not None:
-            mo_df, _ = parse_bhavcopy_multi_strike(df_m_raw, df_json, is_index=is_index)
-            if not mo_df.empty:
-                mo_sub = mo_df[["instrument_key", "Positional_Trigger"]].rename(columns={"Positional_Trigger": "Monthly_Trigger"})
-                daily_df = pd.merge(daily_df, mo_sub, on="instrument_key", how="left")
-
-        keys = daily_df["instrument_key"].dropna().unique().tolist()
-        cache_id = f"v3_ltp_{segment}"
-        if refresh_btn or cache_id not in st.session_state or not st.session_state[cache_id]:
-            with st.spinner(f"Fetching live LTP for {len(keys)} contracts..."):
-                st.session_state[cache_id] = fetch_ltp_v3(keys, access_token)
-        ltp_map = st.session_state.get(cache_id, {})
-        daily_df["ltp"] = daily_df["instrument_key"].map(ltp_map).fillna(0.0)
-        st.success(f"✅ Matched {len(keys)} contracts | Received {len(ltp_map)} live quotes from Upstox")
-
-        daily_df["Change_%"] = daily_df.apply(lambda r: (r["ltp"] / r["Daily_Trigger"] * 100) if (r["Daily_Trigger"] > 0 and r["ltp"] > 0) else 0.0, axis=1)
-        filtered = daily_df.copy()
-        if require_confluence:
-            if "Weekly_Trigger" in filtered.columns:
-                filtered = filtered[filtered["ltp"] >= filtered["Weekly_Trigger"] * 0.9]
-            if "Monthly_Trigger" in filtered.columns and not is_index:
-                filtered = filtered[filtered["ltp"] >= filtered["Monthly_Trigger"] * 0.9]
-        filtered = filtered.sort_values(by="Change_%", ascending=False)
-
-        show_cols = ["TckrSymb", "StrkPric", "Daily_Trigger", "ltp", "Change_%"]
-        if "Weekly_Trigger" in filtered.columns:
-            show_cols.insert(3, "Weekly_Trigger")
-        if "Monthly_Trigger" in filtered.columns:
-            show_cols.insert(3, "Monthly_Trigger")
-
-        def style_pct(val):
-            if isinstance(val, (int, float)):
-                if val >= 100:
-                    return "background-color: darkgreen; color: white"
-                elif val >= 90:
-                    return "background-color: lightgreen; color: black"
-            return ""
-
-        fmt = {c: "{:.2f}" for c in show_cols if c not in ["TckrSymb", "Change_%"]}
-        fmt["Change_%"] = "{:.2f}%"
-
-        col_ce, col_pe = st.columns(2)
-        with col_ce:
-            st.subheader("Calls (CE)")
-            st.dataframe(filtered[filtered["OptnTp"] == "CE"][show_cols].style.map(style_pct, subset=["Change_%"]).format(fmt), hide_index=True, use_container_width=True, height=900)
-        with col_pe:
-            st.subheader("Puts (PE)")
-            st.dataframe(filtered[filtered["OptnTp"] == "PE"][show_cols].style.map(style_pct, subset=["Change_%"]).format(fmt), hide_index=True, use_container_width=True, height=900)
-
