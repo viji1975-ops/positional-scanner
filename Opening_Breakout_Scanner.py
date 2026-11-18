@@ -221,6 +221,10 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
     if exp_label:
         st.info(f"📅 Displaying Expiry: **{exp_label}**")
     st.caption(f"Last Updated: {get_ist_now().strftime('%H:%M:%S')} IST")
-    def style_pct(val):
-        if isinstance(val, (int, float)):
-            if val >= 100:
+        def style_pct(val):
+                if isinstance(val, (int, float)):
+                        if val >= 100:
+                return "background-color: darkgreen; color: white"
+                        elif val >= 90:
+                                return "background-color: lightgreen; color: black"
+                return ""
