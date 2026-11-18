@@ -239,11 +239,45 @@ def resolve_effective_ltp(df, ltp_map):
     # 2. If API returns 0.0 (after hours / zero volume), fall back to Bhavcopy ClsPric
     return api_ltp.where(api_ltp > 0, bhav_close)
 
-
 def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
     if df_tab.empty:
         st.info("Upload the corresponding Bhavcopy file in the sidebar to view this timeframe.")
         return
+
+    df_view = df_tab.copy()
+    if confluence_keys is not None:
+        df_view = df_view[df_view["instrument_key"].isin(confluence_keys)]
+
+    df_view["ltp"] = resolve_effective_ltp(df_view, ltp_map)
+    valid_mask = (df_view["Trigger"] > 0) & (df_view["ltp"] > 0)
+    df_view["change %"] = 0.0
+    df_view.loc[valid_mask, "change %"] = (df_view.loc[valid_mask, "ltp"] / df_view.loc[valid_mask, "Trigger"]) * 100
+    df_view = df_view.sort_values(by="change %", ascending=False)
+
+    if exp_label:
+        st.info(f"📅 Displaying Expiry: **{exp_label}**")
+    st.caption(f"Last Updated: {get_ist_now().strftime('%H:%M:%S')} IST")
+
+    def style_pct(val):
+        if isinstance(val, (int, float)):
+            if val >= 100:
+                return "background-color: darkgreen; color: white"
+            elif val >= 90:
+                return "background-color: lightgreen; color: black"
+        return ""
+
+    show_cols = ["Symbol", "StrikePrice", "Trigger", "ltp", "change %"]
+    fmt = {"StrikePrice": "{:.2f}", "Trigger": "{:.2f}", "ltp": "{:.2f}", "change %": "{:.2f}%"}
+
+    col_ce, col_pe = st.columns(2)
+    with col_ce:
+        st.subheader("Calls (CE)")
+        ce_df = df_view[df_view["OptnTp"] == "CE"][show_cols]
+        st.dataframe(ce_df.style.map(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
+    with col_pe:
+        st.subheader("Puts (PE)")
+        pe_df = df_view[df_view["OptnTp"] == "PE"][show_cols]
+        st.dataframe(pe_df.style.map(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
 
     df_view = df_tab.copy()
     if confluence_keys is not None:
