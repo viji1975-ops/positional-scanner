@@ -42,20 +42,12 @@ def load_saved_token():
     return ""
 
 def extract_csv_bytes(uploaded_file):
-
     if uploaded_file.name.lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
             csv_name = next(f for f in z.namelist() if f.lower().endswith(".csv"))
             with z.open(csv_name) as f:
                 return pd.read_csv(f)
     return pd.read_csv(uploaded_file)
-
-def get_bhavcopy_date(df):
-    if df is not None and not df.empty and "TradDt" in df.columns:
-        vals = df["TradDt"].dropna().tolist()
-        if vals:
-            return pd.to_datetime(vals).strftime("%d-%b-%Y")
-    return None
 
 def save_uploaded_instrument_file(uploaded_file):
     if uploaded_file is None:
@@ -239,13 +231,6 @@ df_json = load_nse_json_fast()
 df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
 df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
 df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
-with st.sidebar:
-    if get_bhavcopy_date(df_m_raw):
-        st.caption(f"📅 Monthly Date: **{get_bhavcopy_date(df_m_raw)}**")
-    if get_bhavcopy_date(df_w_raw):
-        st.caption(f"📅 Weekly Date: **{get_bhavcopy_date(df_w_raw)}**")
-    if get_bhavcopy_date(df_i_raw):
-        st.caption(f"📅 Intraday Date: **{get_bhavcopy_date(df_i_raw)}**")
 
 if df_json.empty:
     st.warning("Upload NSE.json.gz (and BSE.json.gz for SENSEX) in the sidebar to begin.")
