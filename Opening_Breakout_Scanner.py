@@ -14,12 +14,18 @@ st.set_page_config(page_title="Opening Breakout & Positional Scanner", layout="w
 st.markdown("<style>.block-container{padding-top:1rem !important;padding-bottom:1rem !important;} h1{font-size:1.8rem !important;margin-bottom:0.2rem !important;} h3{font-size:1.05rem !important;} div[data-testid='stDataFrame']{font-weight:600 !important;}</style>", unsafe_allow_html=True)
 
 DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
 TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
 NSE_JSON_PATH = "NSE.json"
 NSE_GZ_PATH = "NSE.json.gz"
 BSE_JSON_PATH = "BSE.json"
 BSE_GZ_PATH = "BSE.json.gz"
-FILES = {"Monthly": os.path.join(DATA_DIR, "monthly.csv"), "Weekly": os.path.join(DATA_DIR, "weekly.csv"), "Intraday": os.path.join(DATA_DIR, "intraday.csv")}
+FILES = {
+    "Monthly": os.path.join(DATA_DIR, "monthly.csv"),
+    "Weekly": os.path.join(DATA_DIR, "weekly.csv"),
+    "Intraday": os.path.join(DATA_DIR, "intraday.csv"),
+}
 
 WEEKLY_INDICES = {"NIFTY", "SENSEX"}
 MONTHLY_INDICES = {"BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
@@ -48,6 +54,27 @@ def extract_csv_bytes(uploaded_file):
             with z.open(csv_name) as f:
                 return pd.read_csv(f)
     return pd.read_csv(uploaded_file)
+
+def load_or_save_bhavcopy(uploaded_file, save_path):
+    if uploaded_file is not None:
+        df = extract_csv_bytes(uploaded_file)
+        df.to_csv(save_path, index=False)
+        return df
+    if os.path.exists(save_path):
+        return pd.read_csv(save_path)
+    return None
+
+def get_bhavcopy_trade_date(df):
+    if df is None or df.empty:
+        return None
+    for col in ["TradDt", "BizDt", "TIMESTAMP"]:
+        if col in df.columns:
+            try:
+                dt = pd.to_datetime(df[col].dropna().iloc[0])
+                return dt.strftime("%d-%b-%Y")
+            except Exception:
+                pass
+    return "Loaded"
 
 def save_uploaded_instrument_file(uploaded_file):
     if uploaded_file is None:
@@ -106,8 +133,11 @@ def parse_bhavcopy_by_group(df_bhav, df_json, group_mode, is_intraday=False):
     if futures.empty:
         return pd.DataFrame(), None
     near_fut = futures.groupby("TckrSymb", as_index=False).first()[["TckrSymb", "ClsPric", "XpryDt"]].rename(columns={"ClsPric": "RefPrice", "XpryDt": "MonthlyExpiry"})
+
     options = df_bhav[df_bhav["OptnTp"].isin(["CE", "PE"])].copy()
     options["XpryDt"] = pd.to_datetime(options["XpryDt"])
+    options = options[options["XpryDt"] >= today]
+
     if group_mode == "WEEKLY_IDX":
         options = options[options["TckrSymb"].isin(WEEKLY_INDICES)]
         max_dist_pct = 0.025
@@ -117,12 +147,14 @@ def parse_bhavcopy_by_group(df_bhav, df_json, group_mode, is_intraday=False):
     else:
         options = options[~options["TckrSymb"].isin(ALL_INDICES)]
         max_dist_pct = 0.05
+
     merged = pd.merge(options, near_fut, on="TckrSymb")
     if group_mode == "WEEKLY_IDX":
         min_opt_exp = merged.groupby("TckrSymb")["XpryDt"].transform("min")
         merged = merged[merged["XpryDt"] == min_opt_exp]
     else:
         merged = merged[merged["XpryDt"] == merged["MonthlyExpiry"]]
+
     merged["DistPct"] = abs(merged["StrkPric"] - merged["RefPrice"]) / merged["RefPrice"]
     merged = merged[merged["DistPct"] <= max_dist_pct].copy()
     merged["XpryDt"] = merged["XpryDt"].dt.normalize()
@@ -188,98 +220,3 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
         return ""
     show_cols = ["Symbol", "StrikePrice", "Trigger", "ltp", "change %"]
     fmt = {"StrikePrice": "{:.2f}", "Trigger": "{:.2f}", "ltp": "{:.2f}", "change %": "{:.2f}%"}
-    col_ce, col_pe = st.columns(2)
-    with col_ce:
-        st.subheader("Calls (CE)")
-        ce_df = df_view[df_view["OptnTp"] == "CE"][show_cols]
-        st.dataframe(ce_df.style.map(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
-    with col_pe:
-        st.subheader("Puts (PE)")
-        pe_df = df_view[df_view["OptnTp"] == "PE"][show_cols]
-        st.dataframe(pe_df.style.map(style_pct, subset=["change %"]).format(fmt), hide_index=True, use_container_width=True, height=850)
-
-with st.sidebar:
-    st.header("Configuration")
-    access_token = st.text_input("Upstox Access Token", value=load_saved_token(), type="password")
-    st.markdown("---")
-    st.markdown("---")
-    st.header("Instrument Master (NSE/BSE)")
-    up_json = st.file_uploader("Upload NSE.json.gz / BSE.json.gz", type=["json", "gz"], key="ob_json")
-    if up_json is not None:
-        save_uploaded_instrument_file(up_json)
-        st.success(f"Loaded {up_json.name}!")
-    st.markdown("---")
-    st.header("Bhavcopy Files")
-    up_m = st.file_uploader("1. Monthly Bhavcopy", type=["zip", "csv"], key="ob_m")
-    up_w = st.file_uploader("2. Weekly Bhavcopy", type=["zip", "csv"], key="ob_w")
-    up_i = st.file_uploader("3. Intraday / Prev Day Bhavcopy", type=["zip", "csv"], key="ob_i")
-
-st.title("🔥 Opening Breakout & Positional Scanner")
-
-c_seg, c_conf, c_ref = st.columns([3, 1.3, 0.9])
-with c_seg:
-    segment_choice = st.radio("Select Segment", ["NIFTY / SENSEX (Weekly Expiry)", "BANKNIFTY / FINNIFTY / MIDCPNIFTY (Monthly Expiry)", "Stock Options (NSE F&O Monthly)"], horizontal=True, label_visibility="collapsed")
-with c_conf:
-    confluence_only = st.checkbox("Multi-Timeframe Confluence Only", value=False)
-with c_ref:
-    refresh_btn = st.button("⚡ Refresh LTP", use_container_width=True)
-
-df_json = load_nse_json_fast()
-df_m_raw = extract_csv_bytes(up_m) if up_m else (pd.read_csv(FILES["Monthly"]) if os.path.exists(FILES["Monthly"]) else None)
-df_w_raw = extract_csv_bytes(up_w) if up_w else (pd.read_csv(FILES["Weekly"]) if os.path.exists(FILES["Weekly"]) else None)
-df_i_raw = extract_csv_bytes(up_i) if up_i else (pd.read_csv(FILES["Intraday"]) if os.path.exists(FILES["Intraday"]) else None)
-
-if df_json.empty:
-    st.warning("Upload NSE.json.gz (and BSE.json.gz for SENSEX) in the sidebar to begin.")
-elif not access_token:
-    st.warning("Enter your Upstox Access Token in the sidebar to begin.")
-else:
-    if "NIFTY / SENSEX" in segment_choice:
-        group_mode = "WEEKLY_IDX"
-    elif "BANKNIFTY" in segment_choice:
-        group_mode = "MONTHLY_IDX"
-    else:
-        group_mode = "STOCKS"
-
-    df_m_parsed, exp_m = parse_bhavcopy_by_group(df_m_raw, df_json, group_mode, is_intraday=False) if group_mode != "WEEKLY_IDX" else (pd.DataFrame(), None)
-    df_w_parsed, exp_w = parse_bhavcopy_by_group(df_w_raw, df_json, group_mode, is_intraday=False)
-    df_i_parsed, exp_i = parse_bhavcopy_by_group(df_i_raw, df_json, group_mode, is_intraday=True)
-
-    all_keys = set()
-    for d in [df_m_parsed, df_w_parsed, df_i_parsed]:
-        if not d.empty:
-            all_keys.update(d["instrument_key"].dropna().unique().tolist())
-
-    cache_id = f"ltp_v3_{group_mode}"
-    if refresh_btn or cache_id not in st.session_state or not st.session_state[cache_id]:
-        if all_keys:
-            with st.spinner(f"Fetching live quotes for {len(all_keys)} contracts..."):
-                st.session_state[cache_id] = fetch_ltp_v3(list(all_keys), access_token)
-
-    ltp_map = st.session_state.get(cache_id, {})
-
-    confluence_keys = None
-    if confluence_only and ltp_map:
-        valid_sets = []
-        for d in ([df_w_parsed, df_i_parsed] if group_mode == "WEEKLY_IDX" else [df_m_parsed, df_w_parsed, df_i_parsed]):
-            if not d.empty:
-                temp = d.copy()
-                temp["ltp"] = temp["instrument_key"].map(ltp_map).fillna(0.0)
-                valid_sets.append(set(temp[temp["ltp"] >= temp["Trigger"] * 0.9]["instrument_key"]))
-        if valid_sets:
-            confluence_keys = set.intersection(*valid_sets)
-
-    if group_mode == "WEEKLY_IDX":
-        tab_w, tab_i = st.tabs(["Weekly", "Intraday"])
-        with tab_w:
-            render_scanner_tables(df_w_parsed, exp_w, ltp_map, confluence_keys)
-        with tab_i:
-            render_scanner_tables(df_i_parsed, exp_i, ltp_map, confluence_keys)
-    else:
-        tab_m, tab_w, tab_i = st.tabs(["Monthly", "Weekly", "Intraday"])
-        with tab_m:
-            render_scanner_tables(df_m_parsed, exp_m, ltp_map, confluence_keys)
-        with tab_w:
-            render_scanner_tables(df_w_parsed, exp_w, ltp_map, confluence_keys)
-        with tab_i:
-            render_scanner_tables(df_i_parsed, exp_i, ltp_map, confluence_keys)
