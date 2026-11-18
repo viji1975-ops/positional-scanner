@@ -56,12 +56,15 @@ def extract_csv_bytes(uploaded_file):
     return pd.read_csv(uploaded_file)
 
 def load_or_save_bhavcopy(uploaded_file, save_path):
-    if uploaded_file is not None:
-        df = extract_csv_bytes(uploaded_file)
-        df.to_csv(save_path, index=False)
-        return df
-    if os.path.exists(save_path):
-        return pd.read_csv(save_path)
+    try:
+        if uploaded_file is not None:
+            df = extract_csv_bytes(uploaded_file)
+            df.to_csv(save_path, index=False)
+            return df
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+            return pd.read_csv(save_path)
+    except Exception as e:
+        st.sidebar.error(f"Error loading Bhavcopy: {e}")
     return None
 
 def get_bhavcopy_trade_date(df):
@@ -70,8 +73,10 @@ def get_bhavcopy_trade_date(df):
     for col in ["TradDt", "BizDt", "TIMESTAMP"]:
         if col in df.columns:
             try:
-                dt = pd.to_datetime(df[col].dropna().iloc[0])
-                return dt.strftime("%d-%b-%Y")
+                series = df[col].dropna()
+                if not series.empty:
+                    dt = pd.to_datetime(series.iloc[0])
+                    return dt.strftime("%d-%b-%Y")
             except Exception:
                 pass
     return "Loaded"
@@ -217,6 +222,3 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
                 return "background-color: darkgreen; color: white"
             elif val >= 90:
                 return "background-color: lightgreen; color: black"
-        return ""
-    show_cols = ["Symbol", "StrikePrice", "Trigger", "ltp", "change %"]
-    fmt = {"StrikePrice": "{:.2f}", "Trigger": "{:.2f}", "ltp": "{:.2f}", "change %": "{:.2f}%"}
