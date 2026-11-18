@@ -6,6 +6,7 @@ import json
 import gzip
 import time
 import zipfile
+import traceback
 from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -35,8 +36,11 @@ def get_ist_now():
     return datetime.now(IST)
 
 def load_saved_token():
-    if "UPSTOX_ACCESS_TOKEN" in st.secrets and st.secrets["UPSTOX_ACCESS_TOKEN"].strip():
-        return st.secrets["UPSTOX_ACCESS_TOKEN"].strip()
+    try:
+        if "UPSTOX_ACCESS_TOKEN" in st.secrets and st.secrets["UPSTOX_ACCESS_TOKEN"].strip():
+            return st.secrets["UPSTOX_ACCESS_TOKEN"].strip()
+    except Exception:
+        pass
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, "r") as f:
@@ -75,7 +79,8 @@ def get_bhavcopy_trade_date(df):
             try:
                 series = df[col].dropna()
                 if not series.empty:
-                    dt = pd.to_datetime(series.iloc[0])
+                    first_val = next(iter(series))
+                    dt = pd.to_datetime(first_val)
                     return dt.strftime("%d-%b-%Y")
             except Exception:
                 pass
@@ -219,6 +224,3 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
     def style_pct(val):
         if isinstance(val, (int, float)):
             if val >= 100:
-                return "background-color: darkgreen; color: white"
-            elif val >= 90:
-                return "background-color: lightgreen; color: black"
