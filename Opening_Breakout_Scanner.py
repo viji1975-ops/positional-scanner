@@ -204,7 +204,6 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
     fmt = {"StrikePrice": "{:.2f}", "Trigger": "{:.2f}", "ltp": "{:.2f}", "change %": "{:.2f}%"}
     col_ce, col_pe = st.columns(2)
     with col_ce:
-    with col_ce:
         st.subheader("Calls (CE)")
         ce_df = df_view[df_view["OptnTp"] == "CE"][show_cols].reset_index(drop=True)
         try:
