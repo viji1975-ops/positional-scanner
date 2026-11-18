@@ -42,12 +42,6 @@ def load_saved_token():
     return ""
 
 def extract_csv_bytes(uploaded_file):
-def get_bhavcopy_date(df):
-    if df is not None and not df.empty and "TradDt" in df.columns:
-        vals = df["TradDt"].dropna().tolist()
-        if vals:
-            return pd.to_datetime(vals).strftime("%d-%b-%Y")
-    return None
 
     if uploaded_file.name.lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded_file) as z:
@@ -55,6 +49,13 @@ def get_bhavcopy_date(df):
             with z.open(csv_name) as f:
                 return pd.read_csv(f)
     return pd.read_csv(uploaded_file)
+
+def get_bhavcopy_date(df):
+    if df is not None and not df.empty and "TradDt" in df.columns:
+        vals = df["TradDt"].dropna().tolist()
+        if vals:
+            return pd.to_datetime(vals).strftime("%d-%b-%Y")
+    return None
 
 def save_uploaded_instrument_file(uploaded_file):
     if uploaded_file is None:
