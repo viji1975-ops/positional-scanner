@@ -205,6 +205,21 @@ def render_scanner_tables(df_tab, exp_label, ltp_map, confluence_keys=None):
     with col_ce:
         st.subheader("Calls (CE)")
 
+with st.sidebar:
+    st.header("Configuration")
+    access_token = st.text_input("Upstox Access Token", value=load_saved_token(), type="password")
+    st.markdown("---")
+    st.header("Instrument Master (NSE/BSE)")
+    up_json = st.file_uploader("Upload NSE.json.gz / BSE.json.gz", type=["json", "gz"], key="ob_json")
+    if up_json is not None:
+        save_uploaded_instrument_file(up_json)
+        st.success(f"Loaded {up_json.name}!")
+    st.markdown("---")
+    st.header("Bhavcopy Files")
+    up_m = st.file_uploader("1. Monthly Bhavcopy", type=["zip", "csv"], key="ob_m")
+    up_w = st.file_uploader("2. Weekly Bhavcopy", type=["zip", "csv"], key="ob_w")
+    up_i = st.file_uploader("3. Intraday / Prev Day Bhavcopy", type=["zip", "csv"], key="ob_i")
+
 st.title("🔥 Opening Breakout & Positional Scanner")
 
 c_seg, c_conf, c_ref = st.columns([3, 1.3, 0.9])
