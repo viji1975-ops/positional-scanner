@@ -36,7 +36,7 @@ if "sent_alerts" not in st.session_state:
 def send_telegram_message(bot_token, chat_id, text):
     if not bot_token or not chat_id:
         return
-    url = f"https://telegram.org{bot_token}/sendMessage"
+    url = "https://telegram.org" + bot_token + "/sendMessage"
     try:
         requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
@@ -50,15 +50,20 @@ def parse_instrument_df(df):
     if 'strike' in df.columns and 'strike_price' not in df.columns:
         df['strike_price'] = df['strike']
 
-    # Filter all CE/PE options
     opts = df[(df['segment'] == 'NSE_FO') & (df['instrument_type'].isin(['CE', 'PE']))].copy()
     opts['strike_price'] = pd.to_numeric(opts['strike_price'], errors='coerce')
 
-    # Keep the nearest expiry PER UNDERLYING (so weekly index expiries don't wipe out monthly stock options!)
-    opts['min_exp'] = opts.groupby('name')['expiry'].transform('min')
+    if 'asset_symbol' in opts.columns and opts['asset_symbol'].notna().any():
+        opts['under_sym'] = opts['asset_symbol']
+    elif 'underlying_symbol' in opts.columns and opts['underlying_symbol'].notna().any():
+        opts['under_sym'] = opts['underlying_symbol']
+    else:
+        opts['under_sym'] = opts['name']
+
+    opts['min_exp'] = opts.groupby('under_sym')['expiry'].transform('min')
     opts = opts[opts['expiry'] == opts['min_exp']].copy()
 
-    fno_symbols = opts['name'].dropna().unique()
+    fno_symbols = opts['under_sym'].dropna().unique()
     eqs = df[(df['segment'] == 'NSE_EQ') & (df['trading_symbol'].isin(fno_symbols))].copy()
     return eqs, opts
 
@@ -83,8 +88,9 @@ def load_instruments(uploaded_file):
 def fetch_0915_5m_candle(instrument_key, token):
     """Fetches 1-minute intraday candles from Upstox V2 API and builds the exact 09:15-09:19 5-min candle."""
     encoded_key = quote(instrument_key, safe="")
-    url = f"https://upstox.com{encoded_key}/1minute"
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
+    base_url = "https://upstox.com"
+    url = base_url + encoded_key + "/1minute"
+    headers = {"Accept": "application/json", "Authorization": "Bearer " + token.strip()}
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200:
@@ -97,7 +103,7 @@ def fetch_0915_5m_candle(instrument_key, token):
         _, _, _, _, latest_ltp, *_ = next(iter(candles))
 
         target_times = ("T09:15:", "T09:16:", "T09:17:", "T09:18:", "T09:19:")
-        opens, highs, lows, closes, vols, timed_bars = [], [], [], [], [], []
+        highs, lows, vols, timed_bars = [], [], [], []
 
         for c in candles:
             ts, o, h, l, cl, vol, *_ = c
@@ -160,7 +166,7 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
         is_oh = (c['open'] == c['high']) and (c['close'] < c['open'])
 
         if is_ol or is_oh:
-            s_opts = opts[opts['name'] == sym]
+            s_opts = opts[opts['under_sym'] == sym]
             if s_opts.empty:
                 continue
             strikes = sorted(s_opts['strike_price'].dropna().unique())
