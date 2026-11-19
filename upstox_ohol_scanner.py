@@ -5,14 +5,16 @@ import gzip
 import json
 import time
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 
-st.set_page_config(page_title="Upstox Live OHL Multi-Strike Scanner", layout="wide")
-st.title("📊 Upstox Live Open=Low / Open=High Option Scanner")
+st.set_page_config(page_title="Upstox 09:15 AM 5-Min OHL Scanner", layout="wide")
+st.title("📊 Upstox 09:15 AM (First 5-Min Candle) OHL Option Scanner")
 
 st.sidebar.header("🔑 API & Scanner Settings")
 ACCESS_TOKEN = st.sidebar.text_input("Upstox Access Token", type="password")
 STRIKE_RANGE = st.sidebar.slider("Strike Range (ATM +/- N)", 1, 10, 5)
-MIN_OPTION_VOLUME = st.sidebar.number_input("Minimum Option Volume", 0, value=1000, step=500)
+MIN_5M_VOLUME = st.sidebar.number_input("Min 09:15 5-Min Option Volume", min_value=0, value=500, step=100)
 
 st.sidebar.divider()
 st.sidebar.header("📁 Instrument File (Optional Fallback)")
@@ -73,47 +75,80 @@ def load_instruments(uploaded_file):
     return download_upstox_instruments()
 
 
-def fetch_full_quotes_batch(instrument_keys, token):
-    quote_map = {}
-    url = "https://upstox.com"
+def fetch_0915_5m_candle(instrument_key, token):
+    """Fetches the 09:15 AM 5-minute candle for a single instrument using Upstox V3 Intraday API."""
+    encoded_key = quote(instrument_key, safe="")
+    url = f"https://upstox.com{encoded_key}/minutes/5"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
-    for i in range(0, len(instrument_keys), 450):
-        batch = instrument_keys[i:i+450]
-        res = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=15).json()
-        if res.get("status") == "success":
-            for key, val in res["data"].items():
-                quote_map[key.replace(":", "|")] = {
-                    "ohlc": val.get("ohlc", {}),
-                    "ltp": val.get("last_price", 0),
-                    "volume": val.get("volume", 0)
-                }
-        else:
-            st.error(f"Upstox API Error: {res}")
-            break
-    return quote_map
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code != 200:
+            return instrument_key, None
+        data = res.json()
+        candles = data.get("data", {}).get("candles", [])
+        if not candles:
+            return instrument_key, None
+
+        # Find the candle starting at 09:15 (candles are sorted newest first, so 09:15 is near the end)
+        first_candle = None
+        for c in reversed(candles):
+            if "T09:15:" in str(c[0]):
+                first_candle = c
+                break
+        if first_candle is None:
+            first_candle = candles[-1]
+
+        # Latest LTP from the most recent candle's close
+        latest_ltp = candles[0][4]
+
+        return instrument_key, {
+            "time": first_candle[0],
+            "open": float(first_candle[1]),
+            "high": float(first_candle[2]),
+            "low": float(first_candle[3]),
+            "close": float(first_candle[4]),
+            "volume": int(first_candle[5]),
+            "ltp": float(latest_ltp)
+        }
+    except Exception:
+        return instrument_key, None
+
+def fetch_0915_batch(instrument_keys, token, max_workers=12):
+    """Fetches 09:15 AM 5-minute candles in parallel across multiple threads."""
+    candle_map = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(fetch_0915_5m_candle, k, token) for k in instrument_keys]
+        for fut in as_completed(futures):
+            k, val = fut.result()
+            if val is not None:
+                candle_map[k] = val
+    return candle_map
 
 def run_scanner(token, strike_range, min_vol, uploaded_file):
     eqs, opts = load_instruments(uploaded_file)
-    eq_quotes = fetch_full_quotes_batch(eqs['instrument_key'].tolist(), token)
-    if not eq_quotes:
-        return pd.DataFrame()
+
+    # Step 1: Fetch 09:15 AM 5-minute candle for all F&O equities
+    eq_candles = fetch_0915_batch(eqs['instrument_key'].tolist(), token)
+    if not eq_candles:
+        return pd.DataFrame(), 0
 
     candidates, opt_keys = [], set()
     for _, row in eqs.iterrows():
         sym, ekey = row['trading_symbol'], row['instrument_key']
-        q = eq_quotes.get(ekey)
-        if not q or not q['ohlc'] or q['ohlc'].get('open', 0) == 0:
+        c = eq_candles.get(ekey)
+        if not c or c['open'] == 0:
             continue
-        ohlc, ltp = q['ohlc'], q['ltp']
-        is_ol = (ohlc['open'] == ohlc['low']) and (ltp > ohlc['open'])
-        is_oh = (ohlc['open'] == ohlc['high']) and (ltp < ohlc['open'])
+
+        # Check 09:15 AM 5-min candle Open == Low (bullish) or Open == High (bearish)
+        is_ol = (c['open'] == c['low']) and (c['close'] > c['open'])
+        is_oh = (c['open'] == c['high']) and (c['close'] < c['open'])
 
         if is_ol or is_oh:
             s_opts = opts[opts['name'] == sym]
             if s_opts.empty:
                 continue
             strikes = sorted(s_opts['strike_price'].dropna().unique())
-            atm = min(strikes, key=lambda x: abs(x - ohlc['open']))
+            atm = min(strikes, key=lambda x: abs(x - c['open']))
             idx = strikes.index(atm)
             sel = strikes[max(0, idx - strike_range):min(len(strikes), idx + strike_range + 1)]
 
@@ -122,31 +157,36 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                 ce = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'CE')]
                 pe = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'PE')]
                 if not ce.empty and not pe.empty:
-                    ck, pk = ce['instrument_key'].values, pe['instrument_key'].values 
+                    ck = ce['instrument_key'].tolist()[0]
+                    pk = pe['instrument_key'].tolist()[0]
                     diff = strikes.index(st_val) - idx
                     pairs.append({"strike": st_val, "m": "ATM" if diff == 0 else f"ATM{diff:+d}", "ck": ck, "pk": pk})
                     opt_keys.update([ck, pk])
             if pairs:
-                candidates.append({"sym": sym, "ohlc": ohlc, "ltp": ltp, "ol": is_ol, "oh": is_oh, "pairs": pairs})
+                candidates.append({"sym": sym, "c": c, "ol": is_ol, "oh": is_oh, "pairs": pairs})
 
     if not candidates:
-        return pd.DataFrame()
+        return pd.DataFrame(), 0
 
-    opt_quotes = fetch_full_quotes_batch(list(opt_keys), token)
+    # Step 2: Fetch 09:15 AM 5-minute candle for matched option strikes
+    opt_candles = fetch_0915_batch(list(opt_keys), token)
     results = []
     for item in candidates:
+        eq_c = item['c']
         for p in item['pairs']:
-            cd, pd_val = opt_quotes.get(p['ck']), opt_quotes.get(p['pk'])
-            if not cd or not pd_val or cd['volume'] < min_vol or pd_val['volume'] < min_vol:
+            ce_c, pe_c = opt_candles.get(p['ck']), opt_candles.get(p['pk'])
+            if not ce_c or not pe_c:
                 continue
-            co, po = cd['ohlc'], pd_val['ohlc']
-            if not co or not po or co.get('open', 0) == 0 or po.get('open', 0) == 0:
+            if ce_c['volume'] < min_vol or pe_c['volume'] < min_vol:
+                continue
+            if ce_c['open'] == 0 or pe_c['open'] == 0:
                 continue
 
-            ce_ol = (co['open'] == co['low']) and (cd['ltp'] > co['open'])
-            ce_oh = (co['open'] == co['high']) and (cd['ltp'] < co['open'])
-            pe_ol = (po['open'] == po['low']) and (pd_val['ltp'] > po['open'])
-            pe_oh = (po['open'] == po['high']) and (pd_val['ltp'] < po['open'])
+            # Check 09:15 AM 5-min candle conditions on CE and PE
+            ce_ol = (ce_c['open'] == ce_c['low']) and (ce_c['close'] > ce_c['open'])
+            ce_oh = (ce_c['open'] == ce_c['high']) and (ce_c['close'] < ce_c['open'])
+            pe_ol = (pe_c['open'] == pe_c['low']) and (pe_c['close'] > pe_c['open'])
+            pe_oh = (pe_c['open'] == pe_c['high']) and (pe_c['close'] < pe_c['open'])
 
             sig, prio, triple = None, 99, False
             if item['ol'] and ce_ol:
@@ -158,24 +198,29 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
 
             if sig:
                 s_lbl = f"{p['strike']} ({p['m']})"
-                row_dict = dict(
+                results.append(dict(
                     Priority=prio, Signal=sig, Stock=item['sym'], Strike=s_lbl,
-                    EQ_Open=item['ohlc']['open'], EQ_LTP=item['ltp'],
-                    CE_Open=co['open'], CE_LTP=cd['ltp'], CE_Vol=cd['volume'],
-                    PE_Open=po['open'], PE_LTP=pd_val['ltp'], PE_Vol=pd_val['volume']
-                )
-                results.append(row_dict)
+                    EQ_5m_Open=eq_c['open'], EQ_5m_Close=eq_c['close'], EQ_Live_LTP=eq_c['ltp'],
+                    CE_5m_Open=ce_c['open'], CE_5m_Close=ce_c['close'], CE_Live_LTP=ce_c['ltp'], CE_5m_Vol=ce_c['volume'],
+                    PE_5m_Open=pe_c['open'], PE_5m_Close=pe_c['close'], PE_Live_LTP=pe_c['ltp'], PE_5m_Vol=pe_c['volume']
+                ))
 
                 if ENABLE_TELEGRAM and (not ONLY_HIGHLIGHT_ALERTS or triple):
                     aid = f"{item['sym']}_{p['strike']}_{sig}"
                     if aid not in st.session_state.sent_alerts:
-                        msg = f"<b>{sig}</b>\n📌 <b>{item['sym']}</b> | 🎯 <b>{s_lbl}</b>\n📈 CE: {co['open']} -> {cd['ltp']}\n📉 PE: {po['open']} -> {pd_val['ltp']}"
+                        msg = (
+                            f"<b>{sig} (09:15 5m Candle)</b>\n"
+                            f"📌 <b>{item['sym']}</b> | 🎯 <b>{s_lbl}</b>\n"
+                            f"📈 CE 5m: {ce_c['open']} -> {ce_c['close']} (LTP: {ce_c['ltp']})\n"
+                            f"📉 PE 5m: {pe_c['open']} -> {pe_c['close']} (LTP: {pe_c['ltp']})"
+                        )
                         send_telegram_message(TG_BOT_TOKEN, TG_CHAT_ID, msg)
                         st.session_state.sent_alerts.add(aid)
 
     if not results:
-        return pd.DataFrame()
-    return pd.DataFrame(results).sort_values(by=["Priority", "Stock", "Strike"]).drop(columns=["Priority"])
+        return pd.DataFrame(), len(candidates)
+    df_out = pd.DataFrame(results).sort_values(by=["Priority", "Stock", "Strike"]).drop(columns=["Priority"])
+    return df_out, len(candidates)
 
 def highlight_rows(row):
     if "HIGHLIGHT BULLISH" in row["Signal"]:
@@ -195,14 +240,17 @@ else:
             st.session_state.sent_alerts.clear()
             st.toast("Alert history cleared!")
 
-    with st.spinner("Scanning F&O stocks and ATM ±5 option strikes..."):
+    with st.spinner("Checking 09:15 AM 5-minute candles across F&O stocks and ATM ±5 strikes..."):
         try:
-            df_res = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_OPTION_VOLUME, UPLOADED_FILE)
-            st.caption(f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')}")
+            df_res, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
+            st.caption(
+                f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
+                f"F&O Stocks matching 09:15 5m O=L/O=H: **{eq_match_count}**"
+            )
             if not df_res.empty:
                 st.dataframe(df_res.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
             else:
-                st.warning("No matching OHL setups right now. Try lowering Minimum Option Volume to 0.")
+                st.warning("No matching 09:15 AM 5-min OHL setups found. Try lowering Min 09:15 5-Min Option Volume to 0.")
         except Exception as e:
             st.error(f"Scanner Error: {e}")
 
