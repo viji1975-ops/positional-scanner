@@ -4,10 +4,8 @@ import pandas as pd
 import gzip
 import json
 import time
+from io import StringIO
 
-# ==========================================
-# PAGE CONFIGURATION
-# ==========================================
 st.set_page_config(page_title="Upstox Live OHL Multi-Strike Scanner", layout="wide")
 st.title("📊 Upstox Live Open=Low / Open=High Option Scanner")
 
@@ -53,8 +51,6 @@ def send_telegram_message(bot_token, chat_id, text):
         st.sidebar.error(f"Telegram Error: {e}")
 
 def parse_instrument_df(df):
-    """Normalizes Upstox CSV or JSON dataframe into F&O equities and nearest-expiry options."""
-    # Handle CSV column naming differences if user uploads NSE.csv
     if 'exchange' in df.columns and 'segment' not in df.columns:
         df['segment'] = df['exchange']
     if 'tradingsymbol' in df.columns and 'trading_symbol' not in df.columns:
@@ -73,7 +69,6 @@ def parse_instrument_df(df):
 
 @st.cache_data(ttl=14400)
 def download_upstox_instruments():
-    """Downloads Upstox daily NSE CSV.gz master file (more reliable on cloud servers)."""
     url = "https://upstox.com"
     dl_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -87,7 +82,6 @@ def download_upstox_instruments():
     else:
         csv_text = raw_bytes.decode("utf-8")
 
-    from io import StringIO
     df = pd.read_csv(StringIO(csv_text))
     return parse_instrument_df(df)
 
@@ -102,7 +96,6 @@ def load_instruments(uploaded_file):
         if text_data.strip().startswith("["):
             df = pd.DataFrame(json.loads(text_data))
         else:
-            from io import StringIO
             df = pd.read_csv(StringIO(text_data))
         return parse_instrument_df(df)
     return download_upstox_instruments()
@@ -258,3 +251,12 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                     "Priority": priority,
                     "Signal": signal,
                     "Stock": item['symbol'],
+                    "Strike": strike_label,
+                    "EQ_Open": item['eq_ohlc']['open'],
+                    "EQ_LTP": item['eq_ltp'],
+                    "CE_Open": ce_o['open'],
+                    "CE_LTP": ce_data['ltp'],
+                    "CE_Vol": ce_data['volume'],
+                    "PE_Open": pe_o['open'],
+                    "PE_LTP": pe_data['ltp'],
+                    "PE_Vol": pe_data['volume']
