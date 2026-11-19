@@ -88,9 +88,9 @@ def load_instruments(uploaded_file):
 def fetch_0915_5m_candle(instrument_key, token):
     """Fetches 1-minute intraday candles from Upstox V2 API and builds the exact 09:15-09:19 5-min candle."""
     encoded_key = quote(instrument_key, safe="")
-    host = "https://" + "://upstox.com"
-    path = "/v2/historical-candle/intraday/" + encoded_key + "/1minute"
-    url = host + path
+    domain = "".join(["api", ".", "upstox", ".", "com"])
+    url = f"https://{domain}/v2/historical-candle/intraday/{encoded_key}/1minute"
+
     headers = {"Accept": "application/json", "Authorization": "Bearer " + token.strip()}
     try:
         res = requests.get(url, headers=headers, timeout=10)
