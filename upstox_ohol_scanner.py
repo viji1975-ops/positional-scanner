@@ -50,9 +50,14 @@ def parse_instrument_df(df):
     if 'strike' in df.columns and 'strike_price' not in df.columns:
         df['strike_price'] = df['strike']
 
+    # Filter all CE/PE options
     opts = df[(df['segment'] == 'NSE_FO') & (df['instrument_type'].isin(['CE', 'PE']))].copy()
     opts['strike_price'] = pd.to_numeric(opts['strike_price'], errors='coerce')
-    opts = opts[opts['expiry'] == opts['expiry'].min()]
+
+    # Keep the nearest expiry PER UNDERLYING (so weekly index expiries don't wipe out monthly stock options!)
+    opts['min_exp'] = opts.groupby('name')['expiry'].transform('min')
+    opts = opts[opts['expiry'] == opts['min_exp']].copy()
+
     fno_symbols = opts['name'].dropna().unique()
     eqs = df[(df['segment'] == 'NSE_EQ') & (df['trading_symbol'].isin(fno_symbols))].copy()
     return eqs, opts
@@ -92,26 +97,30 @@ def fetch_0915_5m_candle(instrument_key, token):
         _, _, _, _, latest_ltp, *_ = next(iter(candles))
 
         target_times = ("T09:15:", "T09:16:", "T09:17:", "T09:18:", "T09:19:")
-        first_5m = []
+        opens, highs, lows, closes, vols, timed_bars = [], [], [], [], [], []
+
         for c in candles:
             ts, o, h, l, cl, vol, *_ = c
             if any(t in str(ts) for t in target_times):
-                first_5m.append((str(ts), float(o), float(h), float(l), float(cl), int(vol)))
+                timed_bars.append((str(ts), float(o), float(cl)))
+                highs.append(float(h))
+                lows.append(float(l))
+                vols.append(int(vol))
 
-        if not first_5m:
+        if not timed_bars:
             return instrument_key, None, "No 09:15-09:19 candles found"
 
-        first_5m.sort(key=lambda x: x)
-        open_ts, open_915, _, _, _, _ = next(iter(first_5m))
-        _, _, _, _, close_919, _ = next(iter(reversed(first_5m)))
+        timed_bars.sort(key=lambda item: item)
+        open_ts, open_915, _ = next(iter(timed_bars))
+        _, _, close_919 = next(iter(reversed(timed_bars)))
 
         return instrument_key, {
             "time": open_ts,
             "open": open_915,
-            "high": max(x for x in first_5m),
-            "low": min(x for x in first_5m),
+            "high": max(highs),
+            "low": min(lows),
             "close": close_919,
-            "volume": sum(x for x in first_5m),
+            "volume": sum(vols),
             "ltp": float(latest_ltp)
         }, None
     except Exception as e:
@@ -138,7 +147,7 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
 
     eq_candles = fetch_0915_batch(eqs['instrument_key'].tolist(), token)
     if not eq_candles:
-        return pd.DataFrame(), 0
+        return pd.DataFrame(), len(eqs), 0, 0
 
     candidates, opt_keys = [], set()
     for _, row in eqs.iterrows():
@@ -173,7 +182,7 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                 candidates.append({"sym": sym, "c": c, "ol": is_ol, "oh": is_oh, "pairs": pairs})
 
     if not candidates:
-        return pd.DataFrame(), 0
+        return pd.DataFrame(), len(eqs), len(eq_candles), 0
 
     opt_candles = fetch_0915_batch(list(opt_keys), token)
     results = []
@@ -223,9 +232,9 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                         st.session_state.sent_alerts.add(aid)
 
     if not results:
-        return pd.DataFrame(), len(candidates)
+        return pd.DataFrame(), len(eqs), len(eq_candles), len(candidates)
     df_out = pd.DataFrame(results).sort_values(by=["Priority", "Stock", "Strike"]).drop(columns=["Priority"])
-    return df_out, len(candidates)
+    return df_out, len(eqs), len(eq_candles), len(candidates)
 
 def highlight_rows(row):
     if "HIGHLIGHT BULLISH" in row["Signal"]:
@@ -247,10 +256,11 @@ else:
 
     with st.spinner("Checking 09:15 AM 5-minute candles across F&O stocks and ATM ±5 strikes..."):
         try:
-            df_res, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
+            df_res, total_fno, fetched_cnt, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
             st.caption(
                 f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
-                f"F&O Stocks matching 09:15 5m O=L/O=H: **{eq_match_count}**"
+                f"F&O Stocks Loaded: **{total_fno}** | Candles Fetched: **{fetched_cnt}** | "
+                f"Matching 09:15 5m O=L/O=H: **{eq_match_count}**"
             )
             if not df_res.empty:
                 st.dataframe(df_res.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
