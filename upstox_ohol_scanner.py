@@ -98,9 +98,7 @@ def fetch_0915_5m_candle(instrument_key, token):
         if first_candle is None:
             first_candle = candles[-1]
 
-        latest_ltp = candles
-
-                latest_ltp = candles[0][4]
+        latest_ltp = candles[0][4]
 
         return instrument_key, {
             "time": str(first_candle[0]),
