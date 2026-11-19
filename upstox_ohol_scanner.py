@@ -76,7 +76,7 @@ def load_instruments(uploaded_file):
 
 
 def fetch_0915_5m_candle(instrument_key, token):
-    """Fetches the 09:15 AM 5-minute candle for a single instrument using Upstox V3 Intraday API."""
+    """Fetches the 09:15 AM 5-minute candle using Upstox V3 Intraday API."""
     encoded_key = quote(instrument_key, safe="")
     url = f"https://upstox.com{encoded_key}/minutes/5"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.strip()}"}
@@ -89,31 +89,30 @@ def fetch_0915_5m_candle(instrument_key, token):
         if not candles:
             return instrument_key, None
 
-        # Find the candle starting at 09:15 (candles are sorted newest first, so 09:15 is near the end)
+        # Candles are sorted newest-first; the 09:15 AM candle is the last element or contains '09:15'
         first_candle = None
         for c in reversed(candles):
-            if "T09:15:" in str(c[0]):
+            if "09:15" in str(c):
                 first_candle = c
                 break
         if first_candle is None:
             first_candle = candles[-1]
 
-        # Latest LTP from the most recent candle's close
-        latest_ltp = candles[0][4]
+        latest_ltp = candles
 
         return instrument_key, {
-            "time": first_candle[0],
-            "open": float(first_candle[1]),
-            "high": float(first_candle[2]),
-            "low": float(first_candle[3]),
-            "close": float(first_candle[4]),
-            "volume": int(first_candle[5]),
+            "time": str(first_candle),
+            "open": float(first_candle),
+            "high": float(first_candle),
+            "low": float(first_candle),
+            "close": float(first_candle),
+            "volume": int(first_candle),
             "ltp": float(latest_ltp)
         }
     except Exception:
         return instrument_key, None
 
-def fetch_0915_batch(instrument_keys, token, max_workers=12):
+def fetch_0915_batch(instrument_keys, token, max_workers=10):
     """Fetches 09:15 AM 5-minute candles in parallel across multiple threads."""
     candle_map = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -130,6 +129,7 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
     # Step 1: Fetch 09:15 AM 5-minute candle for all F&O equities
     eq_candles = fetch_0915_batch(eqs['instrument_key'].tolist(), token)
     if not eq_candles:
+        st.error("Could not fetch 5-min candles from Upstox V3 API. Check if Access Token is valid.")
         return pd.DataFrame(), 0
 
     candidates, opt_keys = [], set()
@@ -157,8 +157,8 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                 ce = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'CE')]
                 pe = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'PE')]
                 if not ce.empty and not pe.empty:
-                    ck = ce['instrument_key'].tolist()[0]
-                    pk = pe['instrument_key'].tolist()[0]
+                    ck = ce['instrument_key'].tolist()
+                    pk = pe['instrument_key'].tolist()
                     diff = strikes.index(st_val) - idx
                     pairs.append({"strike": st_val, "m": "ATM" if diff == 0 else f"ATM{diff:+d}", "ck": ck, "pk": pk})
                     opt_keys.update([ck, pk])
@@ -253,6 +253,11 @@ else:
                 st.warning("No matching 09:15 AM 5-min OHL setups found. Try lowering Min 09:15 5-Min Option Volume to 0.")
         except Exception as e:
             st.error(f"Scanner Error: {e}")
+
+    if AUTO_REFRESH:
+        time.sleep(60)
+        st.rerun()
+
 
     if AUTO_REFRESH:
         time.sleep(60)
