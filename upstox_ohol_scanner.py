@@ -89,23 +89,30 @@ def fetch_0915_5m_candle(instrument_key, token):
         if not candles:
             return instrument_key, None, "Empty candles list"
 
+        _, _, _, _, latest_ltp, *_ = next(iter(candles))
+
         target_times = ("T09:15:", "T09:16:", "T09:17:", "T09:18:", "T09:19:")
-        first_5m = [c for c in candles if any(t in str(c) for t in target_times)]
-        first_5m.sort(key=lambda x: str(x))
+        first_5m = []
+        for c in candles:
+            ts, o, h, l, cl, vol, *_ = c
+            if any(t in str(ts) for t in target_times):
+                first_5m.append((str(ts), float(o), float(h), float(l), float(cl), int(vol)))
 
         if not first_5m:
-            return instrument_key, None, f"No 09:15 candles found (sample: {candles[-1]})"
+            return instrument_key, None, "No 09:15-09:19 candles found"
 
-        latest_ltp = float(candles)
+        first_5m.sort(key=lambda x: x)
+        open_ts, open_915, _, _, _, _ = next(iter(first_5m))
+        _, _, _, _, close_919, _ = next(iter(reversed(first_5m)))
 
         return instrument_key, {
-            "time": str(first_5m),
-            "open": float(first_5m),
-            "high": max(float(c) for c in first_5m),
-            "low": min(float(c) for c in first_5m),
-            "close": float(first_5m[-1]),
-            "volume": sum(int(c) for c in first_5m),
-            "ltp": latest_ltp
+            "time": open_ts,
+            "open": open_915,
+            "high": max(x for x in first_5m),
+            "low": min(x for x in first_5m),
+            "close": close_919,
+            "volume": sum(x for x in first_5m),
+            "ltp": float(latest_ltp)
         }, None
     except Exception as e:
         return instrument_key, None, str(e)
@@ -157,8 +164,8 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                 ce = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'CE')]
                 pe = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'PE')]
                 if not ce.empty and not pe.empty:
-                    ck = ce['instrument_key'].tolist()
-                    pk = pe['instrument_key'].tolist()
+                    ck = next(iter(ce['instrument_key']))
+                    pk = next(iter(pe['instrument_key']))
                     diff = strikes.index(st_val) - idx
                     pairs.append({"strike": st_val, "m": "ATM" if diff == 0 else f"ATM{diff:+d}", "ck": ck, "pk": pk})
                     opt_keys.update([ck, pk])
