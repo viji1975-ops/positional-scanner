@@ -100,15 +100,18 @@ def fetch_0915_5m_candle(instrument_key, token):
 
         latest_ltp = candles
 
+                latest_ltp = candles[0][4]
+
         return instrument_key, {
-            "time": str(first_candle),
-            "open": float(first_candle),
-            "high": float(first_candle),
-            "low": float(first_candle),
-            "close": float(first_candle),
-            "volume": int(first_candle),
+            "time": str(first_candle[0]),
+            "open": float(first_candle[1]),
+            "high": float(first_candle[2]),
+            "low": float(first_candle[3]),
+            "close": float(first_candle[4]),
+            "volume": int(first_candle[5]),
             "ltp": float(latest_ltp)
         }
+
     except Exception:
         return instrument_key, None
 
