@@ -313,20 +313,19 @@ else:
             st.session_state.sent_alerts.clear()
             st.toast("Alert history cleared!")
 
-        with st.spinner("Scanning 09:15 AM 5-minute candles (rate-limit protected)..."):
-        try:
-            df_res, total_fno, fetched_cnt, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
-            st.caption(
-                f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
-                f"F&O Stocks Loaded: **{total_fno}** | Candles Fetched: **{fetched_cnt}** | "
-                f"Matching 09:15 5m O=L/O=H: **{eq_match_count}**"
-            )
-            if not df_res.empty:
-                st.dataframe(df_res.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
-            else:
-                st.warning("No matching 09:15 AM 5-min OHL setups found.")
-        except Exception as e:
-            st.error(f"Scanner Error: {e}")
+    try:
+        df_res, total_fno, fetched_cnt, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
+        st.caption(
+            f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
+            f"F&O Stocks Loaded: **{total_fno}** | Candles Fetched: **{fetched_cnt}** | "
+            f"Matching 09:15 5m O=L/O=H: **{eq_match_count}**"
+        )
+        if not df_res.empty:
+            st.dataframe(df_res.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
+        else:
+            st.warning("No matching 09:15 AM 5-min OHL setups found.")
+    except Exception as e:
+        st.error(f"Scanner Error: {e}")
 
     if AUTO_REFRESH:
         time.sleep(60)
