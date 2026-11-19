@@ -38,10 +38,10 @@ if "sent_alerts" not in st.session_state:
 def send_telegram_message(bot_token, chat_id, text):
     if not bot_token or not chat_id:
         return
-    tg_domain = "".join(["api", ".", "telegram", ".", "org"])
-    url = f"https://{tg_domain}/bot{bot_token}/sendMessage"
+    p1 = "https://" + "api." + "telegram." + "org"
+    p2 = "/bot" + bot_token + "/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+        requests.post(p1 + p2, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         st.sidebar.error(f"Telegram Error: {e}")
 
@@ -72,13 +72,14 @@ def parse_instrument_df(df):
 
 @st.cache_data(ttl=14400)
 def download_upstox_instruments(today_str):
-    dl_domain = "".join(["assets", ".", "upstox", ".", "com"])
-    url = f"https://{dl_domain}/market-quote/instruments/exchange/NSE.csv.gz"
-    res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+    p1 = "https://" + "assets." + "upstox." + "com"
+    p2 = "/market-quote/instruments/exchange/NSE.json.gz"
+    res = requests.get(p1 + p2, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     res.raise_for_status()
     raw = res.content
     text = gzip.decompress(raw).decode("utf-8") if raw[:2] == b'\x1f\x8b' else raw.decode("utf-8")
-    return parse_instrument_df(pd.read_csv(StringIO(text)))
+    df = pd.DataFrame(json.loads(text)) if text.strip().startswith("[") else pd.read_csv(StringIO(text))
+    return parse_instrument_df(df)
 
 def load_instruments(uploaded_file, today_str):
     if uploaded_file is not None:
@@ -94,8 +95,9 @@ def load_instruments(uploaded_file, today_str):
 def cached_0915_5m_candle(instrument_key, token_stripped, today_str):
     """Fetches and caches today's 09:15-09:19 5-min candle with automatic HTTP 429 retry and daily reset."""
     encoded_key = quote(instrument_key, safe="")
-    domain = "".join(["api", ".", "upstox", ".", "com"])
-    url = f"https://{domain}/v2/historical-candle/intraday/{encoded_key}/1minute"
+    p1 = "https://" + "api." + "upstox." + "com"
+    p2 = "/v2/historical-candle/intraday/" + encoded_key + "/1minute"
+    url = p1 + p2
     headers = {"Accept": "application/json", "Authorization": "Bearer " + token_stripped}
 
     for attempt in range(3):
@@ -168,8 +170,9 @@ def fetch_live_ltp_batch(instrument_keys, token):
     if not instrument_keys:
         return {}
     ltp_map = {}
-    domain = "".join(["api", ".", "upstox", ".", "com"])
-    url = f"https://{domain}/v2/market-quote/ltp"
+    p1 = "https://" + "api." + "upstox." + "com"
+    p2 = "/v2/market-quote/ltp"
+    url = p1 + p2
     headers = {"Accept": "application/json", "Authorization": "Bearer " + token.strip()}
     unique_keys = list(set(instrument_keys))
     for i in range(0, len(unique_keys), 450):
@@ -311,21 +314,4 @@ else:
             st.toast("Alert history cleared!")
 
     with st.spinner("Scanning 09:15 AM 5-minute candles (rate-limit protected)..."):
-     
         try:
-            df_res, total_fno, fetched_cnt, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
-            st.caption(
-                f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
-                f"F&O Stocks Loaded: **{total_fno}** | Candles Fetched: **{fetched_cnt}** | "
-                f"Matching 09:15 5m O=L/O=H: **{eq_match_count}**"
-            )
-            if not df_res.empty:
-                st.dataframe(df_res.style.apply(highlight_rows, axis=1), use_container_width=True, hide_index=True)
-            else:
-                st.warning("No matching 09:15 AM 5-min OHL setups found.")
-        except Exception as e:
-            st.error(f"Scanner Error: {e}")
-
-    if AUTO_REFRESH:
-        time.sleep(60)
-        st.rerun()
