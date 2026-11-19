@@ -82,6 +82,7 @@ def download_upstox_instruments(today_str):
 
 def load_instruments(uploaded_file, today_str):
     if uploaded_file is not None:
+        uploaded_file.seek(0)
         raw = uploaded_file.read()
         text = gzip.decompress(raw).decode("utf-8") if raw[:2] == b'\x1f\x8b' else raw.decode("utf-8")
         df = pd.DataFrame(json.loads(text)) if text.strip().startswith("[") else pd.read_csv(StringIO(text))
