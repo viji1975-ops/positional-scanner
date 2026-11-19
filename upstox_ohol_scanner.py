@@ -17,7 +17,7 @@ st.title("📊 Upstox Live Open=Low / Open=High Option Scanner")
 st.sidebar.header("🔑 API & Scanner Settings")
 ACCESS_TOKEN = st.sidebar.text_input("Upstox Access Token", type="password", help="Paste your daily Upstox API access token here")
 STRIKE_RANGE = st.sidebar.slider("Strike Range (ATM +/- N)", min_value=1, max_value=10, value=5)
-MIN_OPTION_VOLUME = st.sidebar.number_input("Minimum Option Volume", min_value=0, value=5000, step=500)
+MIN_OPTION_VOLUME = st.sidebar.number_input("Minimum Option Volume", min_value=0, value=1000, step=500)
 
 st.sidebar.divider()
 st.sidebar.header("📲 Telegram Alerts (Optional)")
@@ -29,7 +29,6 @@ ONLY_HIGHLIGHT_ALERTS = st.sidebar.checkbox("Alert Only on 🔥 Triple-Confirmat
 st.sidebar.divider()
 AUTO_REFRESH = st.sidebar.checkbox("Auto-Refresh Every 60 Seconds", value=False)
 
-# Track already-alerted signals in session state to avoid duplicate spam
 if "sent_alerts" not in st.session_state:
     st.session_state.sent_alerts = set()
 
@@ -37,7 +36,6 @@ if "sent_alerts" not in st.session_state:
 # HELPER FUNCTIONS
 # ==========================================
 def send_telegram_message(bot_token, chat_id, text):
-    """Sends a formatted message to Telegram."""
     if not bot_token or not chat_id:
         return
     url = f"https://telegram.org{bot_token}/sendMessage"
@@ -47,9 +45,8 @@ def send_telegram_message(bot_token, chat_id, text):
     except Exception as e:
         st.sidebar.error(f"Telegram Error: {e}")
 
-@st.cache_data(ttl=14400)  # Cache for 4 hours to avoid repeated CDN downloads
+@st.cache_data(ttl=14400)
 def get_fno_instruments():
-    """Safely downloads and parses Upstox daily NSE JSON master file."""
     url = "https://upstox.com"
     dl_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -59,7 +56,6 @@ def get_fno_instruments():
     res.raise_for_status()
     raw_bytes = res.content
 
-    # Safely check if payload is gzipped (magic bytes 1f 8b) or already plain JSON
     if raw_bytes[:2] == b'\x1f\x8b':
         json_text = gzip.decompress(raw_bytes).decode("utf-8")
     else:
@@ -71,24 +67,21 @@ def get_fno_instruments():
     data = json.loads(json_text)
     df = pd.DataFrame(data)
 
-    # Filter current month options (nearest expiry)
     opts = df[(df['segment'] == 'NSE_FO') & (df['instrument_type'].isin(['CE', 'PE']))].copy()
     nearest_expiry = opts['expiry'].min()
     opts = opts[opts['expiry'] == nearest_expiry]
 
-    # Filter underlying F&O equities
     fno_symbols = opts['name'].unique()
     eqs = df[(df['segment'] == 'NSE_EQ') & (df['trading_symbol'].isin(fno_symbols))].copy()
 
     return eqs, opts
 
 def fetch_full_quotes_batch(instrument_keys, token):
-    """Fetches live OHLC + Volume data in batches of 450 using Upstox Full Market Quote API."""
     quote_map = {}
     url = "https://upstox.com"
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {token}"
+        "Authorization": f"Bearer {token.strip()}"
     }
 
     for i in range(0, len(instrument_keys), 450):
@@ -112,14 +105,12 @@ def fetch_full_quotes_batch(instrument_keys, token):
 def run_scanner(token, strike_range, min_vol):
     eqs, opts = get_fno_instruments()
 
-    # Step 1: Fetch live quotes for all F&O Equities
     eq_keys = eqs['instrument_key'].tolist()
     eq_quotes = fetch_full_quotes_batch(eq_keys, token)
 
     if not eq_quotes:
         return pd.DataFrame()
 
-    # Step 2: Filter stocks with exact Open == Low OR Open == High
     candidates = []
     option_keys_to_fetch = set()
 
@@ -184,7 +175,6 @@ def run_scanner(token, strike_range, min_vol):
     if not candidates:
         return pd.DataFrame()
 
-    # Step 3: Fetch live quotes + volumes for all ATM +/- N strikes
     opt_quotes = fetch_full_quotes_batch(list(option_keys_to_fetch), token)
 
     results = []
@@ -196,7 +186,6 @@ def run_scanner(token, strike_range, min_vol):
             if not ce_data or not pe_data:
                 continue
 
-            # Liquidity filter
             if ce_data['volume'] < min_vol or pe_data['volume'] < min_vol:
                 continue
 
@@ -205,7 +194,6 @@ def run_scanner(token, strike_range, min_vol):
             if not ce_o or not pe_o or ce_o.get('open', 0) == 0 or pe_o.get('open', 0) == 0:
                 continue
 
-            # Exact Open=Low and Open=High checks
             ce_ol = (ce_o['open'] == ce_o['low']) and (ce_data['ltp'] > ce_o['open'])
             ce_oh = (ce_o['open'] == ce_o['high']) and (ce_data['ltp'] < ce_o['open'])
             pe_ol = (pe_o['open'] == pe_o['low']) and (pe_data['ltp'] > pe_o['open'])
@@ -215,7 +203,6 @@ def run_scanner(token, strike_range, min_vol):
             priority = 99
             is_triple = False
 
-            # BULLISH SETUPS (Stock Open == Low)
             if item['is_eq_ol'] and ce_ol:
                 if pe_oh:
                     signal = "🔥 HIGHLIGHT BULLISH (EQ O=L | CE O=L | PE O=H)"
@@ -225,7 +212,6 @@ def run_scanner(token, strike_range, min_vol):
                     signal = "✅ BULLISH (EQ O=L | CE O=L)"
                     priority = 3
 
-            # BEARISH SETUPS (Stock Open == High)
             elif item['is_eq_oh'] and pe_ol:
                 if ce_oh:
                     signal = "🔥 HIGHLIGHT BEARISH (EQ O=H | PE O=L | CE O=H)"
@@ -252,4 +238,18 @@ def run_scanner(token, strike_range, min_vol):
                     "PE_Vol": pe_data['volume']
                 })
 
-                # Trigger Telegram Alert if enabled and not already sent
+                if ENABLE_TELEGRAM and (not ONLY_HIGHLIGHT_ALERTS or is_triple):
+                    alert_id = f"{item['symbol']}_{pair['strike']}_{signal}"
+                    if alert_id not in st.session_state.sent_alerts:
+                        msg = (
+                            f"<b>{signal}</b>\n"
+                            f"📌 <b>Stock:</b> {item['symbol']} (Open: {item['eq_ohlc']['open']} | LTP: {item['eq_ltp']})\n"
+                            f"🎯 <b>Strike:</b> {strike_label}\n"
+                            f"📈 <b>CE:</b> Open {ce_o['open']} | LTP {ce_data['ltp']} (Vol: {ce_data['volume']})\n"
+                            f"📉 <b>PE:</b> Open {pe_o['open']} | LTP {pe_data['ltp']} (Vol: {pe_data['volume']})"
+                        )
+                        send_telegram_message(TG_BOT_TOKEN, TG_CHAT_ID, msg)
+                        st.session_state.sent_alerts.add(alert_id)
+
+    if results:
+        res_df = pd.DataFrame(results)
