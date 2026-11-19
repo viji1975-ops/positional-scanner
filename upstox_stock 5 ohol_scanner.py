@@ -313,8 +313,8 @@ else:
             st.session_state.sent_alerts.clear()
             st.toast("Alert history cleared!")
 
-    with st.spinner("Scanning 09:15 AM 5-minute candles (rate-limit protected)..."):
-            try:
+        with st.spinner("Scanning 09:15 AM 5-minute candles (rate-limit protected)..."):
+        try:
             df_res, total_fno, fetched_cnt, eq_match_count = run_scanner(ACCESS_TOKEN, STRIKE_RANGE, MIN_5M_VOLUME, UPLOADED_FILE)
             st.caption(
                 f"Last scanned: {pd.Timestamp.now(tz='Asia/Kolkata').strftime('%I:%M:%S %p IST')} | "
