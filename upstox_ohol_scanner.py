@@ -158,8 +158,8 @@ def run_scanner(token, strike_range, min_vol, uploaded_file):
                 ce = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'CE')]
                 pe = s_opts[(s_opts['strike_price'] == st_val) & (s_opts['instrument_type'] == 'PE')]
                 if not ce.empty and not pe.empty:
-                    ck = ce['instrument_key'].tolist()
-                    pk = pe['instrument_key'].tolist()
+                    ck = ce['instrument_key'].tolist()[0]
+                    pk = pe['instrument_key'].tolist()[0]
                     diff = strikes.index(st_val) - idx
                     pairs.append({"strike": st_val, "m": "ATM" if diff == 0 else f"ATM{diff:+d}", "ck": ck, "pk": pk})
                     opt_keys.update([ck, pk])
