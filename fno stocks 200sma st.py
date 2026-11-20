@@ -281,7 +281,7 @@ for idx_i, symbol in enumerate(watchlist):
         })
         
     if signal_dir in ("BULLISH", "BEARISH"):
-        matched_stocks.append((symbol, eq_key, spot_price, opt_type occ_time))
+        matched_stocks.append((symbol, eq_key, spot_price, opt_type, occ_time))
 
 progress.empty()
 
