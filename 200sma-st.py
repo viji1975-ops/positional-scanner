@@ -45,13 +45,18 @@ INDICES = {
 # ==========================================
 @st.cache_data(ttl=3600 * 6)
 def load_nse_options_master():
-    """Fetches NSE option contracts from Upstox global CDN (no geo-block)."""
+    """Fetches NSE option contracts from Upstox global CDN."""
     url = "https://upstox.com"
     res = requests.get(url, timeout=20)
-    raw_bytes = gzip.decompress(res.content)
-    data = json.loads(raw_bytes.decode("utf-8"))
     
-    # Filter only Index Call Options (OPTIDX & CE) for our 4 indices
+    # Only gzip-decompress if requests hasn't already decompressed it automatically
+    if res.content[:2] == b"\x1f\x8b":
+        raw_text = gzip.decompress(res.content).decode("utf-8")
+    else:
+        raw_text = res.text
+        
+    data = json.loads(raw_text)
+    
     target_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
     filtered = []
     for item in data:
@@ -60,7 +65,6 @@ def load_nse_options_master():
             and item.get("instrument_type") == "CE"
             and item.get("name") in target_names
         ):
-            # Convert expiry from milliseconds timestamp to YYYY-MM-DD
             exp_dt = datetime.datetime.fromtimestamp(item["expiry"] / 1000.0, tz=datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
             filtered.append({
                 "name": item["name"],
@@ -92,7 +96,6 @@ def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
         if not selected_exp:
             selected_exp = expiries[0]
     else:
-        # Monthly expiry = last available expiry in the nearest active month
         first_dt = datetime.datetime.strptime(expiries[0], "%Y-%m-%d").date()
         month_exps = [
             e for e in expiries 
