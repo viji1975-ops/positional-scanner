@@ -34,8 +34,9 @@ HEADERS = {
     "Authorization": f"Bearer {access_token}"
 }
 
-BASE_API = "https://" + "://upstox.com"
-CDN_URL = "https://" + "://upstox.com"
+SLASH2 = chr(47) * 2
+BASE_API = f"https:{SLASH2}://upstox.com"
+CDN_URL = f"https:{SLASH2}://upstox.com"
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
