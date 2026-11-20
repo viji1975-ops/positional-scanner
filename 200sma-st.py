@@ -1,4 +1,3 @@
-import time
 import calendar
 import datetime
 import urllib.parse
@@ -7,6 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
@@ -237,10 +237,14 @@ def evaluate_setup(df, check_bearish=False):
     return "NONE", "-", info
 
 # ==========================================
-# 4. PARALLEL SCANNER EXECUTION & DISPLAY
+# 4. NON-BLOCKING AUTO-REFRESH & SCANNER
 # ==========================================
 now_ist = get_ist_now()
 live_mode = auto_refresh and is_market_hours(now_ist)
+
+if live_mode:
+    st_autorefresh(interval=60 * 1000, key="live_market_scanner_refresh")
+
 status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL / MARKET CLOSED"
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
 
@@ -248,7 +252,7 @@ index_rows = []
 option_tasks = []
 option_rows = []
 
-with st.spinner("Scanning Indices & Options in parallel..."):
+with st.spinner("Scanning Indices & Options..."):
     with ThreadPoolExecutor(max_workers=4) as executor:
         idx_futures = {name: executor.submit(get_candles, key) for name, key in INDICES.items()}
         idx_results = {name: fut.result() for name, fut in idx_futures.items()}
@@ -261,4 +265,3 @@ with st.spinner("Scanning Indices & Options in parallel..."):
             
         signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, check_bearish=True)
         spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
-        
