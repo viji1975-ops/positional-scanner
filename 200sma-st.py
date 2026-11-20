@@ -10,9 +10,6 @@ import streamlit as st
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 
-# ==========================================
-# 1. SIDEBAR TOKEN INPUT
-# ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
@@ -45,9 +42,6 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
-# ==========================================
-# 2. LOAD NSE OPTION CONTRACTS
-# ==========================================
 @st.cache_data(ttl=3600 * 6)
 def load_nse_options_master():
     res = requests.get(CDN_URL, timeout=25)
@@ -89,13 +83,13 @@ def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
         selected_exp = None
         for exp in expiries:
             dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            if dt.weekday() == 1:  # Tuesday
+            if dt.weekday() == 1:
                 selected_exp = exp
                 break
         if not selected_exp:
-            selected_exp = expiries
+            selected_exp = expiries[0]
     else:
-        first_dt = datetime.datetime.strptime(expiries, "%Y-%m-%d").date()
+        first_dt = datetime.datetime.strptime(expiries[0], "%Y-%m-%d").date()
         month_exps = [
             e for e in expiries 
             if datetime.datetime.strptime(e, "%Y-%m-%d").month == first_dt.month
@@ -106,9 +100,6 @@ def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
     ce_list = list(zip(exp_df["strike"].head(3), exp_df["instrument_key"].head(3), exp_df["trading_symbol"].head(3)))
     return selected_exp, ce_list
 
-# ==========================================
-# 3. CANDLE & INDICATOR FUNCTIONS
-# ==========================================
 def safe_get_json(url):
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
@@ -199,9 +190,6 @@ def check_bullish_setup(df):
         "st": "🟢 Bullish" if above_st else "🔴 Bearish"
     }
 
-# ==========================================
-# 4. RENDER DASHBOARD
-# ==========================================
 ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
