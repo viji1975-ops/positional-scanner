@@ -10,6 +10,9 @@ import streamlit as st
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 
+# ==========================================
+# 1. SIDEBAR TOKEN INPUT
+# ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
@@ -31,9 +34,10 @@ HEADERS = {
     "Authorization": f"Bearer {access_token}"
 }
 
-SLASH2 = chr(47) * 2
-BASE_API = f"https:{SLASH2}://upstox.com"
-CDN_URL = f"https:{SLASH2}://upstox.com"
+# Build URLs using chr(47) so browser/clipboard extensions cannot strip slashes
+S = chr(47)
+BASE_API = f"https:{S}{S}://upstox.com{S}v2"
+CDN_URL = f"https:{S}{S}://upstox.com{S}market-quote{S}instruments{S}exchange{S}NSE.json.gz"
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -42,6 +46,9 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
+# ==========================================
+# 2. LOAD NSE OPTION CONTRACTS
+# ==========================================
 @st.cache_data(ttl=3600 * 6)
 def load_nse_options_master():
     res = requests.get(CDN_URL, timeout=25)
@@ -83,7 +90,7 @@ def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
         selected_exp = None
         for exp in expiries:
             dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            if dt.weekday() == 1:
+            if dt.weekday() == 1:  # Tuesday
                 selected_exp = exp
                 break
         if not selected_exp:
@@ -100,6 +107,9 @@ def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
     ce_list = list(zip(exp_df["strike"].head(3), exp_df["instrument_key"].head(3), exp_df["trading_symbol"].head(3)))
     return selected_exp, ce_list
 
+# ==========================================
+# 3. CANDLE & INDICATOR FUNCTIONS
+# ==========================================
 def safe_get_json(url):
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
@@ -118,8 +128,8 @@ def get_candles(instrument_key):
     to_date = ist_today.strftime("%Y-%m-%d")
     from_date = (ist_today - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     
-    hist_url = f"{BASE_API}/historical-candle/{encoded_key}/1minute/{to_date}/{from_date}"
-    intra_url = f"{BASE_API}/historical-candle/intraday/{encoded_key}/1minute"
+    hist_url = f"{BASE_API}{S}historical-candle{S}{encoded_key}{S}1minute{S}{to_date}{S}{from_date}"
+    intra_url = f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute"
     
     hist_res, hist_err = safe_get_json(hist_url)
     intra_res, intra_err = safe_get_json(intra_url)
@@ -190,6 +200,9 @@ def check_bullish_setup(df):
         "st": "🟢 Bullish" if above_st else "🔴 Bearish"
     }
 
+# ==========================================
+# 4. RENDER DASHBOARD
+# ==========================================
 ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
