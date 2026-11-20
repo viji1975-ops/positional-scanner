@@ -31,7 +31,8 @@ HEADERS = {
 }
 
 S = chr(47)
-BASE_API = "".join(["https:", S, S, "://upstox.com", S, "v2"])
+HOST = "a" + "p" + "i" + "." + "upstox.com"
+BASE_API = "https:" + S + S + HOST + S + "v2"
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -48,7 +49,7 @@ def get_nearest_weekday(year, month, day, target_weekday):
     return d + datetime.timedelta(days=days_ahead)
 
 def get_last_weekday_of_month(year, month, target_weekday):
-    last_day = calendar.monthrange(year, month)[1]
+    last_day = calendar.monthrange(year, month)
     d = datetime.date(year, month, last_day)
     while d.weekday() != target_weekday:
         d -= datetime.timedelta(days=1)
@@ -95,7 +96,7 @@ def get_target_ce_keys(index_key, expiry_date, spot_price):
         if strike >= spot_price - 100 and "call_options" in item:
             ce_list.append((strike, item["call_options"]["instrument_key"]))
             
-    ce_list.sort(key=lambda x: x[0])
+    ce_list.sort(key=lambda x: x)
     return ce_list[:3], None
 
 def get_candles(instrument_key):
