@@ -289,15 +289,23 @@ st.subheader(f"1. F&O Stocks Status ({len(matched_stocks)} Aligned out of {len(w
 if stock_rows:
     st.dataframe(pd.DataFrame(stock_rows), use_container_width=True, hide_index=True)
 
-st.subheader("2. Matching Call (CE) & Put (PE) Options Status")
+st.subheader("2. Matching Call (CE) & Put (PE) Options Status (Recent / Today's Signals)")
 option_rows = []
 today_str = str(now_ist.date())
+today_prefix = now_ist.strftime("%d-%b")
 
-for symbol, eq_key, spot_price, opt_type in matched_stocks:
+# Prioritize today's fresh breakouts first (limit to top 12 stocks so Table 2 loads in ~4 seconds)
+todays_matches = [m for m in matched_stocks if m[4].startswith(today_prefix)]
+scan_targets = todays_matches[:12] if todays_matches else matched_stocks[:10]
+
+opt_progress = st.progress(0, text="Scanning matching stock options...")
+for i, (symbol, eq_key, spot_price, opt_type, occ_time) in enumerate(scan_targets):
+    opt_progress.progress((i + 1) / max(1, len(scan_targets)), text=f"Checking {symbol} {opt_type} options...")
     expiry, chain_data, opt_err = fetch_stock_option_chain_cached(symbol, eq_key, today_str)
     if not chain_data:
         continue
-    for strike, opt_key in get_stock_strikes_from_chain(chain_data, spot_price, option_type=opt_type):
+    # Check ATM and +1 OTM strike (2 strikes per stock for fast live scanning)
+    for strike, opt_key in get_stock_strikes_from_chain(chain_data, spot_price, option_type=opt_type)[:2]:
         df_opt, _ = get_candles(opt_key)
         opt_dir, opt_occ_time, opt_info = evaluate_setup(df_opt, check_bearish=False)
         opt_aligned = (opt_dir == "BULLISH")
@@ -306,12 +314,15 @@ for symbol, eq_key, spot_price, opt_type in matched_stocks:
             "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)",
             "Contract": f"{strike:g} {opt_type}",
             "Expiry": expiry,
+            "Stock Signal Since": occ_time,
             "Opt Close": opt_info["close"],
             "Opt 200 SMA": opt_info["sma200"],
             "Opt SuperTrend": opt_info["st"],
             "Signal": f"🚀 CONFIRMED BUY {opt_type}" if opt_aligned else f"⏳ {opt_type} Not Aligned",
             "Opt Signal Since (IST)": opt_occ_time
         })
+
+opt_progress.empty()
 
 if option_rows:
     st.dataframe(pd.DataFrame(option_rows), use_container_width=True, hide_index=True)
