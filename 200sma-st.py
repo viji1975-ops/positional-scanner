@@ -1,4 +1,7 @@
+import gzip
+import json
 import datetime
+import urllib.parse
 import requests
 import numpy as np
 import pandas as pd
@@ -7,21 +10,32 @@ import streamlit as st
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 
+# ==========================================
+# 1. SIDEBAR TOKEN INPUT
+# ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
-raw_token = st.sidebar.text_input("Upstox Daily Access Token", value=default_token, type="password")
+raw_token = st.sidebar.text_input(
+    "Upstox Daily Access Token", 
+    value=default_token, 
+    type="password",
+    help="Paste your daily Upstox Access Token here"
+)
 access_token = raw_token.strip()
 
 if st.sidebar.button("🔄 Refresh / Run Scan Now", type="primary"):
     st.rerun()
 
 if not access_token:
-    st.warning("⚠️ Please enter your Upstox Access Token in the left sidebar.")
+    st.warning("⚠️ Please enter your Upstox Access Token in the left sidebar to start scanning.")
     st.stop()
 
 HEADERS = {
     "Accept": "application/json",
     "Authorization": f"Bearer {access_token}"
 }
+
+BASE_API = "https://" + "://upstox.com"
+CDN_URL = "https://" + "://upstox.com"
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -30,29 +44,90 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
+# ==========================================
+# 2. LOAD NSE OPTION CONTRACTS
+# ==========================================
+@st.cache_data(ttl=3600 * 6)
+def load_nse_options_master():
+    res = requests.get(CDN_URL, timeout=25)
+    if res.content[:2] == b"\x1f\x8b":
+        raw_text = gzip.decompress(res.content).decode("utf-8")
+    else:
+        raw_text = res.text
+        
+    data = json.loads(raw_text)
+    target_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+    filtered = []
+    for item in data:
+        if (
+            item.get("segment") == "NSE_FO"
+            and item.get("instrument_type") == "CE"
+            and item.get("name") in target_names
+        ):
+            exp_dt = datetime.datetime.fromtimestamp(item["expiry"] / 1000.0, tz=datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
+            filtered.append({
+                "name": item["name"],
+                "expiry": exp_dt.strftime("%Y-%m-%d"),
+                "strike": float(item["strike_price"]),
+                "instrument_key": item["instrument_key"],
+                "trading_symbol": item["trading_symbol"]
+            })
+    return pd.DataFrame(filtered)
+
+def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
+    sub = df_master[df_master["name"] == index_name].copy()
+    today_str = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    sub = sub[sub["expiry"] >= today_str]
+    
+    if sub.empty:
+        return None, []
+        
+    expiries = sorted(sub["expiry"].unique())
+    
+    if index_name == "NIFTY":
+        selected_exp = None
+        for exp in expiries:
+            dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
+            if dt.weekday() == 1:  # Tuesday
+                selected_exp = exp
+                break
+        if not selected_exp:
+            selected_exp = expiries
+    else:
+        first_dt = datetime.datetime.strptime(expiries, "%Y-%m-%d").date()
+        month_exps = [
+            e for e in expiries 
+            if datetime.datetime.strptime(e, "%Y-%m-%d").month == first_dt.month
+        ]
+        selected_exp = month_exps[-1]
+        
+    exp_df = sub[(sub["expiry"] == selected_exp) & (sub["strike"] >= spot_price - 100)].sort_values("strike")
+    ce_list = list(zip(exp_df["strike"].head(3), exp_df["instrument_key"].head(3), exp_df["trading_symbol"].head(3)))
+    return selected_exp, ce_list
+
+# ==========================================
+# 3. CANDLE & INDICATOR FUNCTIONS
+# ==========================================
 def safe_get_json(url):
     try:
         res = requests.get(url, headers=HEADERS, timeout=15)
         if not res.text.strip():
             return None, f"HTTP {res.status_code}: Empty response (Token expired or invalid)."
-        try:
-            data = res.json()
-            if res.status_code != 200 or data.get("status") != "success":
-                return None, f"HTTP {res.status_code}: {data}"
-            return data, None
-        except ValueError:
-            return None, f"HTTP {res.status_code}: Upstox blocked Streamlit Cloud US IP (Returned HTML)."
+        data = res.json()
+        if res.status_code != 200 or data.get("status") != "success":
+            return None, f"HTTP {res.status_code}: {data}"
+        return data, None
     except Exception as e:
         return None, str(e)
 
 def get_candles(instrument_key):
-    encoded_key = requests.utils.quote(instrument_key)
+    encoded_key = urllib.parse.quote(instrument_key, safe="")
     ist_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).date()
     to_date = ist_today.strftime("%Y-%m-%d")
     from_date = (ist_today - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     
-    hist_url = f"https://upstox.com{encoded_key}/1minute/{to_date}/{from_date}"
-    intra_url = f"https://upstox.comintraday/{encoded_key}/1minute"
+    hist_url = f"{BASE_API}/historical-candle/{encoded_key}/1minute/{to_date}/{from_date}"
+    intra_url = f"{BASE_API}/historical-candle/intraday/{encoded_key}/1minute"
     
     hist_res, hist_err = safe_get_json(hist_url)
     intra_res, intra_err = safe_get_json(intra_url)
@@ -123,24 +198,58 @@ def check_bullish_setup(df):
         "st": "🟢 Bullish" if above_st else "🔴 Bearish"
     }
 
+# ==========================================
+# 4. RENDER DASHBOARD
+# ==========================================
 ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
-index_rows = []
-for name, inst_key in INDICES.items():
-    df_index, err = get_candles(inst_key)
-    if df_index is None:
-        st.error(f"❌ {name}: {err}")
-        continue
-        
-    idx_bullish, idx_info = check_bullish_setup(df_index)
-    index_rows.append({
-        "Index": name,
-        "Close": idx_info["close"],
-        "200 SMA": idx_info["sma200"],
-        "SuperTrend (10,3)": idx_info["st"],
-        "Status": "✅ MATCH (Above Both)" if idx_bullish else "⏳ Waiting"
-    })
+with st.spinner("Loading NSE Option Contracts..."):
+    df_master = load_nse_options_master()
 
+index_rows = []
+ce_rows = []
+
+with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
+    for name, inst_key in INDICES.items():
+        df_index, err = get_candles(inst_key)
+        if df_index is None:
+            st.error(f"❌ {name}: {err}")
+            continue
+            
+        idx_bullish, idx_info = check_bullish_setup(df_index)
+        spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        expiry, ce_contracts = get_automated_expiry_and_strikes(df_master, name, spot_price)
+        
+        index_rows.append({
+            "Index": name,
+            "Auto Expiry": expiry,
+            "Close": idx_info["close"],
+            "200 SMA": idx_info["sma200"],
+            "SuperTrend (10,3)": idx_info["st"],
+            "Status": "✅ MATCH (Above Both)" if idx_bullish else "⏳ Waiting"
+        })
+        
+        if idx_bullish and ce_contracts:
+            for strike, ce_key, symbol in ce_contracts:
+                df_ce, _ = get_candles(ce_key)
+                ce_bullish, ce_info = check_bullish_setup(df_ce)
+                ce_rows.append({
+                    "Index": name,
+                    "Contract": symbol,
+                    "Expiry": expiry,
+                    "CE Close": ce_info["close"],
+                    "CE 200 SMA": ce_info["sma200"],
+                    "CE SuperTrend": ce_info["st"],
+                    "Signal": "🚀 CONFIRMED BUY SETUP" if ce_bullish else "⏳ CE Not Aligned"
+                })
+
+st.subheader("1. Index Status (5-Minute Timeframe)")
 if index_rows:
     st.dataframe(pd.DataFrame(index_rows), use_container_width=True, hide_index=True)
+
+st.subheader("2. Matching Call Options (CE) Status")
+if ce_rows:
+    st.dataframe(pd.DataFrame(ce_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No indices are currently above both 200 SMA and SuperTrend, or no CE contracts matched yet.")
