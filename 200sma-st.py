@@ -10,9 +10,6 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 
-# ==========================================
-# 1. SIDEBAR CONTROLS
-# ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
@@ -47,9 +44,6 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
-# ==========================================
-# 2. EXPIRY & CACHED OPTION CHAIN FUNCTIONS
-# ==========================================
 def get_ist_now():
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 
@@ -168,9 +162,6 @@ def get_candles(instrument_key):
     
     return df_5m, None
 
-# ==========================================
-# 3. INDICATOR & OCCURRENCE TIMESTAMP LOGIC
-# ==========================================
 def calculate_supertrend(df, period=10, multiplier=3):
     high, low, close = df["high"], df["low"], df["close"]
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -235,9 +226,6 @@ def evaluate_setup(df, check_bearish=False):
         
     return "NONE", "-", info
 
-# ==========================================
-# 4. NON-BLOCKING AUTO-REFRESH & SCANNER
-# ==========================================
 now_ist = get_ist_now()
 live_mode = auto_refresh and is_market_hours(now_ist)
 
@@ -246,6 +234,11 @@ if live_mode:
 
 status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL / MARKET CLOSED"
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
+
+STATUS_MAP = {
+    "BULLISH": "🟢 BULLISH (Look for CE)",
+    "BEARISH": "🔴 BEARISH (Look for PE)"
+}
 
 try:
     index_rows = []
@@ -261,7 +254,18 @@ try:
         spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
         expiry, chain_data, opt_err = fetch_option_chain_cached(name, inst_key, access_token[:10])
         opt_type = "PE" if signal_dir == "BEARISH" else "CE"
+        status_label = STATUS_MAP.get(signal_dir, "⏳ Waiting (Mixed)")
+            
+        index_rows.append({
+            "Index": name,
+            "Expiry": expiry,
+            "Close": idx_info["close"],
+            "200 SMA": idx_info["sma200"],
+            "SuperTrend (10,3)": idx_info["st"],
+            "Setup Status": status_label,
+            "Signal Since (IST)": idx_occ_time
+        })
         
-        if signal_dir == "BULLISH":
-            status_label = "🟢 BULLISH (Look for CE)"
-        elif signal_dir == "BEARISH":
+        if signal_dir in ("BULLISH", "BEARISH"):
+            matched_indices.append((name, inst_key, spot_price, expiry, chain_data, opt_err, opt_type))
+
