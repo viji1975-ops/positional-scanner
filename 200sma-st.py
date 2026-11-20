@@ -53,7 +53,7 @@ def get_ist_now():
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 
 def is_market_hours(ist_dt):
-    if ist_dt.weekday() >= 5:  # Saturday / Sunday
+    if ist_dt.weekday() >= 5:
         return False
     t = ist_dt.time()
     return datetime.time(9, 15) <= t <= datetime.time(15, 30)
@@ -105,7 +105,6 @@ def safe_get_json(url, params=None):
         return None, str(e)
 
 def get_valid_chain_and_strikes(index_name, index_key, spot_price, option_type="CE"):
-    """Fetches ATM and +1/+2 OTM strikes for either CE (bullish) or PE (bearish)."""
     url = f"{BASE_API}{S}option{S}chain"
     candidates = get_candidate_expiries(index_name)
     last_err = "No active option chain found"
@@ -124,9 +123,9 @@ def get_valid_chain_and_strikes(index_name, index_key, spot_price, option_type="
                     opt_list.append((strike, item["put_options"]["instrument_key"]))
                     
             if option_type == "CE":
-                opt_list.sort()  # Ascending strikes: ATM, OTM1, OTM2
+                opt_list.sort()
             else:
-                opt_list.sort(reverse=True)  # Descending strikes for PE: ATM, OTM1, OTM2
+                opt_list.sort(reverse=True)
                 
             if opt_list:
                 return exp, opt_list[:3], None
@@ -197,10 +196,8 @@ def calculate_supertrend(df, period=10, multiplier=3):
     return pd.Series(np.where(in_uptrend, 1, -1), index=df.index)
 
 def find_occurrence_timestamp(df, condition_series):
-    """Finds the exact timestamp when the current True streak began."""
     if not bool(condition_series.iloc[-1]):
         return "-"
-    # Walk backwards to find when condition first became True continuously
     start_ts = df.index[-1]
     for idx in range(len(condition_series) - 1, -1, -1):
         if bool(condition_series.iloc[idx]):
@@ -210,10 +207,6 @@ def find_occurrence_timestamp(df, condition_series):
     return start_ts.strftime("%d-%b %H:%M")
 
 def evaluate_setup(df, check_bearish=False):
-    """
-    For Indices: checks Bullish (Close > 200 SMA & ST == 1) AND Bearish (Close < 200 SMA & ST == -1).
-    For Options (CE/PE): always checks Bullish momentum (Option Close > 200 SMA & ST == 1).
-    """
     if df is None or len(df) < 15:
         return "NONE", "-", {"close": "-", "sma200": "-", "st": "No Trades Yet"}
 
@@ -245,13 +238,29 @@ def evaluate_setup(df, check_bearish=False):
     return "NONE", "-", info
 
 # ==========================================
-# 4. AUTO-REFRESH FRAGMENT (60s IN MARKET HOURS)
+# 4. RENDER LIVE DASHBOARD
 # ==========================================
-ist_now = get_ist_now()
-market_open = is_market_hours(ist_now)
-refresh_interval = 60 if (auto_refresh and market_open) else None
+now_ist = get_ist_now()
+live_mode = auto_refresh and is_market_hours(now_ist)
+status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL / MARKET CLOSED"
+st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
 
-@st.fragment(run_every=refresh_interval)
-def render_live_scanner():
-    now_ist = get_ist_now()
-    status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if (auto_refresh and is_market_hours(now_ist)) else "⏸️ MANUAL / MARKET CLOSED"
+if live_mode:
+    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+
+index_rows = []
+option_rows = []
+
+with st.spinner("Scanning 5-minute charts for Indices, CE & PE Options..."):
+    for name, inst_key in INDICES.items():
+        df_index, err = get_candles(inst_key)
+        if df_index is None:
+            st.error(f"❌ {name}: {err}")
+            continue
+            
+        signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, check_bearish=True)
+        spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        
+        opt_type = "PE" if signal_dir == "BEARISH" else "CE"
+        expiry, opt_contracts, opt_err = get_valid_chain_and_strikes(name, inst_key, spot_price, option_type=opt_type)
+        
