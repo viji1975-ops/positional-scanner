@@ -9,9 +9,6 @@ import streamlit as st
 st.set_page_config(page_title="Upstox 200 SMA + SuperTrend Scanner", layout="wide")
 st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 
-# ==========================================
-# 1. SIDEBAR TOKEN INPUT
-# ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
@@ -34,7 +31,7 @@ HEADERS = {
 }
 
 S = chr(47)
-BASE_API = f"https:{S}{S}://upstox.com{S}v2"
+BASE_API = "".join(["https:", S, S, "://upstox.com", S, "v2"])
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -43,11 +40,7 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
-# ==========================================
-# 2. AUTOMATED EXPIRY CALCULATOR
-# ==========================================
 def get_nearest_weekday(year, month, day, target_weekday):
-    """Finds the nearest upcoming target_weekday (0=Mon, 1=Tue, 3=Thu)."""
     d = datetime.date(year, month, day)
     days_ahead = target_weekday - d.weekday()
     if days_ahead < 0:
@@ -55,8 +48,7 @@ def get_nearest_weekday(year, month, day, target_weekday):
     return d + datetime.timedelta(days=days_ahead)
 
 def get_last_weekday_of_month(year, month, target_weekday):
-    """Finds the last target_weekday of the given month."""
-    last_day = calendar.monthrange(year, month)
+    last_day = calendar.monthrange(year, month)[1]
     d = datetime.date(year, month, last_day)
     while d.weekday() != target_weekday:
         d -= datetime.timedelta(days=1)
@@ -65,12 +57,11 @@ def get_last_weekday_of_month(year, month, target_weekday):
 def get_automated_expiry(index_name):
     ist_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).date()
     if index_name == "NIFTY":
-        # Weekly expiry: Nearest Tuesday (weekday == 1)
+        # Weekly expiry: Nearest Tuesday (1)
         exp_date = get_nearest_weekday(ist_today.year, ist_today.month, ist_today.day, 1)
         return exp_date.strftime("%Y-%m-%d")
     else:
-        # Monthly expiry: Last Thursday (3) of current month (or next month if passed)
-        # Note: Upstox option/chain also accepts monthly expiry date
+        # Monthly expiry: Last Thursday (3) of current month
         exp_date = get_last_weekday_of_month(ist_today.year, ist_today.month, 3)
         if exp_date < ist_today:
             next_month = ist_today.month + 1 if ist_today.month < 12 else 1
@@ -78,16 +69,13 @@ def get_automated_expiry(index_name):
             exp_date = get_last_weekday_of_month(next_year, next_month, 3)
         return exp_date.strftime("%Y-%m-%d")
 
-# ==========================================
-# 3. SAFE API & CANDLE FUNCTIONS
-# ==========================================
 def safe_get_json(url, params=None):
     try:
         res = requests.get(url, headers=HEADERS, params=params, timeout=15, allow_redirects=False)
         if res.status_code in (301, 302, 307, 308):
-            return None, f"HTTP {res.status_code} Redirect blocked by Upstox (Location: {res.headers.get('Location')})"
+            return None, f"HTTP {res.status_code} Redirect blocked (Location: {res.headers.get('Location')})"
         if not res.text.strip():
-            return None, f"HTTP {res.status_code}: Empty response (Token expired or invalid)."
+            return None, f"HTTP {res.status_code}: Empty response (Check Token validity)."
         data = res.json()
         if res.status_code != 200 or data.get("status") != "success":
             return None, f"HTTP {res.status_code}: {data}"
@@ -107,7 +95,7 @@ def get_target_ce_keys(index_key, expiry_date, spot_price):
         if strike >= spot_price - 100 and "call_options" in item:
             ce_list.append((strike, item["call_options"]["instrument_key"]))
             
-    ce_list.sort(key=lambda x: x)
+    ce_list.sort(key=lambda x: x[0])
     return ce_list[:3], None
 
 def get_candles(instrument_key):
@@ -188,9 +176,6 @@ def check_bullish_setup(df):
         "st": "🟢 Bullish" if above_st else "🔴 Bearish"
     }
 
-# ==========================================
-# 4. RENDER DASHBOARD
-# ==========================================
 ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
