@@ -1,3 +1,4 @@
+import time
 import calendar
 import datetime
 import urllib.parse
@@ -107,7 +108,6 @@ def safe_get_json(url, params=None):
 
 @st.cache_data(ttl=1800)
 def fetch_option_chain_cached(index_name, index_key, token_prefix):
-    """Caches valid expiry & full option chain for 30 mins to make scans instant."""
     url = f"{BASE_API}{S}option{S}chain"
     candidates = get_candidate_expiries(index_name)
     last_err = "No active option chain found"
@@ -237,22 +237,18 @@ def evaluate_setup(df, check_bearish=False):
     return "NONE", "-", info
 
 # ==========================================
-# 4. PARALLEL SCANNER EXECUTION
+# 4. PARALLEL SCANNER EXECUTION & DISPLAY
 # ==========================================
 now_ist = get_ist_now()
 live_mode = auto_refresh and is_market_hours(now_ist)
 status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL / MARKET CLOSED"
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
 
-if live_mode:
-    st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
-
 index_rows = []
 option_tasks = []
 option_rows = []
 
 with st.spinner("Scanning Indices & Options in parallel..."):
-    # Step A: Fetch all 4 index candle sets simultaneously
     with ThreadPoolExecutor(max_workers=4) as executor:
         idx_futures = {name: executor.submit(get_candles, key) for name, key in INDICES.items()}
         idx_results = {name: fut.result() for name, fut in idx_futures.items()}
@@ -264,3 +260,5 @@ with st.spinner("Scanning Indices & Options in parallel..."):
             continue
             
         signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, check_bearish=True)
+        spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        
