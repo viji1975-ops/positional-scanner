@@ -215,7 +215,7 @@ for name, spot_price, expiry, chain_data, opt_err, opt_type in matched_indices:
         df_opt, _ = get_candles(opt_key)
         opt_dir, opt_occ_time, opt_info = evaluate_setup(df_opt, check_bearish=False)
         opt_aligned = (opt_dir == "BULLISH")
-option_rows.append({
+        option_rows.append({
             "Index": name,
             "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)",
             "Contract": f"{int(strike)} {opt_type}",
