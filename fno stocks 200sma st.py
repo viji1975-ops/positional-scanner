@@ -207,3 +207,113 @@ def calculate_supertrend(df, period=10, multiplier=3):
             if in_uptrend[i] and lowerband.iloc[i] < lowerband.iloc[i - 1]:
                 lowerband.iloc[i] = lowerband.iloc[i - 1]
             if not in_uptrend[i] and upperband.iloc[i] > upperband.iloc[i - 1]:
+                upperband.iloc[i] = upperband.iloc[i - 1]
+    return pd.Series(np.where(in_uptrend, 1, -1), index=df.index)
+
+def find_occurrence_timestamp(df, condition_series):
+    if not bool(condition_series.iloc[-1]):
+        return "-"
+    start_ts = df.index[-1]
+    for idx in range(len(condition_series) - 1, -1, -1):
+        if bool(condition_series.iloc[idx]):
+            start_ts = df.index[idx]
+        else:
+            break
+    return start_ts.strftime("%d-%b %H:%M")
+
+def evaluate_setup(df, check_bearish=False):
+    if df is None or len(df) < 15:
+        return "NONE", "-", {"close": "-", "sma200": "-", "st": "No Trades Yet"}
+
+    df["SMA_200"] = df["close"].rolling(window=200, min_periods=20).mean()
+    df["ST_DIR"] = calculate_supertrend(df, period=10, multiplier=3)
+    bull_cond = (df["close"] > df["SMA_200"]) & (df["ST_DIR"] == 1)
+    bear_cond = (df["close"] < df["SMA_200"]) & (df["ST_DIR"] == -1)
+    
+    latest = df.iloc[-1]
+    close_price, sma_200, st_bull = float(latest["close"]), float(latest["SMA_200"]), (latest["ST_DIR"] == 1)
+    info = {"close": round(close_price, 2), "sma200": round(sma_200, 2), "st": "🟢 Bullish" if st_bull else "🔴 Bearish"}
+    
+    if bool(bull_cond.iloc[-1]):
+        return "BULLISH", find_occurrence_timestamp(df, bull_cond), info
+    if check_bearish and bool(bear_cond.iloc[-1]):
+        return "BEARISH", find_occurrence_timestamp(df, bear_cond), info
+    return "NONE", "-", info
+
+now_ist = get_ist_now()
+live_mode = auto_refresh and is_market_hours(now_ist)
+if live_mode:
+    st_autorefresh(interval=60 * 1000, key="fno_stocks_scanner_refresh")
+
+st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{'🟢 LIVE AUTO-REFRESH (60s)' if live_mode else '⏸️ MANUAL / MARKET CLOSED'}**")
+
+isin_map = load_equity_isin_map()
+watchlist = [s.strip().upper() for s in custom_symbols.split(",") if s.strip()]
+
+STATUS_MAP = {"BULLISH": "🟢 BULLISH (Look for CE)", "BEARISH": "🔴 BEARISH (Look for PE)"}
+stock_rows, matched_stocks = [], []
+
+progress = st.progress(0, text="Scanning F&O Stocks...")
+total = max(1, len(watchlist))
+
+for idx_i, symbol in enumerate(watchlist):
+    progress.progress((idx_i + 1) / total, text=f"Scanning {symbol} ({idx_i + 1}/{total})...")
+    eq_key = isin_map.get(symbol)
+    if not eq_key:
+        continue
+        
+    df_stock, err = get_candles(eq_key)
+    if df_stock is None:
+        continue
+        
+    signal_dir, occ_time, info = evaluate_setup(df_stock, check_bearish=True)
+    spot_price = info["close"] if isinstance(info["close"], float) else float(df_stock["close"].iloc[-1])
+    opt_type = "PE" if signal_dir == "BEARISH" else "CE"
+    
+    if not show_only_matched_stocks or signal_dir in ("BULLISH", "BEARISH"):
+        stock_rows.append({
+            "Stock": symbol,
+            "Close": info["close"],
+            "200 SMA": info["sma200"],
+            "SuperTrend (10,3)": info["st"],
+            "Setup Status": STATUS_MAP.get(signal_dir, "⏳ Waiting (Mixed)"),
+            "Signal Since (IST)": occ_time
+        })
+        
+    if signal_dir in ("BULLISH", "BEARISH"):
+        matched_stocks.append((symbol, eq_key, spot_price, opt_type))
+
+progress.empty()
+
+st.subheader(f"1. F&O Stocks Status ({len(matched_stocks)} Aligned out of {len(watchlist)} Scanned)")
+if stock_rows:
+    st.dataframe(pd.DataFrame(stock_rows), use_container_width=True, hide_index=True)
+
+st.subheader("2. Matching Call (CE) & Put (PE) Options Status")
+option_rows = []
+today_str = str(now_ist.date())
+
+for symbol, eq_key, spot_price, opt_type in matched_stocks:
+    expiry, chain_data, opt_err = fetch_stock_option_chain_cached(symbol, eq_key, today_str)
+    if not chain_data:
+        continue
+    for strike, opt_key in get_stock_strikes_from_chain(chain_data, spot_price, option_type=opt_type):
+        df_opt, _ = get_candles(opt_key)
+        opt_dir, opt_occ_time, opt_info = evaluate_setup(df_opt, check_bearish=False)
+        opt_aligned = (opt_dir == "BULLISH")
+        option_rows.append({
+            "Stock": symbol,
+            "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)",
+            "Contract": f"{strike:g} {opt_type}",
+            "Expiry": expiry,
+            "Opt Close": opt_info["close"],
+            "Opt 200 SMA": opt_info["sma200"],
+            "Opt SuperTrend": opt_info["st"],
+            "Signal": f"🚀 CONFIRMED BUY {opt_type}" if opt_aligned else f"⏳ {opt_type} Not Aligned",
+            "Opt Signal Since (IST)": opt_occ_time
+        })
+
+if option_rows:
+    st.dataframe(pd.DataFrame(option_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No matching F&O Stock CE/PE options aligned right now.")
