@@ -11,23 +11,25 @@ st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 # 1. SIDEBAR TOKEN INPUT
 # ==========================================
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
-access_token = st.sidebar.text_input(
+raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
     value=default_token, 
     type="password",
     help="Paste your daily Upstox Access Token here"
 )
+access_token = raw_token.strip()
 
 if st.sidebar.button("🔄 Refresh / Run Scan Now", type="primary"):
     st.rerun()
 
 if not access_token:
-    st.warning("⚠️ Please enter your Upstox Access Token in the left sidebar (or add it to Streamlit Secrets) to start scanning.")
+    st.warning("⚠️ Please enter your Upstox Access Token in the left sidebar to start scanning.")
     st.stop()
 
 HEADERS = {
     "Accept": "application/json",
-    "Authorization": f"Bearer {access_token}"
+    "Authorization": f"Bearer {access_token}",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
 INDICES = {
@@ -37,17 +39,36 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
+def safe_get_json(url, params=None):
+    """Safely fetches URL and parses JSON without crashing on empty/HTML responses."""
+    try:
+        res = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        if not res.text.strip():
+            return None, f"HTTP {res.status_code}: Empty response from Upstox (Check Token validity)."
+        try:
+            data = res.json()
+            if res.status_code != 200 or data.get("status") != "success":
+                return None, f"HTTP {res.status_code}: {data}"
+            return data, None
+        except ValueError:
+            snippet = res.text[:250].replace("\n", " ")
+            return None, f"HTTP {res.status_code} (Non-JSON response): {snippet}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Network Error: {str(e)}"
+
 # ==========================================
 # 2. AUTOMATED EXPIRY & DATA FUNCTIONS
 # ==========================================
 def get_automated_expiries(index_name, index_key):
     url = "https://upstox.com"
-    res = requests.get(url, headers=HEADERS, params={"instrument_key": index_key}).json()
-    
-    if res.get("status") != "success" or not res.get("data"):
-        return None, res.get("errors", "API Error")
+    data, err = safe_get_json(url, params={"instrument_key": index_key})
+    if err:
+        return None, err
         
-    expiries = sorted(list({item["expiry"] for item in res["data"]}))
+    if not data.get("data"):
+        return None, "No contract data returned"
+        
+    expiries = sorted(list({item["expiry"] for item in data["data"]}))
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     future_expiries = [d for d in expiries if d >= today_str]
     
@@ -76,13 +97,13 @@ def get_candles(instrument_key):
     hist_url = f"https://upstox.com{encoded_key}/1minute/{to_date}/{from_date}"
     intra_url = f"https://upstox.comintraday/{encoded_key}/1minute"
     
-    hist_res = requests.get(hist_url, headers=HEADERS).json()
-    intra_res = requests.get(intra_url, headers=HEADERS).json()
+    hist_res, _ = safe_get_json(hist_url)
+    intra_res, _ = safe_get_json(intra_url)
     
     candles = []
-    if hist_res.get("status") == "success":
+    if hist_res and hist_res.get("data", {}).get("candles"):
         candles.extend(hist_res["data"]["candles"])
-    if intra_res.get("status") == "success":
+    if intra_res and intra_res.get("data", {}).get("candles"):
         candles.extend(intra_res["data"]["candles"])
         
     if not candles:
@@ -104,14 +125,12 @@ def get_candles(instrument_key):
 
 def get_target_ce_keys(index_key, expiry_date, spot_price):
     url = "https://upstox.com"
-    params = {"instrument_key": index_key, "expiry_date": expiry_date}
-    res = requests.get(url, headers=HEADERS, params=params).json()
-    
-    if res.get("status") != "success":
+    data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": expiry_date})
+    if err or not data.get("data"):
         return []
         
     ce_list = []
-    for item in res["data"]:
+    for item in data["data"]:
         strike = item["strike_price"]
         if strike >= spot_price - 100 and "call_options" in item:
             ce_list.append((strike, item["call_options"]["instrument_key"]))
@@ -177,7 +196,7 @@ with st.spinner("Fetching live market data from Upstox..."):
     for name, inst_key in INDICES.items():
         expiry, err = get_automated_expiries(name, inst_key)
         if not expiry:
-            st.error(f"❌ {name} Error: {err} (Check if your Upstox Token is valid for today)")
+            st.error(f"❌ {name} Error: {err}")
             continue
             
         df_index = get_candles(inst_key)
