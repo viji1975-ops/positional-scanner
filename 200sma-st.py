@@ -215,6 +215,19 @@ for name, spot_price, expiry, chain_data, opt_err, opt_type in matched_indices:
         df_opt, _ = get_candles(opt_key)
         opt_dir, opt_occ_time, opt_info = evaluate_setup(df_opt, check_bearish=False)
         opt_aligned = (opt_dir == "BULLISH")
-        option_rows.append({
-            "Index": name, "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)",
-            "Contract": f"{int(strike)} {opt_type}", "Expiry": expiry, "Opt Close": opt_info["close"],
+                option_rows.append({
+            "Index": name,
+            "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)",
+            "Contract": f"{int(strike)} {opt_type}",
+            "Expiry": expiry,
+            "Opt Close": opt_info["close"],
+            "Opt 200 SMA": opt_info["sma200"],
+            "Opt SuperTrend": opt_info["st"],
+            "Signal": f"🚀 CONFIRMED BUY {opt_type}" if opt_aligned else f"⏳ {opt_type} Not Aligned",
+            "Opt Signal Since (IST)": opt_occ_time
+        })
+
+if option_rows:
+    st.dataframe(pd.DataFrame(option_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No matching CE/PE options aligned right now.")
