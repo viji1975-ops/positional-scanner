@@ -247,10 +247,10 @@ if live_mode:
 status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL / MARKET CLOSED"
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
 
-index_rows = []
-option_rows = []
+try:
+    index_rows = []
+    matched_indices = []
 
-with st.spinner("Scanning 5-minute charts for Indices, CE & PE Options..."):
     for name, inst_key in INDICES.items():
         df_index, err = get_candles(inst_key)
         if df_index is None:
@@ -264,3 +264,4 @@ with st.spinner("Scanning 5-minute charts for Indices, CE & PE Options..."):
         
         if signal_dir == "BULLISH":
             status_label = "🟢 BULLISH (Look for CE)"
+        elif signal_dir == "BEARISH":
