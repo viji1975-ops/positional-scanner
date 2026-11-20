@@ -1,3 +1,5 @@
+import gzip
+import json
 import datetime
 import requests
 import numpy as np
@@ -10,7 +12,7 @@ st.title("📈 Upstox Live Intraday Scanner (5m: 200 SMA + SuperTrend)")
 # ==========================================
 # 1. SIDEBAR TOKEN INPUT
 # ==========================================
-default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
+default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input(
     "Upstox Daily Access Token", 
     value=default_token, 
@@ -28,8 +30,7 @@ if not access_token:
 
 HEADERS = {
     "Accept": "application/json",
-    "Authorization": f"Bearer {access_token}",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "Authorization": f"Bearer {access_token}"
 }
 
 INDICES = {
@@ -39,65 +40,98 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
-def safe_get_json(url, params=None):
-    """Safely fetches URL and parses JSON without crashing on empty/HTML responses."""
+# ==========================================
+# 2. LOAD NSE INSTRUMENTS FROM UPSTOX CDN
+# ==========================================
+@st.cache_data(ttl=3600 * 6)
+def load_nse_options_master():
+    """Fetches NSE option contracts from Upstox global CDN (no geo-block)."""
+    url = "https://upstox.com"
+    res = requests.get(url, timeout=20)
+    raw_bytes = gzip.decompress(res.content)
+    data = json.loads(raw_bytes.decode("utf-8"))
+    
+    # Filter only Index Call Options (OPTIDX & CE) for our 4 indices
+    target_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+    filtered = []
+    for item in data:
+        if (
+            item.get("segment") == "NSE_FO"
+            and item.get("instrument_type") == "CE"
+            and item.get("name") in target_names
+        ):
+            # Convert expiry from milliseconds timestamp to YYYY-MM-DD
+            exp_dt = datetime.datetime.fromtimestamp(item["expiry"] / 1000.0, tz=datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
+            filtered.append({
+                "name": item["name"],
+                "expiry": exp_dt.strftime("%Y-%m-%d"),
+                "strike": float(item["strike_price"]),
+                "instrument_key": item["instrument_key"],
+                "trading_symbol": item["trading_symbol"]
+            })
+    return pd.DataFrame(filtered)
+
+def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
+    """Finds Weekly (Tuesday) for NIFTY or Monthly expiry for others, plus ATM/+1/+2 OTM CE keys."""
+    sub = df_master[df_master["name"] == index_name].copy()
+    today_str = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+    sub = sub[sub["expiry"] >= today_str]
+    
+    if sub.empty:
+        return None, []
+        
+    expiries = sorted(sub["expiry"].unique())
+    
+    if index_name == "NIFTY":
+        selected_exp = None
+        for exp in expiries:
+            dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
+            if dt.weekday() == 1:  # Tuesday
+                selected_exp = exp
+                break
+        if not selected_exp:
+            selected_exp = expiries[0]
+    else:
+        # Monthly expiry = last available expiry in the nearest active month
+        first_dt = datetime.datetime.strptime(expiries[0], "%Y-%m-%d").date()
+        month_exps = [
+            e for e in expiries 
+            if datetime.datetime.strptime(e, "%Y-%m-%d").month == first_dt.month
+        ]
+        selected_exp = month_exps[-1]
+        
+    exp_df = sub[(sub["expiry"] == selected_exp) & (sub["strike"] >= spot_price - 100)].sort_values("strike")
+    ce_list = list(zip(exp_df["strike"].head(3), exp_df["instrument_key"].head(3), exp_df["trading_symbol"].head(3)))
+    return selected_exp, ce_list
+
+# ==========================================
+# 3. CANDLE & INDICATOR FUNCTIONS
+# ==========================================
+def safe_get_json(url):
     try:
-        res = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        res = requests.get(url, headers=HEADERS, timeout=15)
         if not res.text.strip():
-            return None, f"HTTP {res.status_code}: Empty response from Upstox (Check Token validity)."
+            return None, f"HTTP {res.status_code}: Empty response (Token expired or invalid)."
         try:
             data = res.json()
             if res.status_code != 200 or data.get("status") != "success":
                 return None, f"HTTP {res.status_code}: {data}"
             return data, None
         except ValueError:
-            snippet = res.text[:250].replace("\n", " ")
-            return None, f"HTTP {res.status_code} (Non-JSON response): {snippet}"
-    except requests.exceptions.RequestException as e:
-        return None, f"Network Error: {str(e)}"
-
-# ==========================================
-# 2. AUTOMATED EXPIRY & DATA FUNCTIONS
-# ==========================================
-def get_automated_expiries(index_name, index_key):
-    url = "https://upstox.com"
-    data, err = safe_get_json(url, params={"instrument_key": index_key})
-    if err:
-        return None, err
-        
-    if not data.get("data"):
-        return None, "No contract data returned"
-        
-    expiries = sorted(list({item["expiry"] for item in data["data"]}))
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
-    future_expiries = [d for d in expiries if d >= today_str]
-    
-    if not future_expiries:
-        return None, "No future expiries found"
-
-    if index_name == "NIFTY":
-        for exp in future_expiries:
-            dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            if dt.weekday() == 1:  # Tuesday
-                return exp, None
-        return future_expiries[0], None
-    else:
-        first_dt = datetime.datetime.strptime(future_expiries[0], "%Y-%m-%d").date()
-        current_month_expiries = [
-            exp for exp in future_expiries 
-            if datetime.datetime.strptime(exp, "%Y-%m-%d").month == first_dt.month
-        ]
-        return current_month_expiries[-1], None
+            return None, f"HTTP {res.status_code}: HTML returned by Upstox."
+    except Exception as e:
+        return None, str(e)
 
 def get_candles(instrument_key):
     encoded_key = requests.utils.quote(instrument_key)
-    to_date = datetime.date.today().strftime("%Y-%m-%d")
-    from_date = (datetime.date.today() - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+    ist_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).date()
+    to_date = ist_today.strftime("%Y-%m-%d")
+    from_date = (ist_today - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
     
     hist_url = f"https://upstox.com{encoded_key}/1minute/{to_date}/{from_date}"
     intra_url = f"https://upstox.comintraday/{encoded_key}/1minute"
     
-    hist_res, _ = safe_get_json(hist_url)
+    hist_res, hist_err = safe_get_json(hist_url)
     intra_res, _ = safe_get_json(intra_url)
     
     candles = []
@@ -107,7 +141,7 @@ def get_candles(instrument_key):
         candles.extend(intra_res["data"]["candles"])
         
     if not candles:
-        return None
+        return None, hist_err
 
     df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -121,26 +155,8 @@ def get_candles(instrument_key):
         "volume": "sum"
     }).dropna()
     
-    return df_5m
+    return df_5m, None
 
-def get_target_ce_keys(index_key, expiry_date, spot_price):
-    url = "https://upstox.com"
-    data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": expiry_date})
-    if err or not data.get("data"):
-        return []
-        
-    ce_list = []
-    for item in data["data"]:
-        strike = item["strike_price"]
-        if strike >= spot_price - 100 and "call_options" in item:
-            ce_list.append((strike, item["call_options"]["instrument_key"]))
-            
-    ce_list.sort(key=lambda x: x[0])
-    return ce_list[:3]
-
-# ==========================================
-# 3. INDICATOR CALCULATION
-# ==========================================
 def calculate_supertrend(df, period=10, multiplier=3):
     high, low, close = df["high"], df["low"], df["close"]
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
@@ -187,20 +203,25 @@ def check_bullish_setup(df):
 # ==========================================
 # 4. RENDER DASHBOARD
 # ==========================================
-st.caption(f"Last scanned: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
+st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
+
+with st.spinner("Loading NSE Option Contracts from Upstox CDN..."):
+    df_master = load_nse_options_master()
 
 index_rows = []
 ce_rows = []
 
-with st.spinner("Fetching live market data from Upstox..."):
+with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
     for name, inst_key in INDICES.items():
-        expiry, err = get_automated_expiries(name, inst_key)
-        if not expiry:
-            st.error(f"❌ {name} Error: {err}")
+        df_index, err = get_candles(inst_key)
+        if df_index is None:
+            st.error(f"❌ {name} Candle Error: {err}")
             continue
             
-        df_index = get_candles(inst_key)
         idx_bullish, idx_info = check_bullish_setup(df_index)
+        spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        expiry, ce_contracts = get_automated_expiry_and_strikes(df_master, name, spot_price)
         
         index_rows.append({
             "Index": name,
@@ -211,14 +232,13 @@ with st.spinner("Fetching live market data from Upstox..."):
             "Status": "✅ MATCH (Above Both)" if idx_bullish else "⏳ Waiting"
         })
         
-        if idx_bullish:
-            ce_contracts = get_target_ce_keys(inst_key, expiry, idx_info["close"])
-            for strike, ce_key in ce_contracts:
-                df_ce = get_candles(ce_key)
+        if idx_bullish and ce_contracts:
+            for strike, ce_key, symbol in ce_contracts:
+                df_ce, _ = get_candles(ce_key)
                 ce_bullish, ce_info = check_bullish_setup(df_ce)
                 ce_rows.append({
                     "Index": name,
-                    "Contract": f"{strike} CE",
+                    "Contract": symbol,
                     "Expiry": expiry,
                     "CE Close": ce_info["close"],
                     "CE 200 SMA": ce_info["sma200"],
@@ -230,8 +250,3 @@ st.subheader("1. Index Status (5-Minute Timeframe)")
 if index_rows:
     st.dataframe(pd.DataFrame(index_rows), use_container_width=True, hide_index=True)
 
-st.subheader("2. Matching Call Options (CE) Status")
-if ce_rows:
-    st.dataframe(pd.DataFrame(ce_rows), use_container_width=True, hide_index=True)
-else:
-    st.info("No indices are currently above both 200 SMA and SuperTrend, or no CE contracts matched yet.")
