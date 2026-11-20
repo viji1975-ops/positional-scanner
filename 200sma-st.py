@@ -60,9 +60,10 @@ def get_candidate_expiries(index_name):
             m = ist_today.month + m_offset
             y = ist_today.year + (1 if m > 12 else 0)
             m = m if m <= 12 else 1
-            for wd in (1, 3, 2):
-                d = get_last_weekday_of_month(y, m, wd)
-                if d >= ist_today:
+            _, last_day = calendar.monthrange(y, m)
+            for day in range(last_day, max(0, last_day - 10), -1):
+                d = datetime.date(y, m, day)
+                if d >= ist_today and d.weekday() < 5:
                     candidates.append(d.strftime("%Y-%m-%d"))
     return list(dict.fromkeys(candidates))
 
