@@ -1,6 +1,7 @@
 import calendar
 import datetime
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import numpy as np
 import pandas as pd
@@ -47,7 +48,7 @@ INDICES = {
 }
 
 # ==========================================
-# 2. EXPIRY & API HELPER FUNCTIONS
+# 2. EXPIRY & CACHED OPTION CHAIN FUNCTIONS
 # ==========================================
 def get_ist_now():
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
@@ -92,7 +93,7 @@ def get_candidate_expiries(index_name):
 
 def safe_get_json(url, params=None):
     try:
-        res = requests.get(url, headers=HEADERS, params=params, timeout=15, allow_redirects=False)
+        res = requests.get(url, headers=HEADERS, params=params, timeout=10, allow_redirects=False)
         if res.status_code in (301, 302, 307, 308):
             return None, f"HTTP {res.status_code} Redirect blocked"
         if not res.text.strip():
@@ -104,40 +105,40 @@ def safe_get_json(url, params=None):
     except Exception as e:
         return None, str(e)
 
-def get_valid_chain_and_strikes(index_name, index_key, spot_price, option_type="CE"):
+@st.cache_data(ttl=1800)
+def fetch_option_chain_cached(index_name, index_key, token_prefix):
+    """Caches valid expiry & full option chain for 30 mins to make scans instant."""
     url = f"{BASE_API}{S}option{S}chain"
     candidates = get_candidate_expiries(index_name)
     last_err = "No active option chain found"
-    
     for exp in candidates:
         data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": exp})
         if err:
             last_err = err
         if data and data.get("data"):
-            opt_list = []
-            for item in data["data"]:
-                strike = float(item["strike_price"])
-                if option_type == "CE" and strike >= spot_price - 100 and "call_options" in item:
-                    opt_list.append((strike, item["call_options"]["instrument_key"]))
-                elif option_type == "PE" and strike <= spot_price + 100 and "put_options" in item:
-                    opt_list.append((strike, item["put_options"]["instrument_key"]))
-                    
-            if option_type == "CE":
-                opt_list.sort()
-            else:
-                opt_list.sort(reverse=True)
-                
-            if opt_list:
-                return exp, opt_list[:3], None
-                
+            return exp, data["data"], None
     fallback_exp = next(iter(candidates), "-")
     return fallback_exp, [], f"{last_err} (Tried: {', '.join(candidates)})"
+
+def get_strikes_from_chain(chain_data, spot_price, option_type="CE"):
+    opt_list = []
+    for item in chain_data:
+        strike = float(item["strike_price"])
+        if option_type == "CE" and strike >= spot_price - 100 and "call_options" in item:
+            opt_list.append((strike, item["call_options"]["instrument_key"]))
+        elif option_type == "PE" and strike <= spot_price + 100 and "put_options" in item:
+            opt_list.append((strike, item["put_options"]["instrument_key"]))
+    if option_type == "CE":
+        opt_list.sort()
+    else:
+        opt_list.sort(reverse=True)
+    return opt_list[:3]
 
 def get_candles(instrument_key):
     encoded_key = urllib.parse.quote(instrument_key, safe="")
     ist_today = get_ist_now().date()
     to_date = ist_today.strftime("%Y-%m-%d")
-    from_date = (ist_today - datetime.timedelta(days=15)).strftime("%Y-%m-%d")
+    from_date = (ist_today - datetime.timedelta(days=12)).strftime("%Y-%m-%d")
     
     hist_url = f"{BASE_API}{S}historical-candle{S}{encoded_key}{S}1minute{S}{to_date}{S}{from_date}"
     intra_url = f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute"
@@ -228,17 +229,15 @@ def evaluate_setup(df, check_bearish=False):
     }
     
     if bool(bull_cond.iloc[-1]):
-        occ_time = find_occurrence_timestamp(df, bull_cond)
-        return "BULLISH", occ_time, info
+        return "BULLISH", find_occurrence_timestamp(df, bull_cond), info
         
     if check_bearish and bool(bear_cond.iloc[-1]):
-        occ_time = find_occurrence_timestamp(df, bear_cond)
-        return "BEARISH", occ_time, info
+        return "BEARISH", find_occurrence_timestamp(df, bear_cond), info
         
     return "NONE", "-", info
 
 # ==========================================
-# 4. RENDER LIVE DASHBOARD
+# 4. PARALLEL SCANNER EXECUTION
 # ==========================================
 now_ist = get_ist_now()
 live_mode = auto_refresh and is_market_hours(now_ist)
@@ -249,18 +248,19 @@ if live_mode:
     st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
 
 index_rows = []
+option_tasks = []
 option_rows = []
 
-with st.spinner("Scanning 5-minute charts for Indices, CE & PE Options..."):
+with st.spinner("Scanning Indices & Options in parallel..."):
+    # Step A: Fetch all 4 index candle sets simultaneously
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        idx_futures = {name: executor.submit(get_candles, key) for name, key in INDICES.items()}
+        idx_results = {name: fut.result() for name, fut in idx_futures.items()}
+
     for name, inst_key in INDICES.items():
-        df_index, err = get_candles(inst_key)
+        df_index, err = idx_results[name]
         if df_index is None:
             st.error(f"❌ {name}: {err}")
             continue
             
         signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, check_bearish=True)
-        spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
-        
-        opt_type = "PE" if signal_dir == "BEARISH" else "CE"
-        expiry, opt_contracts, opt_err = get_valid_chain_and_strikes(name, inst_key, spot_price, option_type=opt_type)
-        
