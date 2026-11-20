@@ -1,7 +1,6 @@
 import calendar
 import datetime
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 import requests
 import numpy as np
 import pandas as pd
@@ -94,7 +93,7 @@ def get_candidate_expiries(index_name):
 
 def safe_get_json(url, params=None):
     try:
-        res = requests.get(url, headers=HEADERS, params=params, timeout=10, allow_redirects=False)
+        res = requests.get(url, headers=HEADERS, params=params, timeout=12, allow_redirects=False)
         if res.status_code in (301, 302, 307, 308):
             return None, f"HTTP {res.status_code} Redirect blocked"
         if not res.text.strip():
@@ -249,19 +248,19 @@ status_badge = "🟢 LIVE AUTO-REFRESH (60s)" if live_mode else "⏸️ MANUAL /
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{status_badge}**")
 
 index_rows = []
-option_tasks = []
 option_rows = []
 
-with st.spinner("Scanning Indices & Options..."):
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        idx_futures = {name: executor.submit(get_candles, key) for name, key in INDICES.items()}
-        idx_results = {name: fut.result() for name, fut in idx_futures.items()}
-
+with st.spinner("Scanning 5-minute charts for Indices, CE & PE Options..."):
     for name, inst_key in INDICES.items():
-        df_index, err = idx_results[name]
+        df_index, err = get_candles(inst_key)
         if df_index is None:
             st.error(f"❌ {name}: {err}")
             continue
             
         signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, check_bearish=True)
         spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        expiry, chain_data, opt_err = fetch_option_chain_cached(name, inst_key, access_token[:10])
+        opt_type = "PE" if signal_dir == "BEARISH" else "CE"
+        
+        if signal_dir == "BULLISH":
+            status_label = "🟢 BULLISH (Look for CE)"
