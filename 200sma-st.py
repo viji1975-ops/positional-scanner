@@ -1,5 +1,4 @@
-import gzip
-import json
+import calendar
 import datetime
 import urllib.parse
 import requests
@@ -34,10 +33,8 @@ HEADERS = {
     "Authorization": f"Bearer {access_token}"
 }
 
-# Build URLs using chr(47) so browser/clipboard extensions cannot strip slashes
 S = chr(47)
 BASE_API = f"https:{S}{S}://upstox.com{S}v2"
-CDN_URL = f"https:{S}{S}://upstox.com{S}market-quote{S}instruments{S}exchange{S}NSE.json.gz"
 
 INDICES = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -47,72 +44,48 @@ INDICES = {
 }
 
 # ==========================================
-# 2. LOAD NSE OPTION CONTRACTS
+# 2. AUTOMATED EXPIRY CALCULATOR
 # ==========================================
-@st.cache_data(ttl=3600 * 6)
-def load_nse_options_master():
-    res = requests.get(CDN_URL, timeout=25)
-    if res.content[:2] == b"\x1f\x8b":
-        raw_text = gzip.decompress(res.content).decode("utf-8")
-    else:
-        raw_text = res.text
-        
-    data = json.loads(raw_text)
-    target_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
-    filtered = []
-    for item in data:
-        if (
-            item.get("segment") == "NSE_FO"
-            and item.get("instrument_type") == "CE"
-            and item.get("name") in target_names
-        ):
-            exp_dt = datetime.datetime.fromtimestamp(item["expiry"] / 1000.0, tz=datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
-            filtered.append({
-                "name": item["name"],
-                "expiry": exp_dt.strftime("%Y-%m-%d"),
-                "strike": float(item["strike_price"]),
-                "instrument_key": item["instrument_key"],
-                "trading_symbol": item["trading_symbol"]
-            })
-    return pd.DataFrame(filtered)
+def get_nearest_weekday(year, month, day, target_weekday):
+    """Finds the nearest upcoming target_weekday (0=Mon, 1=Tue, 3=Thu)."""
+    d = datetime.date(year, month, day)
+    days_ahead = target_weekday - d.weekday()
+    if days_ahead < 0:
+        days_ahead += 7
+    return d + datetime.timedelta(days=days_ahead)
 
-def get_automated_expiry_and_strikes(df_master, index_name, spot_price):
-    sub = df_master[df_master["name"] == index_name].copy()
-    today_str = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
-    sub = sub[sub["expiry"] >= today_str]
-    
-    if sub.empty:
-        return None, []
-        
-    expiries = sorted(sub["expiry"].unique())
-    
+def get_last_weekday_of_month(year, month, target_weekday):
+    """Finds the last target_weekday of the given month."""
+    last_day = calendar.monthrange(year, month)
+    d = datetime.date(year, month, last_day)
+    while d.weekday() != target_weekday:
+        d -= datetime.timedelta(days=1)
+    return d
+
+def get_automated_expiry(index_name):
+    ist_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).date()
     if index_name == "NIFTY":
-        selected_exp = None
-        for exp in expiries:
-            dt = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            if dt.weekday() == 1:  # Tuesday
-                selected_exp = exp
-                break
-        if not selected_exp:
-            selected_exp = expiries[0]
+        # Weekly expiry: Nearest Tuesday (weekday == 1)
+        exp_date = get_nearest_weekday(ist_today.year, ist_today.month, ist_today.day, 1)
+        return exp_date.strftime("%Y-%m-%d")
     else:
-        first_dt = datetime.datetime.strptime(expiries[0], "%Y-%m-%d").date()
-        month_exps = [
-            e for e in expiries 
-            if datetime.datetime.strptime(e, "%Y-%m-%d").month == first_dt.month
-        ]
-        selected_exp = month_exps[-1]
-        
-    exp_df = sub[(sub["expiry"] == selected_exp) & (sub["strike"] >= spot_price - 100)].sort_values("strike")
-    ce_list = list(zip(exp_df["strike"].head(3), exp_df["instrument_key"].head(3), exp_df["trading_symbol"].head(3)))
-    return selected_exp, ce_list
+        # Monthly expiry: Last Thursday (3) of current month (or next month if passed)
+        # Note: Upstox option/chain also accepts monthly expiry date
+        exp_date = get_last_weekday_of_month(ist_today.year, ist_today.month, 3)
+        if exp_date < ist_today:
+            next_month = ist_today.month + 1 if ist_today.month < 12 else 1
+            next_year = ist_today.year if ist_today.month < 12 else ist_today.year + 1
+            exp_date = get_last_weekday_of_month(next_year, next_month, 3)
+        return exp_date.strftime("%Y-%m-%d")
 
 # ==========================================
-# 3. CANDLE & INDICATOR FUNCTIONS
+# 3. SAFE API & CANDLE FUNCTIONS
 # ==========================================
-def safe_get_json(url):
+def safe_get_json(url, params=None):
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
+        res = requests.get(url, headers=HEADERS, params=params, timeout=15, allow_redirects=False)
+        if res.status_code in (301, 302, 307, 308):
+            return None, f"HTTP {res.status_code} Redirect blocked by Upstox (Location: {res.headers.get('Location')})"
         if not res.text.strip():
             return None, f"HTTP {res.status_code}: Empty response (Token expired or invalid)."
         data = res.json()
@@ -121,6 +94,21 @@ def safe_get_json(url):
         return data, None
     except Exception as e:
         return None, str(e)
+
+def get_target_ce_keys(index_key, expiry_date, spot_price):
+    url = f"{BASE_API}{S}option{S}chain"
+    data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": expiry_date})
+    if err or not data.get("data"):
+        return [], err
+        
+    ce_list = []
+    for item in data["data"]:
+        strike = float(item["strike_price"])
+        if strike >= spot_price - 100 and "call_options" in item:
+            ce_list.append((strike, item["call_options"]["instrument_key"]))
+            
+    ce_list.sort(key=lambda x: x)
+    return ce_list[:3], None
 
 def get_candles(instrument_key):
     encoded_key = urllib.parse.quote(instrument_key, safe="")
@@ -206,14 +194,12 @@ def check_bullish_setup(df):
 ist_now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
 st.caption(f"Last scanned: {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST")
 
-with st.spinner("Loading NSE Option Contracts..."):
-    df_master = load_nse_options_master()
-
 index_rows = []
 ce_rows = []
 
 with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
     for name, inst_key in INDICES.items():
+        expiry = get_automated_expiry(name)
         df_index, err = get_candles(inst_key)
         if df_index is None:
             st.error(f"❌ {name}: {err}")
@@ -221,7 +207,6 @@ with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
             
         idx_bullish, idx_info = check_bullish_setup(df_index)
         spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
-        expiry, ce_contracts = get_automated_expiry_and_strikes(df_master, name, spot_price)
         
         index_rows.append({
             "Index": name,
@@ -232,13 +217,16 @@ with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
             "Status": "✅ MATCH (Above Both)" if idx_bullish else "⏳ Waiting"
         })
         
-        if idx_bullish and ce_contracts:
-            for strike, ce_key, symbol in ce_contracts:
+        if idx_bullish:
+            ce_contracts, ce_err = get_target_ce_keys(inst_key, expiry, spot_price)
+            if ce_err:
+                st.warning(f"⚠️ {name} Option Chain: {ce_err}")
+            for strike, ce_key in ce_contracts:
                 df_ce, _ = get_candles(ce_key)
                 ce_bullish, ce_info = check_bullish_setup(df_ce)
                 ce_rows.append({
                     "Index": name,
-                    "Contract": symbol,
+                    "Contract": f"{int(strike)} CE",
                     "Expiry": expiry,
                     "CE Close": ce_info["close"],
                     "CE 200 SMA": ce_info["sma200"],
