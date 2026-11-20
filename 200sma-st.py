@@ -41,13 +41,6 @@ INDICES = {
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT"
 }
 
-def get_nearest_weekday(year, month, day, target_weekday):
-    d = datetime.date(year, month, day)
-    days_ahead = target_weekday - d.weekday()
-    if days_ahead < 0:
-        days_ahead += 7
-    return d + datetime.timedelta(days=days_ahead)
-
 def get_last_weekday_of_month(year, month, target_weekday):
     _, last_day = calendar.monthrange(year, month)
     d = datetime.date(year, month, last_day)
@@ -55,20 +48,26 @@ def get_last_weekday_of_month(year, month, target_weekday):
         d -= datetime.timedelta(days=1)
     return d
 
-def get_automated_expiry(index_name):
+def get_candidate_expiries(index_name):
     ist_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).date()
+    candidates = []
     if index_name == "NIFTY":
-        # Weekly expiry: Nearest Tuesday (1)
-        exp_date = get_nearest_weekday(ist_today.year, ist_today.month, ist_today.day, 1)
-        return exp_date.strftime("%Y-%m-%d")
+        # Nearest Tuesday (1) or Thursday (3) within next 10 days
+        for offset in range(0, 10):
+            d = ist_today + datetime.timedelta(days=offset)
+            if d.weekday() in (1, 3):
+                candidates.append(d.strftime("%Y-%m-%d"))
     else:
-        # Monthly expiry: Last Thursday (3) of current month
-        exp_date = get_last_weekday_of_month(ist_today.year, ist_today.month, 3)
-        if exp_date < ist_today:
-            next_month = ist_today.month + 1 if ist_today.month < 12 else 1
-            next_year = ist_today.year if ist_today.month < 12 else ist_today.year + 1
-            exp_date = get_last_weekday_of_month(next_year, next_month, 3)
-        return exp_date.strftime("%Y-%m-%d")
+        # Monthly expiry: Last Tuesday (1) or Last Thursday (3) of current/next month
+        for m_offset in (0, 1):
+            m = ist_today.month + m_offset
+            y = ist_today.year + (1 if m > 12 else 0)
+            m = m if m <= 12 else 1
+            for wd in (1, 3):
+                d = get_last_weekday_of_month(y, m, wd)
+                if d >= ist_today:
+                    candidates.append(d.strftime("%Y-%m-%d"))
+    return sorted(list(set(candidates)))
 
 def safe_get_json(url, params=None):
     try:
@@ -84,20 +83,25 @@ def safe_get_json(url, params=None):
     except Exception as e:
         return None, str(e)
 
-def get_target_ce_keys(index_key, expiry_date, spot_price):
+def get_valid_chain_and_strikes(index_name, index_key, spot_price):
     url = f"{BASE_API}{S}option{S}chain"
-    data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": expiry_date})
-    if err or not data.get("data"):
-        return [], err
-        
-    ce_list = []
-    for item in data["data"]:
-        strike = float(item["strike_price"])
-        if strike >= spot_price - 100 and "call_options" in item:
-            ce_list.append((strike, item["call_options"]["instrument_key"]))
-            
-    ce_list.sort()
-    return ce_list[:3], None
+    candidates = get_candidate_expiries(index_name)
+    last_err = "No active option chain found"
+    for exp in candidates:
+        data, err = safe_get_json(url, params={"instrument_key": index_key, "expiry_date": exp})
+        if err:
+            last_err = err
+        if data and data.get("data"):
+            ce_list = []
+            for item in data["data"]:
+                strike = float(item["strike_price"])
+                if strike >= spot_price - 100 and "call_options" in item:
+                    ce_list.append((strike, item["call_options"]["instrument_key"]))
+            ce_list.sort()
+            if ce_list:
+                return exp, ce_list[:3], None
+    fallback_exp = next(iter(candidates), "-")
+    return fallback_exp, [], f"{last_err} (Tried: {', '.join(candidates)})"
 
 def get_candles(instrument_key):
     encoded_key = urllib.parse.quote(instrument_key, safe="")
@@ -185,7 +189,6 @@ ce_rows = []
 
 with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
     for name, inst_key in INDICES.items():
-        expiry = get_automated_expiry(name)
         df_index, err = get_candles(inst_key)
         if df_index is None:
             st.error(f"❌ {name}: {err}")
@@ -193,6 +196,7 @@ with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
             
         idx_bullish, idx_info = check_bullish_setup(df_index)
         spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
+        expiry, ce_contracts, ce_err = get_valid_chain_and_strikes(name, inst_key, spot_price)
         
         index_rows.append({
             "Index": name,
@@ -204,7 +208,6 @@ with st.spinner("Scanning 5-minute charts for Indices & Call Options..."):
         })
         
         if idx_bullish:
-            ce_contracts, ce_err = get_target_ce_keys(inst_key, expiry, spot_price)
             if ce_err:
                 st.warning(f"⚠️ {name} Option Chain: {ce_err}")
             for strike, ce_key in ce_contracts:
