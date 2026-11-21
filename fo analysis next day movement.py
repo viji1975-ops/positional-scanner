@@ -1,5 +1,4 @@
 import glob
-import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -155,4 +154,3 @@ if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to vi
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
 st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
 
-try:
