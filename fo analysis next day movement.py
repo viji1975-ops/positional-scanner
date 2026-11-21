@@ -15,39 +15,52 @@ def load_fo_bhavcopy(file_obj):
     if filename.lower().endswith(".zip"):
         with zipfile.ZipFile(file_obj) as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-            if not csv_files: return pd.DataFrame()
-            with z.open(next(iter(csv_files))) as f: df = pd.read_csv(f, low_memory=False)
+            if not csv_files:
+                st.warning(f"No CSV inside {filename}")
+                return pd.DataFrame()
+            with z.open(next(iter(csv_files))) as f:
+                df = pd.read_csv(f, low_memory=False)
     else:
         df = pd.read_csv(file_obj, low_memory=False)
 
-    df.columns = [c.strip() for c in df.columns]
+    # Normalize all column names to UPPERCASE for case-insensitive matching
+    df.columns = [c.strip().upper() for c in df.columns]
 
-    if "TckrSymb" in df.columns:
-        df = df[df["FinInstrmTp"].isin(["STF", "STO"])].copy()
+    # New NSE UDiFF F&O Bhavcopy Format (any casing)
+    if "TCKRSYMB" in df.columns:
+        inst_col = "FININSTRMTP"
+        df[inst_col] = df[inst_col].astype(str).str.strip().str.upper()
+        df = df[df[inst_col].isin(["STF", "STO", "FUTSTK", "OPTSTK"])].copy()
         out = pd.DataFrame()
-        out["INSTRUMENT"] = df["FinInstrmTp"].map({"STF": "FUTSTK", "STO": "OPTSTK"})
-        out["SYMBOL"] = df["TckrSymb"].astype(str).str.strip()
-        out["DATE"] = pd.to_datetime(df["TradDt"], format="mixed", errors="coerce")
-        out["EXPIRY"] = pd.to_datetime(df["XpryDt"], format="mixed", errors="coerce")
-        out["STRIKE"] = pd.to_numeric(df["StrkPric"], errors="coerce").fillna(0)
-        out["OPTION_TYP"] = df["OptnTp"].fillna("XX").astype(str).str.strip()
-        out["CLOSE"] = pd.to_numeric(df["ClsPric"], errors="coerce")
-        out["HIGH"] = pd.to_numeric(df["HghPric"] if "HghPric" in df.columns else df["ClsPric"], errors="coerce")
-        out["LOW"] = pd.to_numeric(df["LwPric"] if "LwPric" in df.columns else df["ClsPric"], errors="coerce")
-        out["OPEN_INT"] = pd.to_numeric(df["OpnIntrst"], errors="coerce").fillna(0)
-        out["CHG_IN_OI"] = pd.to_numeric(df["ChngInOpnIntrst"], errors="coerce").fillna(0)
-        out["VOLUME"] = pd.to_numeric(df["TtlTradgVol"], errors="coerce").fillna(0)
-        return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
+        out["INSTRUMENT"] = df[inst_col].map({"STF": "FUTSTK", "FUTSTK": "FUTSTK", "STO": "OPTSTK", "OPTSTK": "OPTSTK"})
+        out["SYMBOL"] = df["TCKRSYMB"].astype(str).str.strip()
+        out["DATE"] = pd.to_datetime(df["TRADDT"], format="mixed", errors="coerce")
+        out["EXPIRY"] = pd.to_datetime(df["XPRYDT"], format="mixed", errors="coerce")
+        out["STRIKE"] = pd.to_numeric(df["STRKPRIC"], errors="coerce").fillna(0)
+        out["OPTION_TYP"] = df["OPTNTP"].fillna("XX").astype(str).str.strip().str.upper()
+        out["CLOSE"] = pd.to_numeric(df["CLSPRIC"], errors="coerce")
+        out["HIGH"] = pd.to_numeric(df["HGHPRIC"] if "HGHPRIC" in df.columns else df["CLSPRIC"], errors="coerce")
+        out["LOW"] = pd.to_numeric(df["LWPRIC"] if "LWPRIC" in df.columns else df["CLSPRIC"], errors="coerce")
+        out["OPEN_INT"] = pd.to_numeric(df["OPNINTRST"], errors="coerce").fillna(0)
+        out["CHG_IN_OI"] = pd.to_numeric(df["CHNGINOPNINTRST"], errors="coerce").fillna(0)
+        vol_col = "TTLTRADGVOL" if "TTLTRADGVOL" in df.columns else ("TTLTRFVAL" if "TTLTRFVAL" in df.columns else None)
+        out["VOLUME"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(1) if vol_col else 1
+        cleaned = out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
+        if cleaned.empty:
+            st.warning(f"{filename}: Matched TCKRSYMB, but 0 rows after filtering. Unique FININSTRMTP values: {df[inst_col].unique()[:10]}")
+        return cleaned
 
+    # Legacy NSE F&O Bhavcopy Format
     if "INSTRUMENT" in df.columns:
+        df["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip().str.upper()
         df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
         out = pd.DataFrame()
-        out["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip()
+        out["INSTRUMENT"] = df["INSTRUMENT"]
         out["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
         out["DATE"] = pd.to_datetime(df["TIMESTAMP"], format="mixed", errors="coerce")
         out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"], format="mixed", errors="coerce")
         out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0)
-        out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip()
+        out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip().str.upper()
         out["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
         out["HIGH"] = pd.to_numeric(df["HIGH"] if "HIGH" in df.columns else df["CLOSE"], errors="coerce")
         out["LOW"] = pd.to_numeric(df["LOW"] if "LOW" in df.columns else df["CLOSE"], errors="coerce")
@@ -151,17 +164,3 @@ dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to data/daily_fo_bhavcopy/ in GitHub) to view the scanner."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
-grouped = fut_df.groupby("SYMBOL")
-fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
-fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
-fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
-fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
-fut_df["FUT_OI_CHG_%"] = grouped["OPEN_INT"].pct_change(1) * 100
-
-latest_date = all_df["DATE"].max()
-latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
-
-opt_df = all_df[(all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)].copy()
-near_expiry = opt_df.groupby("SYMBOL")["EXPIRY"].min().reset_index()
-opt_df = opt_df.merge(near_expiry, on=["SYMBOL", "EXPIRY"])
