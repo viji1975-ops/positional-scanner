@@ -1,6 +1,4 @@
 import glob
-import sys
-import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -8,12 +6,6 @@ import streamlit as st
 
 st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layout="wide")
 st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
-
-def show_uncaught_error(exc_type, exc_value, exc_tb):
-    st.error("Exact Python Error:")
-    st.code("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
-
-sys.excepthook = show_uncaught_error
 
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
@@ -70,17 +62,6 @@ def load_fo_bhavcopy(file_obj):
 
     st.error(f"Unrecognized columns in {filename}: {list(df.columns)}")
     return pd.DataFrame()
-
-
-def classify_oi_action(row):
-    prev_oi = row["OPEN_INT"] - row["CHG_IN_OI"]
-    if prev_oi <= 0: return "Massive Addition" if row["CHG_IN_OI"] > 0 else "Neutral"
-    pct = (row["CHG_IN_OI"] / prev_oi) * 100
-    if pct >= 20: return "Massive Addition"
-    if pct >= 5: return "Addition"
-    if pct <= -20: return "Massive Windup"
-    if pct <= -5: return "Windup"
-    return "Neutral"
 
 
 def compute_eod_sentiment(sym_opts, price_chg_1d):
@@ -164,3 +145,11 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
+repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+raw_sources = uploaded_files if uploaded_files else repo_files
+dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
+
+if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
+
+all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
