@@ -60,8 +60,42 @@ def load_fo_bhavcopy(file_obj):
         out["VOLUME"] = pd.to_numeric(df["CONTRACTS"], errors="coerce").fillna(0.0).astype(float)
         return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-    st.error(f"Unrecognized columns in {filename}: {list(df.columns)}")
     return pd.DataFrame()
+
+
+def compute_institutional_profile(sym_opts, price_chg_1d):
+    if sym_opts.empty:
+        return {"PCR": 0.0, "MAX_PAIN": 0.0, "PUT_FLOOR": "-", "CALL_WALL": "-", "NET_PE_CHG": 0.0, "NET_CE_CHG": 0.0, "INST_BIAS": "NO DATA"}
+    ce = sym_opts[sym_opts["OPTION_TYP"] == "CE"]
+    pe = sym_opts[sym_opts["OPTION_TYP"] == "PE"]
+    tot_ce_oi, tot_pe_oi = ce["OPEN_INT"].sum(), pe["OPEN_INT"].sum()
+    pcr = round(tot_pe_oi / tot_ce_oi, 2) if tot_ce_oi > 0 else 0.0
+    net_ce_chg, net_pe_chg = ce["CHG_IN_OI"].sum(), pe["CHG_IN_OI"].sum()
+
+    put_floor = f"{next(iter(pe.sort_values('OPEN_INT', ascending=False).to_dict('records')))['STRIKE']:g} PE" if not pe.empty else "-"
+    call_wall = f"{next(iter(ce.sort_values('OPEN_INT', ascending=False).to_dict('records')))['STRIKE']:g} CE" if not ce.empty else "-"
+
+    strikes = sorted(sym_opts["STRIKE"].unique())
+    max_pain = strikes[0] if strikes else 0.0
+    if strikes:
+        ce_g = ce.groupby("STRIKE")["OPEN_INT"].sum()
+        pe_g = pe.groupby("STRIKE")["OPEN_INT"].sum()
+        best_pain = None
+        for s in strikes:
+            c_loss = sum((s - k) * v for k, v in ce_g.items() if s > k)
+            p_loss = sum((k - s) * v for k, v in pe_g.items() if s < k)
+            tot_loss = c_loss + p_loss
+            if best_pain is None or tot_loss < best_pain:
+                best_pain, max_pain = tot_loss, s
+
+    if pcr >= 1.25 and net_pe_chg > net_ce_chg: bias = "🟢 STRONG BULLISH (Heavy Put Writing)"
+    elif pcr >= 0.95 and net_pe_chg > 0 and net_ce_chg <= 0: bias = "🟢 BULLISH (Put Add + Call Unwind)"
+    elif pcr <= 0.65 and net_ce_chg > net_pe_chg: bias = "🔴 STRONG BEARISH (Heavy Call Writing)"
+    elif pcr <= 0.85 and net_ce_chg > 0 and net_pe_chg <= 0: bias = "🔴 BEARISH (Call Add + Put Unwind)"
+    elif net_ce_chg > 0 and net_pe_chg > 0: bias = "🟡 RANGEBOUND (Short Strangle)"
+    else: bias = "⚪ NEUTRAL / MIXED"
+
+    return {"PCR": pcr, "MAX_PAIN": float(max_pain), "PUT_FLOOR": put_floor, "CALL_WALL": call_wall, "NET_PE_CHG": float(net_pe_chg), "NET_CE_CHG": float(net_ce_chg), "INST_BIAS": bias}
 
 
 def compute_eod_sentiment(sym_opts, price_chg_1d):
@@ -92,10 +126,7 @@ def compute_eod_sentiment(sym_opts, price_chg_1d):
 
 
 def evaluate_next_day_setup(fut_row, sym_opts):
-    price_chg = fut_row["1D_CHG_%"]
-    fut_oi_chg = fut_row["FUT_OI_CHG_%"]
-    spot = fut_row["CLOSE"]
-
+    price_chg, fut_oi_chg, spot = fut_row["1D_CHG_%"], fut_row["FUT_OI_CHG_%"], fut_row["CLOSE"]
     if sym_opts.empty or pd.isna(price_chg):
         return {"NEXT_DAY_ACTION": "NO SETUP", "BEST_STRIKE": "-", "EOD_PREMIUM": 0.0, "CONVICTION_SCORE": 0, "SETUP_REASON": "Upload 2+ days for Next-Day signal"}
     near_opts = sym_opts[(sym_opts["STRIKE"] >= spot * 0.94) & (sym_opts["STRIKE"] <= spot * 1.06) & (sym_opts["VOLUME"] > 0)].copy()
@@ -104,15 +135,11 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     if abs(price_chg) > 5.5:
         return {"NEXT_DAY_ACTION": "EXHAUSTED (SKIP)", "BEST_STRIKE": "-", "EOD_PREMIUM": 0.0, "CONVICTION_SCORE": 0, "SETUP_REASON": f"Already moved {price_chg:.1f}% today"}
 
-    ce_near = near_opts[near_opts["OPTION_TYP"] == "CE"].copy()
-    pe_near = near_opts[near_opts["OPTION_TYP"] == "PE"].copy()
-    ce_windup = ce_near[ce_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum()
-    pe_add = pe_near[pe_near["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
-    pe_windup = pe_near[pe_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum()
-    ce_add = ce_near[ce_near["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
+    ce_near, pe_near = near_opts[near_opts["OPTION_TYP"] == "CE"].copy(), near_opts[near_opts["OPTION_TYP"] == "PE"].copy()
+    ce_windup, pe_add = ce_near[ce_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum(), pe_near[pe_near["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
+    pe_windup, ce_add = pe_near[pe_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum(), ce_near[ce_near["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
 
-    score = 0
-    reasons = []
+    score, reasons = 0, []
     if 0.4 <= price_chg <= 5.5:
         score += 4 if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else 2
         reasons.append(f"Fut Long Buildup (OI +{fut_oi_chg:.1f}%)" if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else f"Bullish Momentum (+{price_chg:.1f}%)")
@@ -128,103 +155,61 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     if score >= 4 and not ce_near.empty:
         trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
         ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
-        target_df = trapped_ce if not trapped_ce.empty else ce_near.sort_values("DIST")
-        best_row = next(iter(target_df.to_dict("records")))
-        strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_ce.empty else "ATM CE"
-        return {"NEXT_DAY_ACTION": "🟢 BUY CALL (CE)", "BEST_STRIKE": f"{best_row['STRIKE']:g} CE", "EOD_PREMIUM": float(best_row["CLOSE"]), "CONVICTION_SCORE": int(score), "SETUP_REASON": " + ".join(reasons) + f" | {strike_note}"}
+        best_row = next(iter((trapped_ce if not trapped_ce.empty else ce_near.sort_values("DIST")).to_dict("records")))
+        return {"NEXT_DAY_ACTION": "🟢 BUY CALL (CE)", "BEST_STRIKE": f"{best_row['STRIKE']:g} CE", "EOD_PREMIUM": float(best_row["CLOSE"]), "CONVICTION_SCORE": int(score), "SETUP_REASON": " + ".join(reasons)}
 
     if score <= -4 and not pe_near.empty:
         trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
         pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
-        target_df = trapped_pe if not trapped_pe.empty else pe_near.sort_values("DIST")
-        best_row = next(iter(target_df.to_dict("records")))
-        strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_pe.empty else "ATM PE"
-        return {"NEXT_DAY_ACTION": "🔴 BUY PUT (PE)", "BEST_STRIKE": f"{best_row['STRIKE']:g} PE", "EOD_PREMIUM": float(best_row["CLOSE"]), "CONVICTION_SCORE": int(score), "SETUP_REASON": " + ".join(reasons) + f" | {strike_note}"}
+        best_row = next(iter((trapped_pe if not trapped_pe.empty else pe_near.sort_values("DIST")).to_dict("records")))
+        return {"NEXT_DAY_ACTION": "🔴 BUY PUT (PE)", "BEST_STRIKE": f"{best_row['STRIKE']:g} PE", "EOD_PREMIUM": float(best_row["CLOSE"]), "CONVICTION_SCORE": int(score), "SETUP_REASON": " + ".join(reasons)}
 
     return {"NEXT_DAY_ACTION": "NEUTRAL / WAIT", "BEST_STRIKE": "-", "EOD_PREMIUM": 0.0, "CONVICTION_SCORE": int(score), "SETUP_REASON": "No clear next-day edge"}
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
-repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-raw_sources = uploaded_files if uploaded_files else repo_files
+raw_sources = uploaded_files if uploaded_files else [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
 dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
-
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
-
 fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
-g_close = fut_df.groupby("SYMBOL")["CLOSE"]
-g_oi = fut_df.groupby("SYMBOL")["OPEN_INT"]
-
-fut_df["1D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(1)) / g_close.shift(1) * 100
-fut_df["5D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(5)) / g_close.shift(5) * 100
-fut_df["20D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(20)) / g_close.shift(20) * 100
-fut_df["22D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(22)) / g_close.shift(22) * 100
+g_close, g_oi = fut_df.groupby("SYMBOL")["CLOSE"], fut_df.groupby("SYMBOL")["OPEN_INT"]
+for col_n, lag in [("1D_CHG_%", 1), ("5D_CHG_%", 5), ("20D_CHG_%", 20), ("22D_CHG_%", 22)]: fut_df[col_n] = (fut_df["CLOSE"] - g_close.shift(lag)) / g_close.shift(lag) * 100
 fut_df["FUT_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_oi.shift(1)) / g_oi.shift(1) * 100
 
 latest_date = all_df["DATE"].max()
 latest_fut = fut_df[fut_df["DATE"] == latest_date].reset_index(drop=True)
-
 opt_df = all_df[(all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)].copy()
 near_exp_map = opt_df.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYMBOL")["EXPIRY"]
-opt_df = opt_df[opt_df["EXPIRY"] == opt_df["SYMBOL"].map(near_exp_map)].copy()
-opt_df = opt_df[opt_df["OPEN_INT"] > 0].copy()
+opt_df = opt_df[(opt_df["EXPIRY"] == opt_df["SYMBOL"].map(near_exp_map)) & (opt_df["OPEN_INT"] > 0)].copy()
 opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
 opt_df["OI_CHG_%"] = np.where(opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0.0)
-
 opt_df["OI_ACTION"] = "Neutral"
 opt_df.loc[opt_df["OI_CHG_%"] >= 5, "OI_ACTION"] = "Addition"
 opt_df.loc[(opt_df["OI_CHG_%"] >= 20) | ((opt_df["PREV_OI"] <= 0) & (opt_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
 opt_df.loc[opt_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
 opt_df.loc[opt_df["OI_CHG_%"] <= -20, "OI_ACTION"] = "Massive Windup"
 
-st.info(f"Date: {latest_date.strftime('%d %b %Y')} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
-
-eod_list = [compute_eod_sentiment(opt_df[opt_df["SYMBOL"] == row["SYMBOL"]], row["1D_CHG_%"]) for _, row in latest_fut.iterrows()]
-nd_list = [evaluate_next_day_setup(row, opt_df[opt_df["SYMBOL"] == row["SYMBOL"]]) for _, row in latest_fut.iterrows()]
-
+eod_list = [compute_eod_sentiment(opt_df[opt_df["SYMBOL"] == r["SYMBOL"]], r["1D_CHG_%"]) for _, r in latest_fut.iterrows()]
+nd_list = [evaluate_next_day_setup(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]]) for _, r in latest_fut.iterrows()]
+inst_list = [compute_institutional_profile(opt_df[opt_df["SYMBOL"] == r["SYMBOL"]], r["1D_CHG_%"]) for _, r in latest_fut.iterrows()]
 for k in ["OI_SCORE", "SENTIMENT", "TOP_CE_SIGNALS", "TOP_PE_SIGNALS"]: latest_fut[k] = [d[k] for d in eod_list]
 for k in ["NEXT_DAY_ACTION", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]: latest_fut[k] = [d[k] for d in nd_list]
+for k in ["PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS"]: latest_fut[k] = [d[k] for d in inst_list]
 
-tab1, tab2, tab3 = st.tabs(["🎯 Next-Day Option Buying Predictor", "📊 EOD Movers & Auto-Sentiment", "🔍 Strike-Level Addition & Windup Explorer"])
+st.info(f"📅 Data Up To: {latest_date.strftime('%d %b %Y')} | Trading Days: {all_df['DATE'].nunique()} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
+tab1, tab2, tab3 = st.tabs(["🎯 Next-Day Option Buying Predictor", "📊 EOD Movers & Auto-Sentiment", "🏛️ Institutional Bias & Strike Explorer"])
 
-tab1.caption("Trade setups for the NEXT trading session based on Futures Buildup + Trapped Option Writers. Confirm entry above Prev High (for CE) or below Prev Low (for PE).")
 c1, c2 = tab1.columns(2)
 c1.markdown("### 🟢 Next-Day CALL Buying (BUY CE)")
-call_picks = latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🟢 BUY CALL (CE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=False)
-c1.dataframe(call_picks[["SYMBOL", "CLOSE", "HIGH", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
-
+c1.dataframe(latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🟢 BUY CALL (CE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=False)[["SYMBOL", "CLOSE", "HIGH", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
 c2.markdown("### 🔴 Next-Day PUT Buying (BUY PE)")
-put_picks = latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🔴 BUY PUT (PE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=[True, True])
-c2.dataframe(put_picks[["SYMBOL", "CLOSE", "LOW", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
-
-tab1.divider()
-nd_cols = ["SYMBOL", "NEXT_DAY_ACTION", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "CLOSE", "HIGH", "LOW", "1D_CHG_%", "FUT_OI_CHG_%", "SETUP_REASON"]
-latest_fut["ABS_CONV"] = latest_fut["CONVICTION_SCORE"].abs()
-nd_export = latest_fut[latest_fut["NEXT_DAY_ACTION"].isin(["🟢 BUY CALL (CE)", "🔴 BUY PUT (PE)"])].sort_values(by="ABS_CONV", ascending=False)
-tab1.download_button(label="📥 Download Next-Day Option Buying Plan (CSV)", data=nd_export[nd_cols].to_csv(index=False).encode("utf-8"), file_name=f"next_day_option_plan_{latest_date.strftime('%Y%m%d')}.csv", mime="text/csv")
+c2.dataframe(latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🔴 BUY PUT (PE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=[True, True])[["SYMBOL", "CLOSE", "LOW", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
 
 col1, col2 = tab2.columns(2)
 col1.markdown("### 🟢 Top Gainers (1D %)")
-gainers = latest_fut.nlargest(8, "1D_CHG_%")
-col1.dataframe(gainers[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
-
+col1.dataframe(latest_fut.nlargest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
 col2.markdown("### 🔴 Top Losers (1D %)")
-losers = latest_fut.nsmallest(8, "1D_CHG_%")
-col2.dataframe(losers[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
-
-tab2.divider()
+col2.dataframe(latest_fut.nsmallest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
 sentiment_filter = tab2.multiselect("Filter by EOD Auto-Sentiment", options=["STRONG BULLISH", "BULLISH", "STRONG BEARISH", "BEARISH", "REVERSAL WATCH", "NEUTRAL / SIDEWAYS"], default=["STRONG BULLISH", "STRONG BEARISH", "REVERSAL WATCH", "BULLISH", "BEARISH", "NEUTRAL / SIDEWAYS"])
-eod_cols = ["SYMBOL", "SENTIMENT", "OI_SCORE", "CLOSE", "1D_CHG_%", "5D_CHG_%", "20D_CHG_%", "22D_CHG_%", "TOP_CE_SIGNALS", "TOP_PE_SIGNALS"]
-filtered_eod = latest_fut[latest_fut["SENTIMENT"].isin(sentiment_filter)].sort_values(by="1D_CHG_%", ascending=False, na_position="last")
-tab2.dataframe(filtered_eod[eod_cols], use_container_width=True, hide_index=True)
-tab2.download_button(label="📥 Download Full EOD Sentiment Report (CSV)", data=filtered_eod[eod_cols].to_csv(index=False).encode("utf-8"), file_name=f"eod_sentiment_{latest_date.strftime('%Y%m%d')}.csv", mime="text/csv")
-
-selected_stock = tab3.selectbox("Select Stock", sorted(latest_fut["SYMBOL"].unique()))
-only_active = tab3.checkbox("Show only Addition / Windup strikes (>= 5% OI change)", value=False)
-opt_df["ABS_CHG_OI"] = opt_df["CHG_IN_OI"].abs()
-stock_strikes = opt_df[opt_df["SYMBOL"] == selected_stock].sort_values(by="ABS_CHG_OI", ascending=False)
-if only_active: stock_strikes = stock_strikes[stock_strikes["OI_ACTION"] != "Neutral"]
-tab3.dataframe(stock_strikes[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
