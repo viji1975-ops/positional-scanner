@@ -35,7 +35,7 @@ opt_df.loc[opt_df["OI_CHG_%"] <= -20, "OI_ACTION"] = "Massive Windup"
 
 res = [analyze_all_metrics(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]]) for _, r in latest_fut.iterrows()]
 for k in ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]:
-    latest_fut[k] = [d[k] for d in res]
+    latest_fut[k] = [d.get(k, "-") for d in res]
 
 st.info(f"📅 Data Up To: {latest_date.strftime('%d %b %Y')} | Trading Days: {all_df['DATE'].nunique()} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
 tab1, tab2, tab3, tab4 = st.tabs(["🎯 Next-Day Option Buying", "📊 EOD Movers & Sentiment", "🏛️ Institutional Bias & Strikes", "🚀 Breakout & 3D Accumulation Radar"])
