@@ -1,4 +1,6 @@
 import glob
+import sys
+import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -6,6 +8,12 @@ import streamlit as st
 
 st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layout="wide")
 st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
+
+def show_uncaught_error(exc_type, exc_value, exc_tb):
+    st.error("Exact Python Error:")
+    st.code("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
+sys.excepthook = show_uncaught_error
 
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
@@ -80,8 +88,10 @@ def compute_eod_sentiment(sym_opts, price_chg_1d):
         return {"OI_SCORE": 0, "SENTIMENT": "NEUTRAL / SIDEWAYS", "TOP_CE_SIGNALS": "None", "TOP_PE_SIGNALS": "None"}
     ce_opts = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy()
     pe_opts = sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
-    top_ce = ce_opts.reindex(ce_opts["CHG_IN_OI"].abs().sort_values(ascending=False).index).head(3)
-    top_pe = pe_opts.reindex(pe_opts["CHG_IN_OI"].abs().sort_values(ascending=False).index).head(3)
+    ce_opts["ABS_OI"] = ce_opts["CHG_IN_OI"].abs()
+    pe_opts["ABS_OI"] = pe_opts["CHG_IN_OI"].abs()
+    top_ce = ce_opts.sort_values("ABS_OI", ascending=False).head(3)
+    top_pe = pe_opts.sort_values("ABS_OI", ascending=False).head(3)
 
     ce_map = {"Massive Windup": 2, "Windup": 1, "Massive Addition": -2, "Addition": -1}
     pe_map = {"Massive Addition": 2, "Addition": 1, "Massive Windup": -2, "Windup": -1}
@@ -154,7 +164,3 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
-repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-raw_sources = uploaded_files if uploaded_files else repo_files
-dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
-
