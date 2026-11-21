@@ -11,24 +11,13 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Upstox SMA + SuperTrend Scanner", layout="wide")
 
-ALL_INDICES = {
-    "NIFTY": "NSE_INDEX|Nifty 50",
-    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
-    "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
-    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
-    "SENSEX": "BSE_INDEX|SENSEX",
-    "BANKEX": "BSE_INDEX|BANKEX"
-}
+ALL_INDICES = {"NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank", "FINNIFTY": "NSE_INDEX|Nifty Fin Service", "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT", "SENSEX": "BSE_INDEX|SENSEX", "BANKEX": "BSE_INDEX|BANKEX"}
 
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input("Upstox Daily Access Token", value=default_token, type="password")
 access_token = raw_token.strip()
 
-selected_names = st.sidebar.multiselect(
-    "📊 Select Indices to Scan",
-    options=list(ALL_INDICES.keys()),
-    default=list(ALL_INDICES.keys())
-)
+selected_names = st.sidebar.multiselect("📊 Select Indices to Scan", options=list(ALL_INDICES.keys()), default=list(ALL_INDICES.keys()))
 
 with st.sidebar.expander("⚙️ Indicator & Strike Settings", expanded=False):
     timeframe = st.selectbox("Candle Timeframe", options=("3min", "5min", "15min"), index=1)
@@ -142,10 +131,8 @@ def get_candles(instrument_key, tf="5min"):
     ist_today = get_ist_now().date()
     to_date = ist_today.strftime("%Y-%m-%d")
     from_date = (ist_today - datetime.timedelta(days=12)).strftime("%Y-%m-%d")
-
     hist_res, hist_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}{encoded_key}{S}1minute{S}{to_date}{S}{from_date}")
     intra_res, intra_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute")
-
     candles = []
     if hist_res and hist_res.get("data", {}).get("candles"):
         candles.extend(hist_res.get("data").get("candles"))
@@ -153,7 +140,6 @@ def get_candles(instrument_key, tf="5min"):
         candles.extend(intra_res.get("data").get("candles"))
     if not candles:
         return None, hist_err or intra_err or "0 candles returned by Upstox API"
-
     df = pd.DataFrame(candles, columns=("timestamp", "open", "high", "low", "close", "volume", "oi"))
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.drop_duplicates(subset=("timestamp",)).sort_values("timestamp").set_index("timestamp")
@@ -198,16 +184,13 @@ def evaluate_setup(df, sma_len=200, st_len=10, st_mult=3.0, check_bearish=False)
     if df is None or len(df) < 15:
         candle_count = 0 if df is None else len(df)
         return "NONE", "-", {"close": "-", "sma": "-", "st": f"Insufficient Candles ({candle_count})"}
-
     df["SMA"] = df["close"].rolling(window=sma_len, min_periods=min(20, sma_len)).mean()
     df["ST_DIR"] = calculate_supertrend(df, period=st_len, multiplier=st_mult)
     bull_cond = (df["close"] > df["SMA"]) & (df["ST_DIR"] == 1)
     bear_cond = (df["close"] < df["SMA"]) & (df["ST_DIR"] == -1)
-
     latest = df.iloc[-1]
     close_price, sma_val, st_bull = float(latest["close"]), float(latest["SMA"]), (latest["ST_DIR"] == 1)
     info = {"close": round(close_price, 2), "sma": round(sma_val, 2), "st": "🟢 Bullish" if st_bull else "🔴 Bearish"}
-
     if bool(bull_cond.iloc[-1]):
         return "BULLISH", find_occurrence_timestamp(df, bull_cond), info
     if check_bearish and bool(bear_cond.iloc[-1]):
@@ -231,4 +214,4 @@ for name, inst_key in INDICES.items():
     if df_index is None:
         st.error(f"❌ {name}: {err}")
         continue
-    signal_dir, idx_occ_time, idx_info = evaluate_setup(
+    signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True)
