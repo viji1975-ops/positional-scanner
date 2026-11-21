@@ -14,15 +14,21 @@ DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
 def load_fo_bhavcopy(file_obj):
   filename = getattr(file_obj, "name", str(file_obj))
-  if filename.lower().endswith(".zip"):
-    with zipfile.ZipFile(file_obj) as z:
-      csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-      if not csv_files:
-        return pd.DataFrame()
-      with z.open(csv_files[0]) as f:
-        df = pd.read_csv(f)
-  else:
-    df = pd.read_csv(file_obj)
+  try:
+    if filename.lower().endswith(".zip"):
+      with zipfile.ZipFile(file_obj) as z:
+        csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
+        if not csv_files:
+          st.warning(f"No CSV found inside {filename}")
+          return pd.DataFrame()
+        first_csv = csv_files[0]
+        with z.open(first_csv) as f:
+          df = pd.read_csv(f)
+    else:
+      df = pd.read_csv(file_obj)
+  except Exception as e:
+    st.error(f"Error reading {filename}: {e}")
+    return pd.DataFrame()
 
   df.columns = [c.strip() for c in df.columns]
 
@@ -92,6 +98,9 @@ def load_fo_bhavcopy(file_obj):
         "VOLUME",
     ]
   else:
+    st.error(
+        f"Unrecognized columns in {filename}: {list(df.columns[:10])}"
+    )
     return pd.DataFrame()
 
   df["DATE"] = pd.to_datetime(df["DATE"])
@@ -354,11 +363,3 @@ fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
 fut_df["FUT_OI_CHG_%"] = grouped["OPEN_INT"].pct_change(1) * 100
 
 latest_date = all_df["DATE"].max()
-latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
-
-# 2. Option Chain for Latest Date
-opt_df = all_df[
-    (all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)
-].copy()
-near_expiry = opt_df.groupby("SYMBOL")["EXPIRY"].min().reset_index()
-opt_df = opt_df.merge(near_expiry, on=["SYMBOL", "EXPIRY"])
