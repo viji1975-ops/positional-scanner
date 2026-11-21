@@ -84,7 +84,7 @@ def compute_eod_sentiment(sym_opts, price_chg_1d):
 
     ce_map = {"Massive Windup": 2, "Windup": 1, "Massive Addition": -2, "Addition": -1}
     pe_map = {"Massive Addition": 2, "Addition": 1, "Massive Windup": -2, "Windup": -1}
-    oi_score = sum(ce_map.get(x, 0) for x in top_ce["OI_ACTION"]) + sum(pe_map.get(x, 0) for x in top_pe["OI_ACTION"])
+    oi_score = int(sum(ce_map.get(x, 0) for x in top_ce["OI_ACTION"]) + sum(pe_map.get(x, 0) for x in top_pe["OI_ACTION"]))
 
     ce_list = [f"{int(r['STRIKE'])}CE ({r['OI_ACTION']})" for _, r in top_ce.iterrows() if r["OI_ACTION"] != "Neutral"]
     pe_list = [f"{int(r['STRIKE'])}PE ({r['OI_ACTION']})" for _, r in top_pe.iterrows() if r["OI_ACTION"] != "Neutral"]
@@ -133,18 +133,18 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     if score >= 4 and not ce_near.empty:
         trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
         ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
-        best_row = trapped_ce.head(1).squeeze() if not trapped_ce.empty else ce_near.sort_values("DIST").head(1).squeeze()
+        best_row = trapped_ce.iloc[0] if not trapped_ce.empty else ce_near.sort_values("DIST").iloc[0]
         strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_ce.empty else "ATM CE"
-        return ("🟢 BUY CALL (CE)", f"{best_row['STRIKE']:g} CE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}")
+        return ("🟢 BUY CALL (CE)", f"{best_row['STRIKE']:g} CE", float(best_row["CLOSE"]), int(score), " + ".join(reasons) + f" | {strike_note}")
 
     if score <= -4 and not pe_near.empty:
         trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
         pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
-        best_row = trapped_pe.head(1).squeeze() if not trapped_pe.empty else pe_near.sort_values("DIST").head(1).squeeze()
+        best_row = trapped_pe.iloc[0] if not trapped_pe.empty else pe_near.sort_values("DIST").iloc[0]
         strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_pe.empty else "ATM PE"
-        return ("🔴 BUY PUT (PE)", f"{best_row['STRIKE']:g} PE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}")
+        return ("🔴 BUY PUT (PE)", f"{best_row['STRIKE']:g} PE", float(best_row["CLOSE"]), int(score), " + ".join(reasons) + f" | {strike_note}")
 
-    return ("NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge")
+    return ("NEUTRAL / WAIT", "-", 0.0, int(score), "No clear next-day edge")
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
@@ -155,11 +155,12 @@ dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
-
 fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
 grouped = fut_df.groupby("SYMBOL")
 fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
 fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
 fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
 fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
+fut_df["FUT_OI_CHG_%"] = grouped["OPEN_INT"].pct_change(1) * 100
+
+latest_date = all_df["DATE"].max()
