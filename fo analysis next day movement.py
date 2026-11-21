@@ -290,36 +290,35 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-try:
-  repo_files = [
-      f
-      for f in glob.glob(DATA_FOLDER)
-      if f.lower().endswith((".csv", ".zip"))
-  ]
-  dfs = []
+repo_files = [
+    f
+    for f in glob.glob(DATA_FOLDER)
+    if f.lower().endswith((".csv", ".zip"))
+]
+dfs = []
 
-  if uploaded_files:
-    for f in uploaded_files:
-      parsed = load_fo_bhavcopy(f)
-      if not parsed.empty:
-        dfs.append(parsed)
-  elif repo_files:
-    for f in repo_files:
-      parsed = load_fo_bhavcopy(f)
-      if not parsed.empty:
-        dfs.append(parsed)
+if uploaded_files:
+  for f in uploaded_files:
+    parsed = load_fo_bhavcopy(f)
+    if not parsed.empty:
+      dfs.append(parsed)
+elif repo_files:
+  for f in repo_files:
+    parsed = load_fo_bhavcopy(f)
+    if not parsed.empty:
+      dfs.append(parsed)
 
-  if not dfs:
-    st.info(
-        "Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to"
-        " `data/daily_fo_bhavcopy/` in GitHub) to view the scanner."
-    )
-    st.stop()
-
-  all_df = pd.concat(dfs, ignore_index=True)
-  all_df = all_df.drop_duplicates(
-      subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
+if not dfs:
+  st.info(
+      "Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to"
+      " `data/daily_fo_bhavcopy/` in GitHub) to view the scanner."
   )
+  st.stop()
 
-  # 1. Futures Price & Multi-Timeframe Returns
-  fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
+all_df = pd.concat(dfs, ignore_index=True)
+all_df = all_df.drop_duplicates(
+    subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
+)
+
+# 1. Futures Price & Multi-Timeframe Returns
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
