@@ -1,6 +1,7 @@
 import calendar
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+import operator
 import urllib.parse
 import requests
 import numpy as np
@@ -30,11 +31,11 @@ selected_names = st.sidebar.multiselect(
 )
 
 with st.sidebar.expander("⚙️ Indicator & Strike Settings", expanded=False):
-    timeframe = st.selectbox("Candle Timeframe", options=["3min", "5min", "15min"], index=1)
+    timeframe = st.selectbox("Candle Timeframe", options=("3min", "5min", "15min"), index=1)
     sma_period = st.number_input("SMA Period", min_value=10, max_value=500, value=200, step=10)
     st_period = st.number_input("SuperTrend ATR Period", min_value=2, max_value=50, value=10, step=1)
     st_multiplier = st.number_input("SuperTrend Multiplier", min_value=0.5, max_value=10.0, value=3.0, step=0.5)
-    strikes_per_index = st.selectbox("Strikes per Index", options=[3, 5], index=1)
+    strikes_per_index = st.selectbox("Strikes per Index", options=(3, 5), index=1)
 
 auto_refresh = st.sidebar.checkbox("⏱️ Auto-Refresh Every 60s (Market Hours)", value=True)
 if st.sidebar.button("🔄 Refresh / Run Scan Now", type="primary"):
@@ -117,15 +118,16 @@ def fetch_option_chain_cached(index_name, index_key, token_prefix):
 def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strikes=5):
     all_opts = []
     for item in chain_data:
-        strike = float(item["strike_price"])
+        strike = float(item.get("strike_price", 0))
         if option_type == "CE" and "call_options" in item:
-            all_opts.append((strike, item["call_options"]["instrument_key"]))
+            all_opts.append((strike, item.get("call_options").get("instrument_key")))
         elif option_type == "PE" and "put_options" in item:
-            all_opts.append((strike, item["put_options"]["instrument_key"]))
-    all_opts.sort(key=lambda x: x[0])
+            all_opts.append((strike, item.get("put_options").get("instrument_key")))
+    all_opts.sort(key=operator.itemgetter(0))
     if not all_opts:
         return []
-    atm_idx = min(range(len(all_opts)), key=lambda i: abs(all_opts[i][0] - spot_price))
+    strikes_only = tuple(map(operator.itemgetter(0), all_opts))
+    atm_idx = min(range(len(strikes_only)), key=lambda i: abs(strikes_only[i] - spot_price))
     half = total_strikes // 2
     if option_type == "CE":
         start = max(0, atm_idx - half)
@@ -146,22 +148,22 @@ def get_candles(instrument_key, tf="5min"):
 
     candles = []
     if hist_res and hist_res.get("data", {}).get("candles"):
-        candles.extend(hist_res["data"]["candles"])
+        candles.extend(hist_res.get("data").get("candles"))
     if intra_res and intra_res.get("data", {}).get("candles"):
-        candles.extend(intra_res["data"]["candles"])
+        candles.extend(intra_res.get("data").get("candles"))
     if not candles:
         return None, hist_err or intra_err or "0 candles returned by Upstox API"
 
-    df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
+    df = pd.DataFrame(candles, columns=("timestamp", "open", "high", "low", "close", "volume", "oi"))
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
+    df = df.drop_duplicates(subset=("timestamp",)).sort_values("timestamp").set_index("timestamp")
     resampled = df.resample(tf).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return resampled, None
 
 
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high, low, close = df["high"], df["low"], df["close"]
-    tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    tr = pd.concat((high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()), axis=1).max(axis=1)
     atr = tr.ewm(alpha=1 / period, min_periods=1, adjust=False).mean()
     hl2 = (high + low) / 2
     upperband, lowerband = hl2 + (multiplier * atr), hl2 - (multiplier * atr)
@@ -230,6 +232,3 @@ for name, inst_key in INDICES.items():
         st.error(f"❌ {name}: {err}")
         continue
     signal_dir, idx_occ_time, idx_info = evaluate_setup(
-        df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True
-    )
-    spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
