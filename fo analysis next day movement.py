@@ -151,3 +151,76 @@ dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
+all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
+
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
+g_close = fut_df.groupby("SYMBOL")["CLOSE"]
+g_oi = fut_df.groupby("SYMBOL")["OPEN_INT"]
+
+fut_df["1D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(1)) / g_close.shift(1) * 100
+fut_df["5D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(5)) / g_close.shift(5) * 100
+fut_df["20D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(20)) / g_close.shift(20) * 100
+fut_df["22D_CHG_%"] = (fut_df["CLOSE"] - g_close.shift(22)) / g_close.shift(22) * 100
+fut_df["FUT_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_oi.shift(1)) / g_oi.shift(1) * 100
+
+latest_date = all_df["DATE"].max()
+latest_fut = fut_df[fut_df["DATE"] == latest_date].reset_index(drop=True)
+
+opt_df = all_df[(all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)].copy()
+near_exp_map = opt_df.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYMBOL")["EXPIRY"]
+opt_df = opt_df[opt_df["EXPIRY"] == opt_df["SYMBOL"].map(near_exp_map)].copy()
+opt_df = opt_df[opt_df["OPEN_INT"] > 0].copy()
+opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
+opt_df["OI_CHG_%"] = np.where(opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0.0)
+
+opt_df["OI_ACTION"] = "Neutral"
+opt_df.loc[opt_df["OI_CHG_%"] >= 5, "OI_ACTION"] = "Addition"
+opt_df.loc[(opt_df["OI_CHG_%"] >= 20) | ((opt_df["PREV_OI"] <= 0) & (opt_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
+opt_df.loc[opt_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
+opt_df.loc[opt_df["OI_CHG_%"] <= -20, "OI_ACTION"] = "Massive Windup"
+
+st.info(f"Date: {latest_date.strftime('%d %b %Y')} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
+
+eod_list = [compute_eod_sentiment(opt_df[opt_df["SYMBOL"] == row["SYMBOL"]], row["1D_CHG_%"]) for _, row in latest_fut.iterrows()]
+nd_list = [evaluate_next_day_setup(row, opt_df[opt_df["SYMBOL"] == row["SYMBOL"]]) for _, row in latest_fut.iterrows()]
+
+for k in ["OI_SCORE", "SENTIMENT", "TOP_CE_SIGNALS", "TOP_PE_SIGNALS"]: latest_fut[k] = [d[k] for d in eod_list]
+for k in ["NEXT_DAY_ACTION", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]: latest_fut[k] = [d[k] for d in nd_list]
+
+tab1, tab2, tab3 = st.tabs(["🎯 Next-Day Option Buying Predictor", "📊 EOD Movers & Auto-Sentiment", "🔍 Strike-Level Addition & Windup Explorer"])
+
+tab1.caption("Trade setups for the NEXT trading session based on Futures Buildup + Trapped Option Writers. Confirm entry above Prev High (for CE) or below Prev Low (for PE).")
+c1, c2 = tab1.columns(2)
+c1.markdown("### 🟢 Next-Day CALL Buying (BUY CE)")
+call_picks = latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🟢 BUY CALL (CE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=False)
+c1.dataframe(call_picks[["SYMBOL", "CLOSE", "HIGH", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
+
+c2.markdown("### 🔴 Next-Day PUT Buying (BUY PE)")
+put_picks = latest_fut[latest_fut["NEXT_DAY_ACTION"] == "🔴 BUY PUT (PE)"].sort_values(by=["CONVICTION_SCORE", "1D_CHG_%"], ascending=[True, True])
+c2.dataframe(put_picks[["SYMBOL", "CLOSE", "LOW", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "SETUP_REASON"]], use_container_width=True, hide_index=True)
+
+tab1.divider()
+nd_cols = ["SYMBOL", "NEXT_DAY_ACTION", "BEST_STRIKE", "EOD_PREMIUM", "CONVICTION_SCORE", "CLOSE", "HIGH", "LOW", "1D_CHG_%", "FUT_OI_CHG_%", "SETUP_REASON"]
+latest_fut["ABS_CONV"] = latest_fut["CONVICTION_SCORE"].abs()
+nd_export = latest_fut[latest_fut["NEXT_DAY_ACTION"].isin(["🟢 BUY CALL (CE)", "🔴 BUY PUT (PE)"])].sort_values(by="ABS_CONV", ascending=False)
+tab1.download_button(label="📥 Download Next-Day Option Buying Plan (CSV)", data=nd_export[nd_cols].to_csv(index=False).encode("utf-8"), file_name=f"next_day_option_plan_{latest_date.strftime('%Y%m%d')}.csv", mime="text/csv")
+
+col1, col2 = tab2.columns(2)
+col1.markdown("### 🟢 Top Gainers (1D %)")
+gainers = latest_fut.nlargest(8, "1D_CHG_%")
+col1.dataframe(gainers[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
+
+col2.markdown("### 🔴 Top Losers (1D %)")
+losers = latest_fut.nsmallest(8, "1D_CHG_%")
+col2.dataframe(losers[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
+
+tab2.divider()
+sentiment_filter = tab2.multiselect("Filter by EOD Auto-Sentiment", options=["STRONG BULLISH", "BULLISH", "STRONG BEARISH", "BEARISH", "REVERSAL WATCH", "NEUTRAL / SIDEWAYS"], default=["STRONG BULLISH", "STRONG BEARISH", "REVERSAL WATCH", "BULLISH", "BEARISH", "NEUTRAL / SIDEWAYS"])
+eod_cols = ["SYMBOL", "SENTIMENT", "OI_SCORE", "CLOSE", "1D_CHG_%", "5D_CHG_%", "20D_CHG_%", "22D_CHG_%", "TOP_CE_SIGNALS", "TOP_PE_SIGNALS"]
+filtered_eod = latest_fut[latest_fut["SENTIMENT"].isin(sentiment_filter)].sort_values(by="1D_CHG_%", ascending=False, na_position="last")
+tab2.dataframe(filtered_eod[eod_cols], use_container_width=True, hide_index=True)
+tab2.download_button(label="📥 Download Full EOD Sentiment Report (CSV)", data=filtered_eod[eod_cols].to_csv(index=False).encode("utf-8"), file_name=f"eod_sentiment_{latest_date.strftime('%Y%m%d')}.csv", mime="text/csv")
+
+selected_stock = tab3.selectbox("Select Stock", sorted(latest_fut["SYMBOL"].unique()))
+opt_df["ABS_CHG_OI"] = opt_df["CHG_IN_OI"].abs()
