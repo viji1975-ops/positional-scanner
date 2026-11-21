@@ -122,7 +122,7 @@ def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strik
             all_opts.append((strike, item["call_options"]["instrument_key"]))
         elif option_type == "PE" and "put_options" in item:
             all_opts.append((strike, item["put_options"]["instrument_key"]))
-    all_opts.sort(key=lambda x: x)
+    all_opts.sort(key=lambda x: x[0])
     if not all_opts:
         return []
     atm_idx = min(range(len(all_opts)), key=lambda i: abs(all_opts[i][0] - spot_price))
@@ -224,12 +224,12 @@ STATUS_MAP = {"BULLISH": "🟢 BULLISH (Look for CE)", "BEARISH": "🔴 BEARISH 
 index_rows = []
 matched_indices = []
 
-with st.spinner("Scanning indices and option chains..."):
-    for name, inst_key in INDICES.items():
-        df_index, err = get_candles(inst_key, tf=timeframe)
-        if df_index is None:
-            st.error(f"❌ {name}: {err}")
-            continue
-        signal_dir, idx_occ_time, idx_info = evaluate_setup(
-            df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True
-        )
+for name, inst_key in INDICES.items():
+    df_index, err = get_candles(inst_key, tf=timeframe)
+    if df_index is None:
+        st.error(f"❌ {name}: {err}")
+        continue
+    signal_dir, idx_occ_time, idx_info = evaluate_setup(
+        df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True
+    )
+    spot_price = idx_info["close"] if isinstance(idx_info["close"], float) else float(df_index["close"].iloc[-1])
