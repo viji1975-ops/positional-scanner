@@ -19,7 +19,6 @@ ALL_INDICES = {
     "BANKEX": "BSE_INDEX|BANKEX"
 }
 
-# --- SIDEBAR CONTROLS ---
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "") if "UPSTOX_ACCESS_TOKEN" in st.secrets else ""
 raw_token = st.sidebar.text_input("Upstox Daily Access Token", value=default_token, type="password")
 access_token = raw_token.strip()
@@ -35,7 +34,7 @@ with st.sidebar.expander("⚙️ Indicator & Strike Settings", expanded=False):
     sma_period = st.number_input("SMA Period", min_value=10, max_value=500, value=200, step=10)
     st_period = st.number_input("SuperTrend ATR Period", min_value=2, max_value=50, value=10, step=1)
     st_multiplier = st.number_input("SuperTrend Multiplier", min_value=0.5, max_value=10.0, value=3.0, step=0.5)
-    strikes_per_index = st.selectbox("Strikes per Index", options=[3, 5], index=1, help="3 = 1 ITM + ATM + 1 OTM | 5 = 2 ITM + ATM + 2 OTM")
+    strikes_per_index = st.selectbox("Strikes per Index", options=[3, 5], index=1)
 
 auto_refresh = st.sidebar.checkbox("⏱️ Auto-Refresh Every 60s (Market Hours)", value=True)
 if st.sidebar.button("🔄 Refresh / Run Scan Now", type="primary"):
@@ -58,22 +57,23 @@ S = chr(47)
 HOST = "a" + "p" + "i" + "." + "upstox.com"
 BASE_API = "https:" + S + S + HOST + S + "v2"
 
+
 def get_ist_now():
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)
+
 
 def is_market_hours(ist_dt):
     return ist_dt.weekday() < 5 and datetime.time(9, 15) <= ist_dt.time() <= datetime.time(15, 30)
 
+
 def get_candidate_expiries(index_name):
     ist_today = get_ist_now().date()
     candidates = []
-    # Weekly expiry indices: NIFTY (NSE) and SENSEX (BSE)
     if index_name in ("NIFTY", "SENSEX"):
         for offset in range(0, 8):
             d = ist_today + datetime.timedelta(days=offset)
             if d.weekday() < 5:
                 candidates.append(d.strftime("%Y-%m-%d"))
-    # Monthly expiry indices: BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX
     else:
         for m_offset in (0, 1):
             m = ist_today.month + m_offset
@@ -86,6 +86,7 @@ def get_candidate_expiries(index_name):
                     candidates.append(d.strftime("%Y-%m-%d"))
     return list(dict.fromkeys(candidates))
 
+
 def safe_get_json(url, params=None):
     try:
         res = requests.get(url, headers=HEADERS, params=params, timeout=12, allow_redirects=False)
@@ -97,6 +98,7 @@ def safe_get_json(url, params=None):
         return data, None
     except Exception as e:
         return None, str(e)
+
 
 @st.cache_data(ttl=1800)
 def fetch_option_chain_cached(index_name, index_key, token_prefix):
@@ -111,6 +113,7 @@ def fetch_option_chain_cached(index_name, index_key, token_prefix):
             return exp, data["data"], None
     return next(iter(candidates), "-"), [], f"{last_err} (Tried: {', '.join(candidates)})"
 
+
 def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strikes=5):
     all_opts = []
     for item in chain_data:
@@ -122,9 +125,8 @@ def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strik
     all_opts.sort(key=lambda x: x)
     if not all_opts:
         return []
-    # Find index of strike closest to spot_price (ATM)
-    atm_idx = min(range(len(all_opts)), key=lambda i: abs(all_opts[i] - spot_price))
-    half = total_strikes // 2  # 2 for 5 strikes (2 ITM + ATM + 2 OTM), 1 for 3 strikes
+    atm_idx = min(range(len(all_opts)), key=lambda i: abs(all_opts[i][0] - spot_price))
+    half = total_strikes // 2
     if option_type == "CE":
         start = max(0, atm_idx - half)
         return all_opts[start:start + total_strikes]
@@ -132,15 +134,16 @@ def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strik
         end = min(len(all_opts), atm_idx + half + 1)
         return list(reversed(all_opts[max(0, end - total_strikes):end]))
 
+
 def get_candles(instrument_key, tf="5min"):
     encoded_key = urllib.parse.quote(instrument_key, safe="")
     ist_today = get_ist_now().date()
     to_date = ist_today.strftime("%Y-%m-%d")
     from_date = (ist_today - datetime.timedelta(days=12)).strftime("%Y-%m-%d")
-    
+
     hist_res, hist_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}{encoded_key}{S}1minute{S}{to_date}{S}{from_date}")
     intra_res, intra_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute")
-    
+
     candles = []
     if hist_res and hist_res.get("data", {}).get("candles"):
         candles.extend(hist_res["data"]["candles"])
@@ -155,10 +158,11 @@ def get_candles(instrument_key, tf="5min"):
     resampled = df.resample(tf).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return resampled, None
 
+
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high, low, close = df["high"], df["low"], df["close"]
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/period, min_periods=1, adjust=False).mean()
+    atr = tr.ewm(alpha=1 / period, min_periods=1, adjust=False).mean()
     hl2 = (high + low) / 2
     upperband, lowerband = hl2 + (multiplier * atr), hl2 - (multiplier * atr)
     in_uptrend = [True] * len(df)
@@ -175,6 +179,7 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
                 upperband.iloc[i] = upperband.iloc[i - 1]
     return pd.Series(np.where(in_uptrend, 1, -1), index=df.index)
 
+
 def find_occurrence_timestamp(df, condition_series):
     if not bool(condition_series.iloc[-1]):
         return "-"
@@ -186,6 +191,7 @@ def find_occurrence_timestamp(df, condition_series):
             break
     return start_ts.strftime("%d-%b %H:%M")
 
+
 def evaluate_setup(df, sma_len=200, st_len=10, st_mult=3.0, check_bearish=False):
     if df is None or len(df) < 15:
         candle_count = 0 if df is None else len(df)
@@ -195,16 +201,17 @@ def evaluate_setup(df, sma_len=200, st_len=10, st_mult=3.0, check_bearish=False)
     df["ST_DIR"] = calculate_supertrend(df, period=st_len, multiplier=st_mult)
     bull_cond = (df["close"] > df["SMA"]) & (df["ST_DIR"] == 1)
     bear_cond = (df["close"] < df["SMA"]) & (df["ST_DIR"] == -1)
-    
+
     latest = df.iloc[-1]
     close_price, sma_val, st_bull = float(latest["close"]), float(latest["SMA"]), (latest["ST_DIR"] == 1)
     info = {"close": round(close_price, 2), "sma": round(sma_val, 2), "st": "🟢 Bullish" if st_bull else "🔴 Bearish"}
-    
+
     if bool(bull_cond.iloc[-1]):
         return "BULLISH", find_occurrence_timestamp(df, bull_cond), info
     if check_bearish and bool(bear_cond.iloc[-1]):
         return "BEARISH", find_occurrence_timestamp(df, bear_cond), info
     return "NONE", "-", info
+
 
 now_ist = get_ist_now()
 live_mode = auto_refresh and is_market_hours(now_ist)
@@ -214,7 +221,15 @@ if live_mode:
 st.caption(f"Last scanned: **{now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST** | Mode: **{'🟢 LIVE AUTO-REFRESH (60s)' if live_mode else '⏸️ MANUAL / MARKET CLOSED'}**")
 
 STATUS_MAP = {"BULLISH": "🟢 BULLISH (Look for CE)", "BEARISH": "🔴 BEARISH (Look for PE)"}
-index_rows, matched_indices = [], []
+index_rows = []
+matched_indices = []
 
 with st.spinner("Scanning indices and option chains..."):
     for name, inst_key in INDICES.items():
+        df_index, err = get_candles(inst_key, tf=timeframe)
+        if df_index is None:
+            st.error(f"❌ {name}: {err}")
+            continue
+        signal_dir, idx_occ_time, idx_info = evaluate_setup(
+            df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True
+        )
