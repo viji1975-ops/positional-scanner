@@ -128,16 +128,19 @@ def get_strikes_from_chain(chain_data, spot_price, option_type="CE", total_strik
 
 def get_candles(instrument_key, tf="5min"):
     encoded_key = urllib.parse.quote(instrument_key, safe="")
-    ist_today = get_ist_now().date()
-    to_date = ist_today.strftime("%Y-%m-%d")
-    from_date = (ist_today - datetime.timedelta(days=12)).strftime("%Y-%m-%d")
+    ist_now = get_ist_now()
+    to_date = ist_now.date().strftime("%Y-%m-%d")
+    from_date = (ist_now.date() - datetime.timedelta(days=12)).strftime("%Y-%m-%d")
     hist_res, hist_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}{encoded_key}{S}1minute{S}{to_date}{S}{from_date}")
-    intra_res, intra_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute")
     candles = []
     if hist_res and hist_res.get("data", {}).get("candles"):
         candles.extend(hist_res.get("data").get("candles"))
-    if intra_res and intra_res.get("data", {}).get("candles"):
-        candles.extend(intra_res.get("data").get("candles"))
+    if is_market_hours(ist_now):
+        intra_res, intra_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute")
+        if intra_res and intra_res.get("data", {}).get("candles"):
+            candles.extend(intra_res.get("data").get("candles"))
+    else:
+        intra_err = None
     if not candles:
         return None, hist_err or intra_err or "0 candles returned by Upstox API"
     df = pd.DataFrame(candles, columns=("timestamp", "open", "high", "low", "close", "volume", "oi"))
@@ -145,6 +148,7 @@ def get_candles(instrument_key, tf="5min"):
     df = df.drop_duplicates(subset=("timestamp",)).sort_values("timestamp").set_index("timestamp")
     resampled = df.resample(tf).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return resampled, None
+
 
 
 def calculate_supertrend(df, period=10, multiplier=3.0):
