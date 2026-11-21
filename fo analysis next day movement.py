@@ -76,7 +76,7 @@ def compute_institutional_profile(sym_opts, price_chg_1d):
     call_wall = f"{next(iter(ce.sort_values('OPEN_INT', ascending=False).to_dict('records')))['STRIKE']:g} CE" if not ce.empty else "-"
 
     strikes = sorted(sym_opts["STRIKE"].unique())
-    max_pain = strikes[0] if strikes else 0.0
+    max_pain = next(iter(strikes), 0.0)
     if strikes:
         ce_g = ce.groupby("STRIKE")["OPEN_INT"].sum()
         pe_g = pe.groupby("STRIKE")["OPEN_INT"].sum()
