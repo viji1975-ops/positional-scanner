@@ -1,5 +1,4 @@
 import glob
-import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -16,10 +15,8 @@ def load_fo_bhavcopy(file_obj):
     if filename.lower().endswith(".zip"):
         with zipfile.ZipFile(file_obj) as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-            if not csv_files:
-                return pd.DataFrame()
-            with z.open(next(iter(csv_files))) as f:
-                df = pd.read_csv(f, low_memory=False)
+            if not csv_files: return pd.DataFrame()
+            with z.open(next(iter(csv_files))) as f: df = pd.read_csv(f, low_memory=False)
     else:
         df = pd.read_csv(file_obj, low_memory=False)
 
@@ -87,12 +84,9 @@ def compute_eod_sentiment(sym_opts, price_chg_1d):
     pe_summary = ", ".join(pe_list) if pe_list else "Neutral"
 
     sentiment = "NEUTRAL / SIDEWAYS"
-    if price_chg_1d > 0.5:
-        sentiment = "STRONG BULLISH" if oi_score >= 3 else ("BULLISH" if oi_score >= 1 else ("REVERSAL WATCH" if oi_score <= -2 else "NEUTRAL / SIDEWAYS"))
-    elif price_chg_1d < -0.5:
-        sentiment = "STRONG BEARISH" if oi_score <= -3 else ("BEARISH" if oi_score <= -1 else ("REVERSAL WATCH" if oi_score >= 2 else "NEUTRAL / SIDEWAYS"))
-    elif abs(oi_score) >= 3:
-        sentiment = "REVERSAL WATCH"
+    if price_chg_1d > 0.5: sentiment = "STRONG BULLISH" if oi_score >= 3 else ("BULLISH" if oi_score >= 1 else ("REVERSAL WATCH" if oi_score <= -2 else "NEUTRAL / SIDEWAYS"))
+    elif price_chg_1d < -0.5: sentiment = "STRONG BEARISH" if oi_score <= -3 else ("BEARISH" if oi_score <= -1 else ("REVERSAL WATCH" if oi_score >= 2 else "NEUTRAL / SIDEWAYS"))
+    elif abs(oi_score) >= 3: sentiment = "REVERSAL WATCH"
 
     return {"OI_SCORE": oi_score, "SENTIMENT": sentiment, "TOP_CE_SIGNALS": ce_summary, "TOP_PE_SIGNALS": pe_summary}
 
@@ -126,18 +120,10 @@ def evaluate_next_day_setup(fut_row, sym_opts):
         score -= 4 if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else 2
         reasons.append(f"Fut Short Buildup (OI +{fut_oi_chg:.1f}%)" if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else f"Bearish Momentum ({price_chg:.1f}%)")
 
-    if abs(ce_windup) > abs(ce_add) and abs(ce_windup) > 0:
-        score += 2
-        reasons.append("CE Writers Unwinding")
-    if pe_add > abs(pe_windup) and pe_add > 0:
-        score += 2
-        reasons.append("PE Support Added")
-    if abs(pe_windup) > abs(pe_add) and abs(pe_windup) > 0:
-        score -= 2
-        reasons.append("PE Writers Unwinding")
-    if ce_add > abs(ce_windup) and ce_add > 0:
-        score -= 2
-        reasons.append("CE Resistance Added")
+    if abs(ce_windup) > abs(ce_add) and abs(ce_windup) > 0: score += 2; reasons.append("CE Writers Unwinding")
+    if pe_add > abs(pe_windup) and pe_add > 0: score += 2; reasons.append("PE Support Added")
+    if abs(pe_windup) > abs(pe_add) and abs(pe_windup) > 0: score -= 2; reasons.append("PE Writers Unwinding")
+    if ce_add > abs(ce_windup) and ce_add > 0: score -= 2; reasons.append("CE Resistance Added")
 
     if score >= 4 and not ce_near.empty:
         trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
@@ -158,15 +144,13 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     return {"NEXT_DAY_ACTION": "NEUTRAL / WAIT", "BEST_STRIKE": "-", "EOD_PREMIUM": 0.0, "CONVICTION_SCORE": int(score), "SETUP_REASON": "No clear next-day edge"}
 
 
-def run_dashboard(uploaded_files):
-    repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-    raw_sources = uploaded_files if uploaded_files else repo_files
-    dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
+uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
+repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+raw_sources = uploaded_files if uploaded_files else repo_files
+dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
-    if not dfs:
-        st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner.")
-        return
+if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
-    all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-    st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
+all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
 
