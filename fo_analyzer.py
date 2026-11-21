@@ -2,13 +2,15 @@ import glob
 import os
 import numpy as np
 import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="F&O Positional Scanner", layout="wide")
 
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.csv"
-OUTPUT_FOLDER = "outputs"
 
 
-def load_fo_bhavcopy(file_path):
-  df = pd.read_csv(file_path)
+def load_fo_bhavcopy(file_obj):
+  df = pd.read_csv(file_obj)
   df.columns = [c.strip() for c in df.columns]
 
   # New NSE UDiFF F&O Bhavcopy Format
@@ -69,6 +71,8 @@ def load_fo_bhavcopy(file_path):
         "CHG_IN_OI",
         "VOLUME",
     ]
+  else:
+    return pd.DataFrame()
 
   df["DATE"] = pd.to_datetime(df["DATE"])
   df["EXPIRY"] = pd.to_datetime(df["EXPIRY"])
@@ -80,9 +84,7 @@ def classify_oi_action(row):
   prev_oi = row["OPEN_INT"] - row["CHG_IN_OI"]
   if prev_oi <= 0:
     return "Massive Addition" if row["CHG_IN_OI"] > 0 else "Neutral"
-
   pct_oi_chg = (row["CHG_IN_OI"] / prev_oi) * 100
-
   if pct_oi_chg >= 25:
     return "Massive Addition"
   elif pct_oi_chg >= 5:
@@ -91,20 +93,13 @@ def classify_oi_action(row):
     return "Massive Windup"
   elif pct_oi_chg <= -5:
     return "Windup"
-  else:
-    return "Neutral"
+  return "Neutral"
 
 
 def compute_stock_sentiment(sym_opts, price_chg_1d):
-  """
-    Scores top active strikes for a symbol to produce an OI score and Sentiment tag.
-    Bullish (+) = Call Windup (-CE OI) & Put Addition (+PE OI)
-    Bearish (-) = Put Windup (-PE OI) & Call Addition (+CE OI)
-    """
   if sym_opts.empty or pd.isna(price_chg_1d):
     return 0, "NEUTRAL / SIDEWAYS", "None", "None"
 
-  # Focus on top 3 Call strikes and top 3 Put strikes by absolute OI change
   ce_opts = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy()
   pe_opts = sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
 
@@ -116,32 +111,26 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
   ).head(3)
 
   oi_score = 0
-
-  # Score Call strikes (Windup = Bullish +, Addition = Bearish -)
   for _, r in top_ce.iterrows():
-    action = r["OI_ACTION"]
-    if action == "Massive Windup":
+    if r["OI_ACTION"] == "Massive Windup":
       oi_score += 2
-    elif action == "Windup":
+    elif r["OI_ACTION"] == "Windup":
       oi_score += 1
-    elif action == "Massive Addition":
+    elif r["OI_ACTION"] == "Massive Addition":
       oi_score -= 2
-    elif action == "Addition":
+    elif r["OI_ACTION"] == "Addition":
       oi_score -= 1
 
-  # Score Put strikes (Addition = Bullish +, Windup = Bearish -)
   for _, r in top_pe.iterrows():
-    action = r["OI_ACTION"]
-    if action == "Massive Addition":
+    if r["OI_ACTION"] == "Massive Addition":
       oi_score += 2
-    elif action == "Addition":
+    elif r["OI_ACTION"] == "Addition":
       oi_score += 1
-    elif action == "Massive Windup":
+    elif r["OI_ACTION"] == "Massive Windup":
       oi_score -= 2
-    elif action == "Windup":
+    elif r["OI_ACTION"] == "Windup":
       oi_score -= 1
 
-  # Summary strings of dominant strike signals
   ce_summary = (
       ", ".join([
           f"{int(r['STRIKE'])}CE ({r['OI_ACTION']})"
@@ -150,7 +139,6 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
       ])
       or "Neutral"
   )
-
   pe_summary = (
       ", ".join([
           f"{int(r['STRIKE'])}PE ({r['OI_ACTION']})"
@@ -160,7 +148,6 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
       or "Neutral"
   )
 
-  # Combine Price Direction + OI Score into Final Sentiment Tag
   if price_chg_1d > 0.5:
     if oi_score >= 3:
       sentiment = "STRONG BULLISH"
@@ -180,116 +167,157 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
     else:
       sentiment = "NEUTRAL / SIDEWAYS"
   else:
-    if abs(oi_score) >= 3:
-      sentiment = "REVERSAL WATCH"
-    else:
-      sentiment = "NEUTRAL / SIDEWAYS"
+    sentiment = (
+        "REVERSAL WATCH" if abs(oi_score) >= 3 else "NEUTRAL / SIDEWAYS"
+    )
 
   return oi_score, sentiment, ce_summary, pe_summary
 
 
-def run_analysis():
-  files = glob.glob(DATA_FOLDER)
-  if not files:
-    print("No F&O Bhavcopy files found in data/daily_fo_bhavcopy/.")
-    return
+# --- STREAMLIT UI ---
+st.title("📊 NSE F&O Positional & Option OI Scanner")
 
-  os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-  all_df = pd.concat([load_fo_bhavcopy(f) for f in files], ignore_index=True)
-  all_df = all_df.drop_duplicates(
-      subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
+uploaded_files = st.file_uploader(
+    "Upload Daily NSE F&O Bhavcopy CSVs (1 to 25+ days)",
+    type=["csv"],
+    accept_multiple_files=True,
+)
+
+repo_files = glob.glob(DATA_FOLDER)
+dfs = []
+
+if uploaded_files:
+  for f in uploaded_files:
+    dfs.append(load_fo_bhavcopy(f))
+elif repo_files:
+  for f in repo_files:
+    dfs.append(load_fo_bhavcopy(f))
+
+if not dfs:
+  st.info(
+      "Upload one or more NSE F&O Bhavcopy CSV files above (or push them to"
+      " `data/daily_fo_bhavcopy/` in GitHub) to view the scanner."
   )
+  st.stop()
 
-  # 1. PRICE MOVEMENT ANALYSIS (Near-Month Stock Futures)
-  fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
-  fut_df = fut_df.sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(
-      subset=["SYMBOL", "DATE"]
-  )
+all_df = pd.concat(dfs, ignore_index=True)
+all_df = all_df.drop_duplicates(
+    subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
+)
 
-  grouped = fut_df.groupby("SYMBOL")["CLOSE"]
-  fut_df["1D_CHG_%"] = grouped.pct_change(1) * 100
-  fut_df["5D_CHG_%"] = grouped.pct_change(5) * 100
-  fut_df["20D_CHG_%"] = grouped.pct_change(20) * 100
-  fut_df["22D_CHG_%"] = grouped.pct_change(22) * 100
+# 1. Price Movements
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
+fut_df = fut_df.sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(
+    subset=["SYMBOL", "DATE"]
+)
 
-  latest_date = all_df["DATE"].max()
-  latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
+grouped = fut_df.groupby("SYMBOL")["CLOSE"]
+fut_df["1D_CHG_%"] = grouped.pct_change(1) * 100
+fut_df["5D_CHG_%"] = grouped.pct_change(5) * 100
+fut_df["20D_CHG_%"] = grouped.pct_change(20) * 100
+fut_df["22D_CHG_%"] = grouped.pct_change(22) * 100
 
-  # 2. OPTION STRIKE ADDITION & WINDUP ANALYSIS (Latest Date, Nearest Expiry)
-  opt_df = all_df[
-      (all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)
-  ].copy()
-  near_expiry = opt_df.groupby("SYMBOL")["EXPIRY"].min().reset_index()
-  opt_df = opt_df.merge(near_expiry, on=["SYMBOL", "EXPIRY"])
+latest_date = all_df["DATE"].max()
+latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
 
-  opt_df = opt_df[opt_df["OPEN_INT"] > 0].copy()
-  opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
-  opt_df["OI_CHG_%"] = np.where(
-      opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0
-  )
-  opt_df["OI_ACTION"] = opt_df.apply(classify_oi_action, axis=1)
+# 2. Option OI Analysis
+opt_df = all_df[
+    (all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)
+].copy()
+near_expiry = opt_df.groupby("SYMBOL")["EXPIRY"].min().reset_index()
+opt_df = opt_df.merge(near_expiry, on=["SYMBOL", "EXPIRY"])
+opt_df = opt_df[opt_df["OPEN_INT"] > 0].copy()
+opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
+opt_df["OI_CHG_%"] = np.where(
+    opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0
+)
+opt_df["OI_ACTION"] = opt_df.apply(classify_oi_action, axis=1)
 
-  # 3. APPLY AUTO-SENTIMENT TAGGING TO EVERY STOCK
-  oi_scores = []
-  sentiments = []
-  ce_signals = []
-  pe_signals = []
-
-  for _, row in latest_fut.iterrows():
-    sym = row["SYMBOL"]
-    sym_opts = opt_df[opt_df["SYMBOL"] == sym]
-    score, sent, ce_sig, pe_sig = compute_stock_sentiment(
-        sym_opts, row["1D_CHG_%"]
+# 3. Sentiment Scoring
+results = [
+    compute_stock_sentiment(
+        opt_df[opt_df["SYMBOL"] == row["SYMBOL"]], row["1D_CHG_%"]
     )
-    oi_scores.append(score)
-    sentiments.append(sent)
-    ce_signals.append(ce_sig)
-    pe_signals.append(pe_sig)
+    for _, row in latest_fut.iterrows()
+]
+latest_fut["OI_SCORE"] = [r[0] for r in results]
+latest_fut["SENTIMENT"] = [r[1] for r in results]
+latest_fut["TOP_CE_SIGNALS"] = [r[2] for r in results]
+latest_fut["TOP_PE_SIGNALS"] = [r[3] for r in results]
 
-  latest_fut["OI_SCORE"] = oi_scores
-  latest_fut["SENTIMENT"] = sentiments
-  latest_fut["TOP_CE_SIGNALS"] = ce_signals
-  latest_fut["TOP_PE_SIGNALS"] = pe_signals
+st.subheader(f"Market Snapshot: {latest_date.strftime('%d %b %Y')}")
 
-  # Save full reports to outputs/
-  date_str = latest_date.strftime("%Y%m%d")
-  latest_fut.sort_values(by="1D_CHG_%", ascending=False).to_csv(
-      f"{OUTPUT_FOLDER}/price_movers_sentiment_{date_str}.csv", index=False
-  )
-  opt_report = opt_df[opt_df["OI_ACTION"] != "Neutral"].sort_values(
-      by="CHG_IN_OI", key=abs, ascending=False
-  )
-  opt_report.to_csv(
-      f"{OUTPUT_FOLDER}/option_oi_signals_{date_str}.csv", index=False
-  )
+# Top Gainers & Losers Heatmap Cards
+col1, col2 = st.columns(2)
+with col1:
+  st.markdown("### 🟢 Top Gainers (1D %)")
+  gainers = latest_fut.nlargest(8, "1D_CHG_%")
+  g_cols = st.columns(4)
+  for idx, (_, r) in enumerate(gainers.iterrows()):
+    with g_cols[idx % 4]:
+      st.metric(r["SYMBOL"], f"{r['CLOSE']:.1f}", f"{r['1D_CHG_%']:.2f}%")
 
-  # 4. PRINT SUMMARY BY SENTIMENT CATEGORY
-  print(f"\n=== F&O AUTO-SENTIMENT REPORT ({latest_date.strftime('%Y-%m-%d')}) ===")
+with col2:
+  st.markdown("### 🔴 Top Losers (1D %)")
+  losers = latest_fut.nsmallest(8, "1D_CHG_%")
+  l_cols = st.columns(4)
+  for idx, (_, r) in enumerate(losers.iterrows()):
+    with l_cols[idx % 4]:
+      st.metric(r["SYMBOL"], f"{r['CLOSE']:.1f}", f"{r['1D_CHG_%']:.2f}%")
 
-  for tag in [
-      "STRONG BULLISH",
-      "STRONG BEARISH",
-      "REVERSAL WATCH",
-      "BULLISH",
-      "BEARISH",
-  ]:
-    subset = latest_fut[latest_fut["SENTIMENT"] == tag].sort_values(
-        by="1D_CHG_%", key=abs, ascending=False
-    )
-    print(f"\n--- {tag} ({len(subset)} stocks) ---")
-    if subset.empty:
-      print("   None")
-    else:
-      for _, r in subset.head(10).iterrows():
-        print(
-            f"► {r['SYMBOL']:<12} | Close: {r['CLOSE']:>8.2f} | 1D:"
-            f" {r['1D_CHG_%']:>6.2f}% | 5D: {r['5D_CHG_%']:>6.2f}% | 22D:"
-            f" {r['22D_CHG_%']:>6.2f}% | OI Score: {r['OI_SCORE']:+d}"
-        )
-        print(
-            f"   CE: {r['TOP_CE_SIGNALS']}  ||  PE: {r['TOP_PE_SIGNALS']}"
-        )
+st.divider()
 
+# Filterable Sentiment Table
+sentiment_filter = st.multiselect(
+    "Filter by Auto-Sentiment",
+    options=[
+        "STRONG BULLISH",
+        "BULLISH",
+        "STRONG BEARISH",
+        "BEARISH",
+        "REVERSAL WATCH",
+        "NEUTRAL / SIDEWAYS",
+    ],
+    default=["STRONG BULLISH", "STRONG BEARISH", "REVERSAL WATCH"],
+)
 
-if __name__ == "__main__":
-  run_analysis()
+display_cols = [
+    "SYMBOL",
+    "SENTIMENT",
+    "OI_SCORE",
+    "CLOSE",
+    "1D_CHG_%",
+    "5D_CHG_%",
+    "20D_CHG_%",
+    "22D_CHG_%",
+    "TOP_CE_SIGNALS",
+    "TOP_PE_SIGNALS",
+]
+filtered_df = latest_fut[
+    latest_fut["SENTIMENT"].isin(sentiment_filter)
+].sort_values(by="1D_CHG_%", ascending=False)
+
+st.dataframe(filtered_df[display_cols], use_container_width=True, hide_index=True)
+
+# Strike-level Drilldown
+st.subheader("🔍 Strike-Level Addition & Windup Explorer")
+selected_stock = st.selectbox(
+    "Select Stock", sorted(latest_fut["SYMBOL"].unique())
+)
+stock_strikes = opt_df[
+    (opt_df["SYMBOL"] == selected_stock) & (opt_df["OI_ACTION"] != "Neutral")
+].sort_values(by="CHG_IN_OI", key=abs, ascending=False)
+st.dataframe(
+    stock_strikes[[
+        "STRIKE",
+        "OPTION_TYP",
+        "CLOSE",
+        "PREV_OI",
+        "OPEN_INT",
+        "CHG_IN_OI",
+        "OI_CHG_%",
+        "OI_ACTION",
+    ]],
+    use_container_width=True,
+    hide_index=True,
+)
