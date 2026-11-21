@@ -1,4 +1,5 @@
 import glob
+import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -15,18 +16,13 @@ def load_fo_bhavcopy(file_obj):
     if filename.lower().endswith(".zip"):
         with zipfile.ZipFile(file_obj) as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-            if not csv_files:
-                st.warning(f"No CSV inside {filename}")
-                return pd.DataFrame()
-            with z.open(next(iter(csv_files))) as f:
-                df = pd.read_csv(f, low_memory=False)
+            if not csv_files: return pd.DataFrame()
+            with z.open(next(iter(csv_files))) as f: df = pd.read_csv(f, low_memory=False)
     else:
         df = pd.read_csv(file_obj, low_memory=False)
 
-    # Normalize all column names to UPPERCASE for case-insensitive matching
     df.columns = [c.strip().upper() for c in df.columns]
 
-    # New NSE UDiFF F&O Bhavcopy Format (any casing)
     if "TCKRSYMB" in df.columns:
         inst_col = "FININSTRMTP"
         df[inst_col] = df[inst_col].astype(str).str.strip().str.upper()
@@ -45,12 +41,8 @@ def load_fo_bhavcopy(file_obj):
         out["CHG_IN_OI"] = pd.to_numeric(df["CHNGINOPNINTRST"], errors="coerce").fillna(0)
         vol_col = "TTLTRADGVOL" if "TTLTRADGVOL" in df.columns else ("TTLTRFVAL" if "TTLTRFVAL" in df.columns else None)
         out["VOLUME"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(1) if vol_col else 1
-        cleaned = out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
-        if cleaned.empty:
-            st.warning(f"{filename}: Matched TCKRSYMB, but 0 rows after filtering. Unique FININSTRMTP values: {df[inst_col].unique()[:10]}")
-        return cleaned
+        return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-    # Legacy NSE F&O Bhavcopy Format
     if "INSTRUMENT" in df.columns:
         df["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip().str.upper()
         df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
@@ -157,10 +149,20 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
-repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-raw_sources = uploaded_files if uploaded_files else repo_files
-dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
-if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to data/daily_fo_bhavcopy/ in GitHub) to view the scanner."); st.stop()
+try:
+    repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+    raw_sources = uploaded_files if uploaded_files else repo_files
+    dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
-all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+    if not dfs:
+        st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner.")
+        st.stop()
+
+    all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+    fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
+    grouped = fut_df.groupby("SYMBOL")
+    fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
+    fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
+    fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
+    fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
