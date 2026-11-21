@@ -41,7 +41,6 @@ if not selected_names:
     st.stop()
 
 INDICES = {name: ALL_INDICES[name] for name in selected_names}
-
 HEADERS = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
 S = chr(47)
 HOST = "a" + "p" + "i" + "." + "upstox.com"
@@ -135,12 +134,11 @@ def get_candles(instrument_key, tf="5min"):
     candles = []
     if hist_res and hist_res.get("data", {}).get("candles"):
         candles.extend(hist_res.get("data").get("candles"))
+    intra_err = None
     if is_market_hours(ist_now):
         intra_res, intra_err = safe_get_json(f"{BASE_API}{S}historical-candle{S}intraday{S}{encoded_key}{S}1minute")
         if intra_res and intra_res.get("data", {}).get("candles"):
             candles.extend(intra_res.get("data").get("candles"))
-    else:
-        intra_err = None
     if not candles:
         return None, hist_err or intra_err or "0 candles returned by Upstox API"
     df = pd.DataFrame(candles, columns=("timestamp", "open", "high", "low", "close", "volume", "oi"))
@@ -148,7 +146,6 @@ def get_candles(instrument_key, tf="5min"):
     df = df.drop_duplicates(subset=("timestamp",)).sort_values("timestamp").set_index("timestamp")
     resampled = df.resample(tf).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
     return resampled, None
-
 
 
 def calculate_supertrend(df, period=10, multiplier=3.0):
@@ -219,3 +216,59 @@ for name, inst_key in INDICES.items():
         st.error(f"❌ {name}: {err}")
         continue
     signal_dir, idx_occ_time, idx_info = evaluate_setup(df_index, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=True)
+    spot_price = idx_info.get("close") if isinstance(idx_info.get("close"), float) else float(df_index["close"].iloc[-1])
+    expiry, chain_data, opt_err = fetch_option_chain_cached(name, inst_key, access_token[:10])
+    opt_type = "PE" if signal_dir == "BEARISH" else "CE"
+    index_rows.append({"Index": name, "Expiry": expiry, "Close": idx_info.get("close"), f"{sma_period} SMA": idx_info.get("sma"), f"SuperTrend ({st_period},{st_multiplier})": idx_info.get("st"), "Setup Status": STATUS_MAP.get(signal_dir, "⏳ Waiting (Mixed)"), "Signal Since (IST)": idx_occ_time})
+    if signal_dir in ("BULLISH", "BEARISH"):
+        matched_indices.append((name, spot_price, expiry, chain_data, opt_err, opt_type))
+
+st.subheader(f"1. Index Status ({timeframe} Timeframe)")
+if index_rows:
+    st.dataframe(pd.DataFrame(index_rows), use_container_width=True, hide_index=True)
+
+st.subheader("2. Matching Call (CE) & Put (PE) Options Status")
+option_rows = []
+opt_diagnostics = []
+
+tasks = []
+for name, spot_price, expiry, chain_data, opt_err, opt_type in matched_indices:
+    if opt_err:
+        opt_diagnostics.append(f"**{name} Option Chain Error:** {opt_err}")
+        continue
+    selected_strikes = get_strikes_from_chain(chain_data, spot_price, option_type=opt_type, total_strikes=strikes_per_index)
+    if not selected_strikes:
+        opt_diagnostics.append(f"**{name}:** Option chain loaded, but no {opt_type} strikes matched around {spot_price}.")
+        continue
+    for strike, opt_key in selected_strikes:
+        tasks.append((name, expiry, opt_type, strike, opt_key))
+
+
+def evaluate_single_option(task):
+    name, expiry, opt_type, strike, opt_key = task
+    df_opt, candle_err = get_candles(opt_key, tf=timeframe)
+    if df_opt is None:
+        return None, f"**{name} {int(strike)} {opt_type}** (`{opt_key}`): {candle_err}"
+    opt_dir, opt_occ_time, opt_info = evaluate_setup(df_opt, sma_len=sma_period, st_len=st_period, st_mult=st_multiplier, check_bearish=False)
+    opt_aligned = (opt_dir == "BULLISH")
+    row = {"Index": name, "Direction": "🟢 CALL (CE)" if opt_type == "CE" else "🔴 PUT (PE)", "Contract": f"{int(strike)} {opt_type}", "Expiry": expiry, "Opt Close": opt_info.get("close"), f"Opt {sma_period} SMA": opt_info.get("sma"), "Opt SuperTrend": opt_info.get("st"), "Signal": f"🚀 CONFIRMED BUY {opt_type}" if opt_aligned else f"⏳ {opt_type} Not Aligned", "Opt Signal Since (IST)": opt_occ_time}
+    return row, None
+
+
+if tasks:
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        for row, diag in executor.map(evaluate_single_option, tasks):
+            if row:
+                option_rows.append(row)
+            if diag:
+                opt_diagnostics.append(diag)
+
+if option_rows:
+    st.dataframe(pd.DataFrame(option_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("No matching CE/PE options with sufficient candle history found right now.")
+
+if opt_diagnostics:
+    with st.expander(f"⚠️ Option Data Diagnostics ({len(opt_diagnostics)} messages)", expanded=True):
+        for msg in opt_diagnostics:
+            st.write(f"- {msg}")
