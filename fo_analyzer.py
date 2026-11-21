@@ -11,7 +11,6 @@ DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
 
 def load_fo_bhavcopy(file_obj):
-  """Loads either a raw .csv or compressed .zip NSE F&O Bhavcopy file."""
   filename = getattr(file_obj, "name", str(file_obj))
   if filename.lower().endswith(".zip"):
     with zipfile.ZipFile(file_obj) as z:
@@ -25,7 +24,6 @@ def load_fo_bhavcopy(file_obj):
 
   df.columns = [c.strip() for c in df.columns]
 
-  # New NSE UDiFF F&O Bhavcopy Format
   if "TckrSymb" in df.columns:
     df = df[df["FinInstrmTp"].isin(["STF", "STO"])].copy()
     df["INSTRUMENT"] = df["FinInstrmTp"].map(
@@ -55,8 +53,6 @@ def load_fo_bhavcopy(file_obj):
         "CHG_IN_OI",
         "VOLUME",
     ]
-
-  # Legacy NSE F&O Bhavcopy Format
   elif "INSTRUMENT" in df.columns:
     df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
     df = df[[
@@ -124,7 +120,6 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
   ).head(3)
 
   oi_score = 0
-  # Call Windup = Bullish (+), Call Addition = Bearish (-)
   for _, r in top_ce.iterrows():
     if r["OI_ACTION"] == "Massive Windup":
       oi_score += 2
@@ -135,7 +130,6 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
     elif r["OI_ACTION"] == "Addition":
       oi_score -= 1
 
-  # Put Addition = Bullish (+), Put Windup = Bearish (-)
   for _, r in top_pe.iterrows():
     if r["OI_ACTION"] == "Massive Addition":
       oi_score += 2
@@ -190,7 +184,6 @@ def compute_stock_sentiment(sym_opts, price_chg_1d):
   return oi_score, sentiment, ce_summary, pe_summary
 
 
-# --- STREAMLIT UI ---
 st.title("📊 NSE F&O Positional & Option OI Scanner")
 
 uploaded_files = st.file_uploader(
@@ -229,7 +222,6 @@ all_df = all_df.drop_duplicates(
     subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
 )
 
-# 1. Price Movements (Near-Month Stock Futures)
 fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
 fut_df = fut_df.sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(
     subset=["SYMBOL", "DATE"]
@@ -244,7 +236,6 @@ fut_df["22D_CHG_%"] = grouped.pct_change(22) * 100
 latest_date = all_df["DATE"].max()
 latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
 
-# 2. Option OI Analysis (Latest Date, Nearest Expiry)
 opt_df = all_df[
     (all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)
 ].copy()
@@ -257,7 +248,6 @@ opt_df["OI_CHG_%"] = np.where(
 )
 opt_df["OI_ACTION"] = opt_df.apply(classify_oi_action, axis=1)
 
-# 3. Sentiment Scoring
 results = [
     compute_stock_sentiment(
         opt_df[opt_df["SYMBOL"] == row["SYMBOL"]], row["1D_CHG_%"]
@@ -274,7 +264,6 @@ st.subheader(
     f" {all_df['DATE'].nunique()} trading days"
 )
 
-# Top Gainers & Losers Heatmap Cards
 col1, col2 = st.columns(2)
 with col1:
   st.markdown("### 🟢 Top Gainers (1D %)")
@@ -302,7 +291,6 @@ with col2:
 
 st.divider()
 
-# Filterable Sentiment Table
 sentiment_filter = st.multiselect(
     "Filter by Auto-Sentiment",
     options=[
@@ -341,7 +329,6 @@ filtered_df = latest_fut[
 
 st.dataframe(filtered_df[display_cols], use_container_width=True, hide_index=True)
 
-# Download CSV Button
 csv_export = filtered_df[display_cols].to_csv(index=False).encode("utf-8")
 st.download_button(
     label="📥 Download Sentiment Report (CSV)",
@@ -352,7 +339,6 @@ st.download_button(
 
 st.divider()
 
-# Strike-level Drilldown
 st.subheader("🔍 Strike-Level Addition & Windup Explorer")
 selected_stock = st.selectbox(
     "Select Stock", sorted(latest_fut["SYMBOL"].unique())
@@ -374,3 +360,4 @@ st.dataframe(
     ]],
     use_container_width=True,
     hide_index=True,
+)
