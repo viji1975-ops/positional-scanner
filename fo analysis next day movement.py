@@ -16,8 +16,9 @@ if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to vi
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
 fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
 g_c, g_o = fut_df.groupby("SYMBOL")["CLOSE"], fut_df.groupby("SYMBOL")["OPEN_INT"]
-for col_n, lag in [("1D_CHG_%", 1), ("5D_CHG_%", 5), ("20D_CHG_%", 20), ("22D_CHG_%", 22)]: fut_df[col_n] = (fut_df["CLOSE"] - g_c.shift(lag)) / g_c.shift(lag) * 100
+for col_n, lag in [("1D_CHG_%", 1), ("3D_CHG_%", 3), ("5D_CHG_%", 5), ("20D_CHG_%", 20), ("22D_CHG_%", 22)]: fut_df[col_n] = (fut_df["CLOSE"] - g_c.shift(lag)) / g_c.shift(lag) * 100
 fut_df["FUT_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_o.shift(1)) / g_o.shift(1) * 100
+fut_df["3D_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_o.shift(3)) / g_o.shift(3) * 100
 
 latest_date = all_df["DATE"].max()
 latest_fut = fut_df[fut_df["DATE"] == latest_date].reset_index(drop=True)
@@ -33,11 +34,11 @@ opt_df.loc[opt_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
 opt_df.loc[opt_df["OI_CHG_%"] <= -20, "OI_ACTION"] = "Massive Windup"
 
 res = [analyze_all_metrics(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]]) for _, r in latest_fut.iterrows()]
-for k in ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS"]:
+for k in ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]:
     latest_fut[k] = [d[k] for d in res]
 
 st.info(f"📅 Data Up To: {latest_date.strftime('%d %b %Y')} | Trading Days: {all_df['DATE'].nunique()} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
-tab1, tab2, tab3 = st.tabs(["🎯 Next-Day Option Buying Predictor", "📊 EOD Movers & Auto-Sentiment", "🏛️ Institutional Bias & Strike Explorer"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 Next-Day Option Buying", "📊 EOD Movers & Sentiment", "🏛️ Institutional Bias & Strikes", "🚀 Breakout & 3D Accumulation Radar"])
 
 c1, c2 = tab1.columns(2)
 c1.markdown("### 🟢 Next-Day CALL Buying (BUY CE)")
@@ -47,11 +48,11 @@ c2.dataframe(latest_fut[latest_fut["ACTION"] == "🔴 BUY PUT (PE)"].sort_values
 
 col1, col2 = tab2.columns(2)
 col1.markdown("### 🟢 Top Gainers (1D %)")
-col1.dataframe(latest_fut.nlargest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
+col1.dataframe(latest_fut.nlargest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "3D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
 col2.markdown("### 🔴 Top Losers (1D %)")
-col2.dataframe(latest_fut.nsmallest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
+col2.dataframe(latest_fut.nsmallest(8, "1D_CHG_%")[["SYMBOL", "CLOSE", "1D_CHG_%", "3D_CHG_%", "5D_CHG_%", "22D_CHG_%", "SENTIMENT"]], use_container_width=True, hide_index=True)
 s_filt = tab2.multiselect("Filter by EOD Auto-Sentiment", ["STRONG BULLISH", "BULLISH", "STRONG BEARISH", "BEARISH", "REVERSAL WATCH", "NEUTRAL / SIDEWAYS"], default=["STRONG BULLISH", "STRONG BEARISH", "REVERSAL WATCH", "BULLISH", "BEARISH", "NEUTRAL / SIDEWAYS"])
-tab2.dataframe(latest_fut[latest_fut["SENTIMENT"].isin(s_filt)].sort_values(by="1D_CHG_%", ascending=False, na_position="last")[["SYMBOL", "SENTIMENT", "OI_SCORE", "CLOSE", "1D_CHG_%", "5D_CHG_%", "20D_CHG_%", "22D_CHG_%", "TOP_CE", "TOP_PE"]], use_container_width=True, hide_index=True)
+tab2.dataframe(latest_fut[latest_fut["SENTIMENT"].isin(s_filt)].sort_values(by="1D_CHG_%", ascending=False, na_position="last")[["SYMBOL", "SENTIMENT", "OI_SCORE", "CLOSE", "1D_CHG_%", "3D_CHG_%", "5D_CHG_%", "20D_CHG_%", "22D_CHG_%", "TOP_CE", "TOP_PE"]], use_container_width=True, hide_index=True)
 
 tab3.markdown("### 🏛️ All-Stocks Overall Institutional Bias (PCR, Max Pain & OI Walls)")
 b_filt = tab3.multiselect("Filter Institutional Bias", sorted(latest_fut["INST_BIAS"].unique()), default=sorted(latest_fut["INST_BIAS"].unique()))
@@ -69,3 +70,8 @@ opt_df["ABS_CHG"] = opt_df["CHG_IN_OI"].abs()
 st_df = opt_df[opt_df["SYMBOL"] == sel].sort_values(by="ABS_CHG", ascending=False)
 if only_act: st_df = st_df[st_df["OI_ACTION"] != "Neutral"]
 tab3.dataframe(st_df[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
+
+tab4.markdown("### 🚀 Advance Breakout & Multi-Day (3D) Institutional Accumulation Radar")
+tab4.caption("Spots (1) stocks coiled within 2.5% of their Call Wall / Put Floor with opposing writer buildup, and (2) multi-day Futures OI accumulation across your uploaded Bhavcopy files.")
+active_radar = latest_fut[latest_fut["BREAKOUT_RADAR"] != "⚪ NO COIL"].sort_values(by="3D_OI_CHG_%", ascending=False, na_position="last")
+tab4.dataframe(active_radar[["SYMBOL", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "CLOSE", "1D_CHG_%", "3D_CHG_%", "3D_OI_CHG_%", "PCR", "RADAR_NOTES"]], use_container_width=True, hide_index=True)
