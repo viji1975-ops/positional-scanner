@@ -21,8 +21,8 @@ def load_fo_bhavcopy(file_obj):
         if not csv_files:
           st.warning(f"No CSV found inside {filename}")
           return pd.DataFrame()
-        first_csv = csv_files[0]
-        with z.open(first_csv) as f:
+        target_csv = next(iter(csv_files))
+        with z.open(target_csv) as f:
           df = pd.read_csv(f)
     else:
       df = pd.read_csv(file_obj)
@@ -98,9 +98,7 @@ def load_fo_bhavcopy(file_obj):
         "VOLUME",
     ]
   else:
-    st.error(
-        f"Unrecognized columns in {filename}: {list(df.columns[:10])}"
-    )
+    st.error(f"Unrecognized columns in {filename}: {list(df.columns)[:10]}")
     return pd.DataFrame()
 
   df["DATE"] = pd.to_datetime(df["DATE"])
@@ -210,7 +208,7 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   spot = fut_row["CLOSE"]
 
   if sym_opts.empty or pd.isna(price_chg):
-    return "NO SETUP", "-", 0.0, 0, "Insufficient History"
+    return "NO SETUP", "-", 0.0, 0, "Upload 2+ days for Next-Day signal"
 
   near_opts = sym_opts[
       (sym_opts["STRIKE"] >= spot * 0.94)
@@ -272,18 +270,18 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   if score >= 4 and not ce_near.empty:
     trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
     if not trapped_ce.empty:
-      best_row = trapped_ce.iloc[0]
+      best_row = trapped_ce.head(1).squeeze()
       strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)"
     else:
       ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
-      best_row = ce_near.sort_values("DIST").iloc[0]
+      best_row = ce_near.sort_values("DIST").head(1).squeeze()
       strike_note = "ATM CE"
 
     strike_str = f"{best_row['STRIKE']:g} CE"
     return (
         "🟢 BUY CALL (CE)",
         strike_str,
-        best_row["CLOSE"],
+        float(best_row["CLOSE"]),
         score,
         " + ".join(reasons) + f" | {strike_note}",
     )
@@ -291,18 +289,18 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   elif score <= -4 and not pe_near.empty:
     trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
     if not trapped_pe.empty:
-      best_row = trapped_pe.iloc[0]
+      best_row = trapped_pe.head(1).squeeze()
       strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)"
     else:
       pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
-      best_row = pe_near.sort_values("DIST").iloc[0]
+      best_row = pe_near.sort_values("DIST").head(1).squeeze()
       strike_note = "ATM PE"
 
     strike_str = f"{best_row['STRIKE']:g} PE"
     return (
         "🔴 BUY PUT (PE)",
         strike_str,
-        best_row["CLOSE"],
+        float(best_row["CLOSE"]),
         score,
         " + ".join(reasons) + f" | {strike_note}",
     )
@@ -314,7 +312,7 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
 
 uploaded_files = st.file_uploader(
-    "Upload Daily NSE F&O Bhavcopy ZIP or CSV files (1 to 25+ days)",
+    "Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)",
     type=["csv", "zip"],
     accept_multiple_files=True,
 )
@@ -339,7 +337,7 @@ elif repo_files:
 
 if not dfs:
   st.info(
-      "Upload one or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to"
+      "Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to"
       " `data/daily_fo_bhavcopy/` in GitHub) to view the scanner."
   )
   st.stop()
@@ -360,6 +358,3 @@ fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
 fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
 fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
 fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
-fut_df["FUT_OI_CHG_%"] = grouped["OPEN_INT"].pct_change(1) * 100
-
-latest_date = all_df["DATE"].max()
