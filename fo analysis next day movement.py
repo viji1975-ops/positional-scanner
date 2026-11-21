@@ -223,6 +223,8 @@ tab2.dataframe(filtered_eod[eod_cols], use_container_width=True, hide_index=True
 tab2.download_button(label="📥 Download Full EOD Sentiment Report (CSV)", data=filtered_eod[eod_cols].to_csv(index=False).encode("utf-8"), file_name=f"eod_sentiment_{latest_date.strftime('%Y%m%d')}.csv", mime="text/csv")
 
 selected_stock = tab3.selectbox("Select Stock", sorted(latest_fut["SYMBOL"].unique()))
+only_active = tab3.checkbox("Show only Addition / Windup strikes (>= 5% OI change)", value=False)
 opt_df["ABS_CHG_OI"] = opt_df["CHG_IN_OI"].abs()
-stock_strikes = opt_df[(opt_df["SYMBOL"] == selected_stock) & (opt_df["OI_ACTION"] != "Neutral")].sort_values(by="ABS_CHG_OI", ascending=False)
+stock_strikes = opt_df[opt_df["SYMBOL"] == selected_stock].sort_values(by="ABS_CHG_OI", ascending=False)
+if only_active: stock_strikes = stock_strikes[stock_strikes["OI_ACTION"] != "Neutral"]
 tab3.dataframe(stock_strikes[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
