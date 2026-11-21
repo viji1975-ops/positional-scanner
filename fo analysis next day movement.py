@@ -1,5 +1,4 @@
 import glob
-import os
 import traceback
 import zipfile
 import numpy as np
@@ -17,8 +16,7 @@ def load_fo_bhavcopy(file_obj):
             csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
             if not csv_files:
                 return pd.DataFrame()
-            target_csv = next(iter(csv_files))
-            with z.open(target_csv) as f:
+            with z.open(next(iter(csv_files))) as f:
                 df = pd.read_csv(f, low_memory=False)
     else:
         df = pd.read_csv(file_obj, low_memory=False)
