@@ -1,90 +1,136 @@
-import pandas as pd
+import zipfile
 import numpy as np
-
-INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
-
-def prepare_bhavcopy_triggers(df: pd.DataFrame, trigger_col: str = "ClsPric") -> pd.DataFrame:
-    """
-    Standardizes NSE UDiFF Bhavcopy columns and extracts the trigger baseline.
-    Common NSE UDiFF columns: TckrSymb, XpryDt, StrkPric, OptnTp, ClsPric, OpnIntrst, UndrlygPric
-    """
-    df = df.copy()
-    # Filter only Index and Stock Options (exclude Futures)
-    df = df[df["OptnTp"].isin(["CE", "PE"])].copy()
-    
-    # Create a unique composite key for merging across timeframes
-    df["key"] = (
-        df["TckrSymb"].astype(str).str.strip() + "_" +
-        df["XpryDt"].astype(str).str.strip() + "_" +
-        df["StrkPric"].astype(float).astype(str) + "_" +
-        df["OptnTp"].astype(str).str.strip()
-    )
-    
-    df["Trigger"] = pd.to_numeric(df[trigger_col], errors="coerce")
-    df["EOD_OI"] = pd.to_numeric(df["OpnIntrst"], errors="coerce")
-    df["Spot_Ref"] = pd.to_numeric(df["UndrlygPric"], errors="coerce")
-    
-    return df[["key", "TckrSymb", "XpryDt", "StrkPric", "OptnTp", "Trigger", "EOD_OI", "Spot_Ref"]]
+import pandas as pd
 
 
-def apply_scanner_filters(
-    live_df: pd.DataFrame,
-    daily_df: pd.DataFrame,
-    weekly_df: pd.DataFrame = None,
-    monthly_df: pd.DataFrame = None,
-    instrument_category: str = "INDEX",  # "INDEX" or "STOCK"
-    require_confluence: bool = True
-) -> pd.DataFrame:
-    """
-    Merges live Upstox quotes with Daily, Weekly, and Monthly Bhavcopy triggers
-    and applies tailored liquidity and strike-distance filters.
-    
-    Expected live_df columns: ['key', 'ltp', 'volume', 'live_oi', 'bid', 'ask']
-    """
-    # 1. Merge Live Data with Daily (Intraday) Trigger
-    merged = pd.merge(daily_df, live_df, on="key", how="inner")
-    merged.rename(columns={"Trigger": "Daily_Trigger"}, inplace=True)
-
-    # 2. Separate Index vs Stock universe
-    if instrument_category == "INDEX":
-        merged = merged[merged["TckrSymb"].isin(INDEX_SYMBOLS)].copy()
-        max_strike_dist = 0.02      # +/- 2% from spot (ATM to OTM-3)
-        min_volume = 5000           # Minimum contracts traded
-        max_spread_pct = 0.015      # Max 1.5% bid-ask spread
+def load_fo_bhavcopy(file_obj):
+    filename = getattr(file_obj, "name", str(file_obj))
+    if filename.lower().endswith(".zip"):
+        with zipfile.ZipFile(file_obj) as z:
+            csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
+            if not csv_files: return pd.DataFrame()
+            with z.open(next(iter(csv_files))) as f: df = pd.read_csv(f, low_memory=False)
     else:
-        merged = merged[~merged["TckrSymb"].isin(INDEX_SYMBOLS)].copy()
-        max_strike_dist = 0.05      # +/- 5% from spot (ATM to OTM-1)
-        min_volume = 300            # Minimum contracts traded
-        max_spread_pct = 0.03       # Max 3.0% bid-ask spread
+        df = pd.read_csv(file_obj, low_memory=False)
 
-    # 3. Strike Distance Filter (eliminates deep OTM false spikes)
-    merged["Strike_Dist_Pct"] = abs(merged["StrkPric"] - merged["Spot_Ref"]) / merged["Spot_Ref"]
-    merged = merged[merged["Strike_Dist_Pct"] <= max_strike_dist]
+    df.columns = [c.strip().upper() for c in df.columns]
 
-    # 4. Liquidity, Spread & Open Interest Filters
-    merged["Spread_Pct"] = (merged["ask"] - merged["bid"]) / merged["ltp"].replace(0, np.nan)
-    merged = merged[
-        (merged["volume"] >= min_volume) &
-        (merged["Spread_Pct"] <= max_spread_pct) &
-        (merged["live_oi"] > merged["EOD_OI"]) &      # Fresh OI buildup
-        (merged["ltp"] > merged["Daily_Trigger"])     # Above Daily Trigger
-    ]
+    if "TCKRSYMB" in df.columns:
+        df["FININSTRMTP"] = df["FININSTRMTP"].astype(str).str.strip().str.upper()
+        df = df[df["FININSTRMTP"].isin(["STF", "STO", "FUTSTK", "OPTSTK"])].copy()
+        out = pd.DataFrame()
+        out["INSTRUMENT"] = df["FININSTRMTP"].map({"STF": "FUTSTK", "FUTSTK": "FUTSTK", "STO": "OPTSTK", "OPTSTK": "OPTSTK"})
+        out["SYMBOL"] = df["TCKRSYMB"].astype(str).str.strip()
+        out["DATE"] = pd.to_datetime(df["TRADDT"], errors="coerce")
+        out["EXPIRY"] = pd.to_datetime(df["XPRYDT"], errors="coerce")
+        out["STRIKE"] = pd.to_numeric(df["STRKPRIC"], errors="coerce").fillna(0.0).astype(float)
+        out["OPTION_TYP"] = df["OPTNTP"].fillna("XX").astype(str).str.strip().str.upper()
+        out["CLOSE"] = pd.to_numeric(df["CLSPRIC"], errors="coerce").astype(float)
+        out["HIGH"] = pd.to_numeric(df["HGHPRIC"] if "HGHPRIC" in df.columns else df["CLSPRIC"], errors="coerce").astype(float)
+        out["LOW"] = pd.to_numeric(df["LWPRIC"] if "LWPRIC" in df.columns else df["CLSPRIC"], errors="coerce").astype(float)
+        out["OPEN_INT"] = pd.to_numeric(df["OPNINTRST"], errors="coerce").fillna(0.0).astype(float)
+        out["CHG_IN_OI"] = pd.to_numeric(df["CHNGINOPNINTRST"], errors="coerce").fillna(0.0).astype(float)
+        vol_col = "TTLTRADGVOL" if "TTLTRADGVOL" in df.columns else ("TTLTRFVAL" if "TTLTRFVAL" in df.columns else None)
+        out["VOLUME"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(1.0).astype(float) if vol_col else 1.0
+        return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-    # 5. Merge Weekly and Monthly Triggers for Multi-Timeframe Confluence
-    if weekly_df is not None:
-        wk = weekly_df[["key", "Trigger"]].rename(columns={"Trigger": "Weekly_Trigger"})
-        merged = pd.merge(merged, wk, on="key", how="left")
-        if require_confluence:
-            merged = merged[merged["ltp"] > merged["Weekly_Trigger"]]
+    if "INSTRUMENT" in df.columns:
+        df["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip().str.upper()
+        df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
+        out = pd.DataFrame()
+        out["INSTRUMENT"] = df["INSTRUMENT"]
+        out["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
+        out["DATE"] = pd.to_datetime(df["TIMESTAMP"], errors="coerce")
+        out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"], errors="coerce")
+        out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0.0).astype(float)
+        out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip().str.upper()
+        out["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce").astype(float)
+        out["HIGH"] = pd.to_numeric(df["HIGH"] if "HIGH" in df.columns else df["CLOSE"], errors="coerce").astype(float)
+        out["LOW"] = pd.to_numeric(df["LOW"] if "LOW" in df.columns else df["CLOSE"], errors="coerce").astype(float)
+        out["OPEN_INT"] = pd.to_numeric(df["OPEN_INT"], errors="coerce").fillna(0.0).astype(float)
+        out["CHG_IN_OI"] = pd.to_numeric(df["CHG_IN_OI"], errors="coerce").fillna(0.0).astype(float)
+        out["VOLUME"] = pd.to_numeric(df["CONTRACTS"], errors="coerce").fillna(0.0).astype(float)
+        return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-    if monthly_df is not None and instrument_category == "STOCK":
-        mo = monthly_df[["key", "Trigger"]].rename(columns={"Trigger": "Monthly_Trigger"})
-        merged = pd.merge(merged, mo, on="key", how="left")
-        if require_confluence:
-            merged = merged[merged["ltp"] > merged["Monthly_Trigger"]]
+    return pd.DataFrame()
 
-    # 6. Calculate Percentage Change over Daily Trigger
-    merged["Change_%"] = ((merged["ltp"] - merged["Daily_Trigger"]) / merged["Daily_Trigger"]) * 100
-    merged = merged.sort_values(by="Change_%", ascending=False)
 
-    return merged
+def analyze_all_metrics(fut_row, sym_opts):
+    chg, f_oi, spot = fut_row["1D_CHG_%"], fut_row["FUT_OI_CHG_%"], fut_row["CLOSE"]
+    c3, oi3 = fut_row.get("3D_CHG_%", np.nan), fut_row.get("3D_OI_CHG_%", np.nan)
+    if sym_opts.empty:
+        return {"OI_SCORE": 0, "SENTIMENT": "NEUTRAL / SIDEWAYS", "TOP_CE": "None", "TOP_PE": "None", "ACTION": "NO SETUP", "STRIKE": "-", "PREM": 0.0, "SCORE": 0, "REASON": "No options", "PCR": 0.0, "MAX_PAIN": 0.0, "PUT_FLOOR": "-", "CALL_WALL": "-", "NET_PE_CHG": 0.0, "NET_CE_CHG": 0.0, "INST_BIAS": "NO DATA", "BREAKOUT_RADAR": "NO DATA", "BREAKOUT_LEVEL": "-", "RADAR_NOTES": "-"}
+
+    ce, pe = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy(), sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
+    tot_ce, tot_pe = ce["OPEN_INT"].sum(), pe["OPEN_INT"].sum()
+    pcr = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0.0
+    net_ce, net_pe = float(ce["CHG_IN_OI"].sum()), float(pe["CHG_IN_OI"].sum())
+    put_row = next(iter(pe.sort_values("OPEN_INT", ascending=False).to_dict("records")), None)
+    call_row = next(iter(ce.sort_values("OPEN_INT", ascending=False).to_dict("records")), None)
+    put_floor = f"{put_row['STRIKE']:g} PE" if put_row else "-"
+    call_wall = f"{call_row['STRIKE']:g} CE" if call_row else "-"
+
+    strikes = sorted(sym_opts["STRIKE"].unique())
+    max_pain = float(next(iter(strikes), 0.0))
+    if strikes:
+        ce_g, pe_g = ce.groupby("STRIKE")["OPEN_INT"].sum(), pe.groupby("STRIKE")["OPEN_INT"].sum()
+        best_p = None
+        for s in strikes:
+            loss = sum((s - k) * v for k, v in ce_g.items() if s > k) + sum((k - s) * v for k, v in pe_g.items() if s < k)
+            if best_p is None or loss < best_p: best_p, max_pain = loss, float(s)
+
+    if pcr >= 1.25 and net_pe > net_ce: bias = "🟢 STRONG BULLISH (Heavy Put Writing)"
+    elif pcr >= 0.95 and net_pe > 0 and net_ce <= 0: bias = "🟢 BULLISH (Put Add + Call Unwind)"
+    elif pcr <= 0.65 and net_ce > net_pe: bias = "🔴 STRONG BEARISH (Heavy Call Writing)"
+    elif pcr <= 0.85 and net_ce > 0 and net_pe <= 0: bias = "🔴 BEARISH (Call Add + Put Unwind)"
+    elif net_ce > 0 and net_pe > 0: bias = "🟡 RANGEBOUND (Short Strangle)"
+    else: bias = "⚪ NEUTRAL / MIXED"
+
+    ce["ABS_OI"], pe["ABS_OI"] = ce["CHG_IN_OI"].abs(), pe["CHG_IN_OI"].abs()
+    t_ce, t_pe = ce.sort_values("ABS_OI", ascending=False).head(3), pe.sort_values("ABS_OI", ascending=False).head(3)
+    ce_m, pe_m = {"Massive Windup": 2, "Windup": 1, "Massive Addition": -2, "Addition": -1}, {"Massive Addition": 2, "Addition": 1, "Massive Windup": -2, "Windup": -1}
+    oi_sc = int(sum(ce_m.get(x, 0) for x in t_ce["OI_ACTION"]) + sum(pe_m.get(x, 0) for x in t_pe["OI_ACTION"]))
+    ce_s = ", ".join([f"{int(r['STRIKE'])}CE ({r['OI_ACTION']})" for _, r in t_ce.iterrows() if r["OI_ACTION"] != "Neutral"]) or "Neutral"
+    pe_s = ", ".join([f"{int(r['STRIKE'])}PE ({r['OI_ACTION']})" for _, r in t_pe.iterrows() if r["OI_ACTION"] != "Neutral"]) or "Neutral"
+
+    sent = "NEUTRAL / SIDEWAYS"
+    if pd.notna(chg):
+        if chg > 0.5: sent = "STRONG BULLISH" if oi_sc >= 3 else ("BULLISH" if oi_sc >= 1 else ("REVERSAL WATCH" if oi_sc <= -2 else "NEUTRAL / SIDEWAYS"))
+        elif chg < -0.5: sent = "STRONG BEARISH" if oi_sc <= -3 else ("BEARISH" if oi_sc <= -1 else ("REVERSAL WATCH" if oi_sc >= 2 else "NEUTRAL / SIDEWAYS"))
+        elif abs(oi_sc) >= 3: sent = "REVERSAL WATCH"
+
+    act, stk, prm, sc, rsn_str = "NO SETUP", "-", 0.0, 0, "Upload 2+ days"
+    if pd.notna(chg):
+        near = sym_opts[(sym_opts["STRIKE"] >= spot * 0.94) & (sym_opts["STRIKE"] <= spot * 1.06) & (sym_opts["VOLUME"] > 0)].copy()
+        if abs(chg) > 5.5: act, rsn_str = "EXHAUSTED", f"Moved {chg:.1f}%"
+        elif not near.empty:
+            ce_n, pe_n = near[near["OPTION_TYP"] == "CE"].copy(), near[near["OPTION_TYP"] == "PE"].copy()
+            ce_w, pe_a = ce_n[ce_n["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum(), pe_n[pe_n["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
+            pe_w, ce_a = pe_n[pe_n["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum(), ce_n[ce_n["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
+            rsn = []
+            if 0.4 <= chg <= 5.5: sc += 4 if (pd.notna(f_oi) and f_oi > 2) else 2; rsn.append(f"Fut Long (OI +{f_oi:.1f}%)" if (pd.notna(f_oi) and f_oi > 2) else f"Momentum +{chg:.1f}%")
+            elif -5.5 <= chg <= -0.4: sc -= 4 if (pd.notna(f_oi) and f_oi > 2) else 2; rsn.append(f"Fut Short (OI +{f_oi:.1f}%)" if (pd.notna(f_oi) and f_oi > 2) else f"Momentum {chg:.1f}%")
+            if abs(ce_w) > abs(ce_a) and abs(ce_w) > 0: sc += 2; rsn.append("CE Unwinding")
+            if pe_a > abs(pe_w) and pe_a > 0: sc += 2; rsn.append("PE Support")
+            if abs(pe_w) > abs(pe_a) and abs(pe_w) > 0: sc -= 2; rsn.append("PE Unwinding")
+            if ce_a > abs(ce_w) and ce_a > 0: sc -= 2; rsn.append("CE Resistance")
+            if sc >= 4 and not ce_n.empty:
+                tr = ce_n[ce_n["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI"); ce_n["D"] = (ce_n["STRIKE"] - spot).abs()
+                br = next(iter((tr if not tr.empty else ce_n.sort_values("D")).to_dict("records")))
+                act, stk, prm, rsn_str = "🟢 BUY CALL (CE)", f"{br['STRIKE']:g} CE", float(br["CLOSE"]), " + ".join(rsn)
+            elif sc <= -4 and not pe_n.empty:
+                tr = pe_n[pe_n["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI"); pe_n["D"] = (pe_n["STRIKE"] - spot).abs()
+                br = next(iter((tr if not tr.empty else pe_n.sort_values("D")).to_dict("records")))
+                act, stk, prm, rsn_str = "🔴 BUY PUT (PE)", f"{br['STRIKE']:g} PE", float(br["CLOSE"]), " + ".join(rsn)
+            else: act, rsn_str = "NEUTRAL / WAIT", "No clear edge"
+
+    radar, b_lvl, r_notes = "⚪ NO COIL", "-", []
+    c_strike = call_row["STRIKE"] if call_row else 0.0
+    p_strike = put_row["STRIKE"] if put_row else 0.0
+    if c_strike > 0 and 0 <= (c_strike - spot) / spot <= 0.025 and (net_pe > 0 or oi_sc >= 2):
+        radar, b_lvl = "🚀 IMMINENT UPSIDE BREAKOUT", f"Above {c_strike:g}"
+        r_notes.append(f"Spot within {((c_strike-spot)/spot)*100:.1f}% of {c_strike:g} Call Wall + Put Support")
+    elif p_strike > 0 and 0 <= (spot - p_strike) / spot <= 0.025 and (net_ce > 0 or oi_sc <= -2):
+        radar, b_lvl = "🔻 IMMINENT DOWNSIDE BREAKDOWN", f"Below {p_strike:g}"
+        r_notes.append(f"Spot within {((spot-p_strike)/spot)*100:.1f}% of {p_strike:g} Put Floor + Call Resistance")
+    if pd.notna(c3) and pd.notna(oi3) and c3 >= 1.5 and oi3 >= 5.0:
