@@ -1,8 +1,11 @@
 import glob
+import importlib
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scanner_engine import load_fo_bhavcopy, analyze_all_metrics
+import scanner_engine
+
+importlib.reload(scanner_engine)
 
 st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layout="wide")
 st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
@@ -16,13 +19,14 @@ else: st.sidebar.info("Active: Standard Mode (Coil <= 2.5% | 3D OI >= 5% | Massi
 repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
 uploaded_files = st.file_uploader(f"Upload New Daily Bhavcopy ZIP/CSV (Auto-merges with {len(repo_files)} saved repo files)", type=["csv", "zip"], accept_multiple_files=True)
 raw_sources = list(repo_files) + (list(uploaded_files) if uploaded_files else [])
-dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
+dfs = [d for d in [scanner_engine.load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or save them in GitHub's data/daily_fo_bhavcopy/ folder)."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
 latest_date = all_df["DATE"].max()
 massive_pct = 30 if strict_mode else 20
-KEYS = ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]
+NUM_KEYS = {"OI_SCORE", "PREM", "SCORE", "PCR", "MAX_PAIN", "NET_PE_CHG", "NET_CE_CHG"}
+ALL_KEYS = ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]
 
 def prep_table(inst_fut, inst_opt, is_index=False):
     f_df = all_df[all_df["INSTRUMENT"] == inst_fut].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
@@ -50,8 +54,10 @@ def prep_table(inst_fut, inst_opt, is_index=False):
     o_df.loc[(o_df["OI_CHG_%"] >= massive_pct) | ((o_df["PREV_OI"] <= 0) & (o_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
     o_df.loc[o_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
     o_df.loc[o_df["OI_CHG_%"] <= -massive_pct, "OI_ACTION"] = "Massive Windup"
-    res = [analyze_all_metrics(r, o_df[o_df["SYMBOL"] == r["SYMBOL"]], strict_mode) for _, r in lat_f.iterrows()]
-    for k in KEYS: lat_f[k] = [(d or {}).get(k, "-") for d in res]
+    res = [scanner_engine.analyze_all_metrics(r, o_df[o_df["SYMBOL"] == r["SYMBOL"]], strict_mode) for _, r in lat_f.iterrows()]
+    for k in ALL_KEYS:
+        default_val = 0.0 if k in NUM_KEYS else "-"
+        lat_f[k] = [(d or {}).get(k, default_val) for d in res]
     return lat_f, o_df
 
 latest_fut, opt_df = prep_table("FUTSTK", "OPTSTK", is_index=False)
@@ -81,10 +87,10 @@ tab3.divider()
 sel = tab3.selectbox("🔍 Drill Down Into Strike-Level Option Chain", sorted(latest_fut["SYMBOL"].unique()))
 sr = next(iter(latest_fut[latest_fut["SYMBOL"] == sel].to_dict("records")))
 m1, m2, m3, m4 = tab3.columns(4)
-m1.metric("Institutional Bias", next(iter(sr["INST_BIAS"].split(" (")), sr["INST_BIAS"]), f"PCR: {sr['PCR']}")
-m2.metric("Max Pain Strike", str(sr["MAX_PAIN"]), f"Spot: {sr['CLOSE']}")
-m3.metric("Strongest Put Floor", sr["PUT_FLOOR"], f"Net PE OI: {sr['NET_PE_CHG']:+,.0f}")
-m4.metric("Strongest Call Wall", sr["CALL_WALL"], f"Net CE OI: {sr['NET_CE_CHG']:+,.0f}")
+m1.metric("Institutional Bias", next(iter(str(sr["INST_BIAS"]).split(" (")), str(sr["INST_BIAS"])), f"PCR: {sr['PCR']}")
+m2.metric("Max Pain Strike", f"{float(sr['MAX_PAIN']):g}", f"Spot: {sr['CLOSE']}")
+m3.metric("Strongest Put Floor", str(sr["PUT_FLOOR"]), f"Net PE OI: {float(sr['NET_PE_CHG']):+,.0f}")
+m4.metric("Strongest Call Wall", str(sr["CALL_WALL"]), f"Net CE OI: {float(sr['NET_CE_CHG']):+,.0f}")
 only_act = tab3.checkbox("Show only Addition / Windup strikes (>= 5% OI change)", value=False)
 opt_df["ABS_CHG"] = opt_df["CHG_IN_OI"].abs()
 st_df = opt_df[opt_df["SYMBOL"] == sel].sort_values(by="ABS_CHG", ascending=False)
@@ -103,10 +109,10 @@ if not idx_fut.empty:
     sel_idx = tab5.selectbox("🔍 Select Index for Strike-Level Option Chain", sorted(idx_fut["SYMBOL"].unique()))
     ir = next(iter(idx_fut[idx_fut["SYMBOL"] == sel_idx].to_dict("records")))
     im1, im2, im3, im4 = tab5.columns(4)
-    im1.metric("Institutional Bias", next(iter(ir["INST_BIAS"].split(" (")), ir["INST_BIAS"]), f"PCR: {ir['PCR']}")
-    im2.metric("Max Pain Strike", str(ir["MAX_PAIN"]), f"Spot: {ir['CLOSE']}")
-    im3.metric("Strongest Put Floor", ir["PUT_FLOOR"], f"Net PE OI: {ir['NET_PE_CHG']:+,.0f}")
-    im4.metric("Strongest Call Wall", ir["CALL_WALL"], f"Net CE OI: {ir['NET_CE_CHG']:+,.0f}")
+    im1.metric("Institutional Bias", next(iter(str(ir["INST_BIAS"]).split(" (")), str(ir["INST_BIAS"])), f"PCR: {ir['PCR']}")
+    im2.metric("Max Pain Strike", f"{float(ir['MAX_PAIN']):g}", f"Spot: {ir['CLOSE']}")
+    im3.metric("Strongest Put Floor", str(ir["PUT_FLOOR"]), f"Net PE OI: {float(ir['NET_PE_CHG']):+,.0f}")
+    im4.metric("Strongest Call Wall", str(ir["CALL_WALL"]), f"Net CE OI: {float(ir['NET_CE_CHG']):+,.0f}")
     idx_opt["ABS_CHG"] = idx_opt["CHG_IN_OI"].abs()
     i_st = idx_opt[idx_opt["SYMBOL"] == sel_idx].sort_values(by="ABS_CHG", ascending=False)
     tab5.dataframe(i_st[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
