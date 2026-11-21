@@ -1,5 +1,6 @@
 import glob
 import os
+import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -18,12 +19,13 @@ def load_fo_bhavcopy(file_obj):
     with zipfile.ZipFile(file_obj) as z:
       csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
       if not csv_files:
+        st.error(f"No CSV inside {filename}")
         return pd.DataFrame()
       target_csv = next(iter(csv_files))
       with z.open(target_csv) as f:
-        df = pd.read_csv(f)
+        df = pd.read_csv(f, low_memory=False)
   else:
-    df = pd.read_csv(file_obj)
+    df = pd.read_csv(file_obj, low_memory=False)
 
   df.columns = [c.strip() for c in df.columns]
 
@@ -34,11 +36,13 @@ def load_fo_bhavcopy(file_obj):
     out["INSTRUMENT"] = df["FinInstrmTp"].map(
         {"STF": "FUTSTK", "STO": "OPTSTK"}
     )
-    out["SYMBOL"] = df["TckrSymb"]
-    out["DATE"] = pd.to_datetime(df["TradDt"])
-    out["EXPIRY"] = pd.to_datetime(df["XpryDt"])
+    out["SYMBOL"] = df["TckrSymb"].astype(str).str.strip()
+    out["DATE"] = pd.to_datetime(df["TradDt"], format="mixed", errors="coerce")
+    out["EXPIRY"] = pd.to_datetime(
+        df["XpryDt"], format="mixed", errors="coerce"
+    )
     out["STRIKE"] = pd.to_numeric(df["StrkPric"], errors="coerce").fillna(0)
-    out["OPTION_TYP"] = df["OptnTp"].fillna("XX")
+    out["OPTION_TYP"] = df["OptnTp"].fillna("XX").astype(str).str.strip()
     out["CLOSE"] = pd.to_numeric(df["ClsPric"], errors="coerce")
     out["HIGH"] = pd.to_numeric(
         df["HghPric"] if "HghPric" in df.columns else df["ClsPric"],
@@ -53,18 +57,22 @@ def load_fo_bhavcopy(file_obj):
         df["ChngInOpnIntrst"], errors="coerce"
     ).fillna(0)
     out["VOLUME"] = pd.to_numeric(df["TtlTradgVol"], errors="coerce").fillna(0)
-    return out
+    return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
   # Legacy NSE F&O Bhavcopy Format
   elif "INSTRUMENT" in df.columns:
     df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
     out = pd.DataFrame()
-    out["INSTRUMENT"] = df["INSTRUMENT"]
-    out["SYMBOL"] = df["SYMBOL"]
-    out["DATE"] = pd.to_datetime(df["TIMESTAMP"])
-    out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"])
+    out["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip()
+    out["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
+    out["DATE"] = pd.to_datetime(
+        df["TIMESTAMP"], format="mixed", errors="coerce"
+    )
+    out["EXPIRY"] = pd.to_datetime(
+        df["EXPIRY_DT"], format="mixed", errors="coerce"
+    )
     out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0)
-    out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX")
+    out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip()
     out["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
     out["HIGH"] = pd.to_numeric(
         df["HIGH"] if "HIGH" in df.columns else df["CLOSE"], errors="coerce"
@@ -75,9 +83,9 @@ def load_fo_bhavcopy(file_obj):
     out["OPEN_INT"] = pd.to_numeric(df["OPEN_INT"], errors="coerce").fillna(0)
     out["CHG_IN_OI"] = pd.to_numeric(df["CHG_IN_OI"], errors="coerce").fillna(0)
     out["VOLUME"] = pd.to_numeric(df["CONTRACTS"], errors="coerce").fillna(0)
-    return out
+    return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-  st.error(f"Unrecognized columns in {filename}: {list(df.columns)[:12]}")
+  st.error(f"Unrecognized columns in {filename}: {list(df.columns)}")
   return pd.DataFrame()
 
 
@@ -281,44 +289,30 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   return "NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge"
 
 
-# --- STREAMLIT UI ---
-st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
+def main():
+  st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
 
-uploaded_files = st.file_uploader(
-    "Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)",
-    type=["csv", "zip"],
-    accept_multiple_files=True,
-)
-
-repo_files = [
-    f
-    for f in glob.glob(DATA_FOLDER)
-    if f.lower().endswith((".csv", ".zip"))
-]
-dfs = []
-
-if uploaded_files:
-  for f in uploaded_files:
-    parsed = load_fo_bhavcopy(f)
-    if not parsed.empty:
-      dfs.append(parsed)
-elif repo_files:
-  for f in repo_files:
-    parsed = load_fo_bhavcopy(f)
-    if not parsed.empty:
-      dfs.append(parsed)
-
-if not dfs:
-  st.info(
-      "Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to"
-      " `data/daily_fo_bhavcopy/` in GitHub) to view the scanner."
+  uploaded_files = st.file_uploader(
+      "Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)",
+      type=["csv", "zip"],
+      accept_multiple_files=True,
   )
-  st.stop()
 
-all_df = pd.concat(dfs, ignore_index=True)
-all_df = all_df.drop_duplicates(
-    subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"]
-)
+  repo_files = [
+      f
+      for f in glob.glob(DATA_FOLDER)
+      if f.lower().endswith((".csv", ".zip"))
+  ]
+  dfs = []
 
-# 1. Futures Price & Multi-Timeframe Returns
-fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].copy()
+  if uploaded_files:
+    for f in uploaded_files:
+      parsed = load_fo_bhavcopy(f)
+      if not parsed.empty:
+        dfs.append(parsed)
+  elif repo_files:
+    for f in repo_files:
+      parsed = load_fo_bhavcopy(f)
+      if not parsed.empty:
+        dfs.append(parsed)
+
