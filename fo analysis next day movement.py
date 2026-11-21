@@ -1,5 +1,4 @@
 import glob
-import traceback
 import zipfile
 import numpy as np
 import pandas as pd
@@ -77,7 +76,7 @@ def classify_oi_action(row):
 
 
 def compute_eod_sentiment(sym_opts, price_chg_1d):
-    if sym_opts.empty or pd.isna(price_chg_1d): return 0, "NEUTRAL / SIDEWAYS", "None", "None"
+    if sym_opts.empty or pd.isna(price_chg_1d): return pd.Series([0, "NEUTRAL / SIDEWAYS", "None", "None"])
     ce_opts = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy()
     pe_opts = sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
     top_ce = ce_opts.reindex(ce_opts["CHG_IN_OI"].abs().sort_values(ascending=False).index).head(3)
@@ -97,7 +96,7 @@ def compute_eod_sentiment(sym_opts, price_chg_1d):
     elif price_chg_1d < -0.5: sentiment = "STRONG BEARISH" if oi_score <= -3 else ("BEARISH" if oi_score <= -1 else ("REVERSAL WATCH" if oi_score >= 2 else "NEUTRAL / SIDEWAYS"))
     elif abs(oi_score) >= 3: sentiment = "REVERSAL WATCH"
 
-    return oi_score, sentiment, ce_summary, pe_summary
+    return pd.Series([oi_score, sentiment, ce_summary, pe_summary])
 
 
 def evaluate_next_day_setup(fut_row, sym_opts):
@@ -105,10 +104,10 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     fut_oi_chg = fut_row["FUT_OI_CHG_%"]
     spot = fut_row["CLOSE"]
 
-    if sym_opts.empty or pd.isna(price_chg): return "NO SETUP", "-", 0.0, 0, "Upload 2+ days for Next-Day signal"
+    if sym_opts.empty or pd.isna(price_chg): return pd.Series(["NO SETUP", "-", 0.0, 0, "Upload 2+ days for Next-Day signal"])
     near_opts = sym_opts[(sym_opts["STRIKE"] >= spot * 0.94) & (sym_opts["STRIKE"] <= spot * 1.06) & (sym_opts["VOLUME"] > 0)].copy()
-    if near_opts.empty: return "NO SETUP", "-", 0.0, 0, "Illiquid Strikes"
-    if abs(price_chg) > 5.5: return "EXHAUSTED (SKIP)", "-", 0.0, 0, f"Already moved {price_chg:.1f}% today"
+    if near_opts.empty: return pd.Series(["NO SETUP", "-", 0.0, 0, "Illiquid Strikes"])
+    if abs(price_chg) > 5.5: return pd.Series(["EXHAUSTED (SKIP)", "-", 0.0, 0, f"Already moved {price_chg:.1f}% today"])
 
     ce_near = near_opts[near_opts["OPTION_TYP"] == "CE"].copy()
     pe_near = near_opts[near_opts["OPTION_TYP"] == "PE"].copy()
@@ -136,33 +135,28 @@ def evaluate_next_day_setup(fut_row, sym_opts):
         ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
         best_row = trapped_ce.head(1).squeeze() if not trapped_ce.empty else ce_near.sort_values("DIST").head(1).squeeze()
         strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_ce.empty else "ATM CE"
-        return "🟢 BUY CALL (CE)", f"{best_row['STRIKE']:g} CE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"
+        return pd.Series(["🟢 BUY CALL (CE)", f"{best_row['STRIKE']:g} CE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"])
 
     if score <= -4 and not pe_near.empty:
         trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
         pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
         best_row = trapped_pe.head(1).squeeze() if not trapped_pe.empty else pe_near.sort_values("DIST").head(1).squeeze()
         strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_pe.empty else "ATM PE"
-        return "🔴 BUY PUT (PE)", f"{best_row['STRIKE']:g} PE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"
+        return pd.Series(["🔴 BUY PUT (PE)", f"{best_row['STRIKE']:g} PE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"])
 
-    return "NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge"
+    return pd.Series(["NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge"])
 
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
+repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+raw_sources = uploaded_files if uploaded_files else repo_files
+dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
-try:
-    repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-    raw_sources = uploaded_files if uploaded_files else repo_files
-    dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
+if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
-    if not dfs:
-        st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner.")
-        st.stop()
-
-    all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-    fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
-    grouped = fut_df.groupby("SYMBOL")
-    fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
-    fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
-    fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
-    fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
+all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
+grouped = fut_df.groupby("SYMBOL")
+fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
+fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
+fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
