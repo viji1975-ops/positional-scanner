@@ -29,8 +29,8 @@ def load_fo_bhavcopy(file_obj):
         out = pd.DataFrame()
         out["INSTRUMENT"] = df[inst_col].map({"STF": "FUTSTK", "FUTSTK": "FUTSTK", "STO": "OPTSTK", "OPTSTK": "OPTSTK"})
         out["SYMBOL"] = df["TCKRSYMB"].astype(str).str.strip()
-        out["DATE"] = pd.to_datetime(df["TRADDT"], format="mixed", errors="coerce")
-        out["EXPIRY"] = pd.to_datetime(df["XPRYDT"], format="mixed", errors="coerce")
+        out["DATE"] = pd.to_datetime(df["TRADDT"], errors="coerce")
+        out["EXPIRY"] = pd.to_datetime(df["XPRYDT"], errors="coerce")
         out["STRIKE"] = pd.to_numeric(df["STRKPRIC"], errors="coerce").fillna(0)
         out["OPTION_TYP"] = df["OPTNTP"].fillna("XX").astype(str).str.strip().str.upper()
         out["CLOSE"] = pd.to_numeric(df["CLSPRIC"], errors="coerce")
@@ -48,8 +48,8 @@ def load_fo_bhavcopy(file_obj):
         out = pd.DataFrame()
         out["INSTRUMENT"] = df["INSTRUMENT"]
         out["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
-        out["DATE"] = pd.to_datetime(df["TIMESTAMP"], format="mixed", errors="coerce")
-        out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"], format="mixed", errors="coerce")
+        out["DATE"] = pd.to_datetime(df["TIMESTAMP"], errors="coerce")
+        out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"], errors="coerce")
         out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0)
         out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip().str.upper()
         out["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
@@ -155,6 +155,8 @@ dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+st.success(f"Loaded {len(all_df):,} rows across {all_df['DATE'].nunique()} trading days.")
+
 fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
 grouped = fut_df.groupby("SYMBOL")
 fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
