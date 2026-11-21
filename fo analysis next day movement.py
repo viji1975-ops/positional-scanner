@@ -15,10 +15,8 @@ def load_fo_bhavcopy(file_obj):
     if filename.lower().endswith(".zip"):
         with zipfile.ZipFile(file_obj) as z:
             csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
-            if not csv_files:
-                return pd.DataFrame()
-            with z.open(next(iter(csv_files))) as f:
-                df = pd.read_csv(f, low_memory=False)
+            if not csv_files: return pd.DataFrame()
+            with z.open(next(iter(csv_files))) as f: df = pd.read_csv(f, low_memory=False)
     else:
         df = pd.read_csv(file_obj, low_memory=False)
 
@@ -41,7 +39,7 @@ def load_fo_bhavcopy(file_obj):
         out["VOLUME"] = pd.to_numeric(df["TtlTradgVol"], errors="coerce").fillna(0)
         return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
-    elif "INSTRUMENT" in df.columns:
+    if "INSTRUMENT" in df.columns:
         df = df[df["INSTRUMENT"].isin(["FUTSTK", "OPTSTK"])].copy()
         out = pd.DataFrame()
         out["INSTRUMENT"] = df["INSTRUMENT"].astype(str).str.strip()
@@ -64,75 +62,35 @@ def load_fo_bhavcopy(file_obj):
 
 def classify_oi_action(row):
     prev_oi = row["OPEN_INT"] - row["CHG_IN_OI"]
-    if prev_oi <= 0:
-        return "Massive Addition" if row["CHG_IN_OI"] > 0 else "Neutral"
-    pct_oi_chg = (row["CHG_IN_OI"] / prev_oi) * 100
-    if pct_oi_chg >= 20:
-        return "Massive Addition"
-    elif pct_oi_chg >= 5:
-        return "Addition"
-    elif pct_oi_chg <= -20:
-        return "Massive Windup"
-    elif pct_oi_chg <= -5:
-        return "Windup"
+    if prev_oi <= 0: return "Massive Addition" if row["CHG_IN_OI"] > 0 else "Neutral"
+    pct = (row["CHG_IN_OI"] / prev_oi) * 100
+    if pct >= 20: return "Massive Addition"
+    if pct >= 5: return "Addition"
+    if pct <= -20: return "Massive Windup"
+    if pct <= -5: return "Windup"
     return "Neutral"
 
 
 def compute_eod_sentiment(sym_opts, price_chg_1d):
-    if sym_opts.empty or pd.isna(price_chg_1d):
-        return 0, "NEUTRAL / SIDEWAYS", "None", "None"
-
+    if sym_opts.empty or pd.isna(price_chg_1d): return 0, "NEUTRAL / SIDEWAYS", "None", "None"
     ce_opts = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy()
     pe_opts = sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
     top_ce = ce_opts.reindex(ce_opts["CHG_IN_OI"].abs().sort_values(ascending=False).index).head(3)
     top_pe = pe_opts.reindex(pe_opts["CHG_IN_OI"].abs().sort_values(ascending=False).index).head(3)
 
-    oi_score = 0
-    for _, r in top_ce.iterrows():
-        if r["OI_ACTION"] == "Massive Windup":
-            oi_score += 2
-        elif r["OI_ACTION"] == "Windup":
-            oi_score += 1
-        elif r["OI_ACTION"] == "Massive Addition":
-            oi_score -= 2
-        elif r["OI_ACTION"] == "Addition":
-            oi_score -= 1
-
-    for _, r in top_pe.iterrows():
-        if r["OI_ACTION"] == "Massive Addition":
-            oi_score += 2
-        elif r["OI_ACTION"] == "Addition":
-            oi_score += 1
-        elif r["OI_ACTION"] == "Massive Windup":
-            oi_score -= 2
-        elif r["OI_ACTION"] == "Windup":
-            oi_score -= 1
+    ce_map = {"Massive Windup": 2, "Windup": 1, "Massive Addition": -2, "Addition": -1}
+    pe_map = {"Massive Addition": 2, "Addition": 1, "Massive Windup": -2, "Windup": -1}
+    oi_score = sum(ce_map.get(x, 0) for x in top_ce["OI_ACTION"]) + sum(pe_map.get(x, 0) for x in top_pe["OI_ACTION"])
 
     ce_list = [f"{int(r['STRIKE'])}CE ({r['OI_ACTION']})" for _, r in top_ce.iterrows() if r["OI_ACTION"] != "Neutral"]
     pe_list = [f"{int(r['STRIKE'])}PE ({r['OI_ACTION']})" for _, r in top_pe.iterrows() if r["OI_ACTION"] != "Neutral"]
     ce_summary = ", ".join(ce_list) if ce_list else "Neutral"
     pe_summary = ", ".join(pe_list) if pe_list else "Neutral"
 
-    if price_chg_1d > 0.5:
-        if oi_score >= 3:
-            sentiment = "STRONG BULLISH"
-        elif oi_score >= 1:
-            sentiment = "BULLISH"
-        elif oi_score <= -2:
-            sentiment = "REVERSAL WATCH"
-        else:
-            sentiment = "NEUTRAL / SIDEWAYS"
-    elif price_chg_1d < -0.5:
-        if oi_score <= -3:
-            sentiment = "STRONG BEARISH"
-        elif oi_score <= -1:
-            sentiment = "BEARISH"
-        elif oi_score >= 2:
-            sentiment = "REVERSAL WATCH"
-        else:
-            sentiment = "NEUTRAL / SIDEWAYS"
-    else:
-        sentiment = "REVERSAL WATCH" if abs(oi_score) >= 3 else "NEUTRAL / SIDEWAYS"
+    sentiment = "NEUTRAL / SIDEWAYS"
+    if price_chg_1d > 0.5: sentiment = "STRONG BULLISH" if oi_score >= 3 else ("BULLISH" if oi_score >= 1 else ("REVERSAL WATCH" if oi_score <= -2 else "NEUTRAL / SIDEWAYS"))
+    elif price_chg_1d < -0.5: sentiment = "STRONG BEARISH" if oi_score <= -3 else ("BEARISH" if oi_score <= -1 else ("REVERSAL WATCH" if oi_score >= 2 else "NEUTRAL / SIDEWAYS"))
+    elif abs(oi_score) >= 3: sentiment = "REVERSAL WATCH"
 
     return oi_score, sentiment, ce_summary, pe_summary
 
@@ -142,16 +100,13 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     fut_oi_chg = fut_row["FUT_OI_CHG_%"]
     spot = fut_row["CLOSE"]
 
-    if sym_opts.empty or pd.isna(price_chg):
-        return "NO SETUP", "-", 0.0, 0, "Upload 2+ days for Next-Day signal"
-
+    if sym_opts.empty or pd.isna(price_chg): return "NO SETUP", "-", 0.0, 0, "Upload 2+ days for Next-Day signal"
     near_opts = sym_opts[(sym_opts["STRIKE"] >= spot * 0.94) & (sym_opts["STRIKE"] <= spot * 1.06) & (sym_opts["VOLUME"] > 0)].copy()
-    if near_opts.empty:
-        return "NO SETUP", "-", 0.0, 0, "Illiquid Strikes"
+    if near_opts.empty: return "NO SETUP", "-", 0.0, 0, "Illiquid Strikes"
+    if abs(price_chg) > 5.5: return "EXHAUSTED (SKIP)", "-", 0.0, 0, f"Already moved {price_chg:.1f}% today"
 
     ce_near = near_opts[near_opts["OPTION_TYP"] == "CE"].copy()
     pe_near = near_opts[near_opts["OPTION_TYP"] == "PE"].copy()
-
     ce_windup = ce_near[ce_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum()
     pe_add = pe_near[pe_near["CHG_IN_OI"] > 0]["CHG_IN_OI"].sum()
     pe_windup = pe_near[pe_near["CHG_IN_OI"] < 0]["CHG_IN_OI"].sum()
@@ -159,63 +114,31 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 
     score = 0
     reasons = []
-
     if 0.4 <= price_chg <= 5.5:
-        score += 2
-        if pd.notna(fut_oi_chg) and fut_oi_chg > 2.0:
-            score += 2
-            reasons.append(f"Fut Long Buildup (OI +{fut_oi_chg:.1f}%)")
-        else:
-            reasons.append(f"Bullish Momentum (+{price_chg:.1f}%)")
+        score += 4 if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else 2
+        reasons.append(f"Fut Long Buildup (OI +{fut_oi_chg:.1f}%)" if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else f"Bullish Momentum (+{price_chg:.1f}%)")
     elif -5.5 <= price_chg <= -0.4:
-        score -= 2
-        if pd.notna(fut_oi_chg) and fut_oi_chg > 2.0:
-            score -= 2
-            reasons.append(f"Fut Short Buildup (OI +{fut_oi_chg:.1f}%)")
-        else:
-            reasons.append(f"Bearish Momentum ({price_chg:.1f}%)")
-    elif abs(price_chg) > 5.5:
-        return "EXHAUSTED (SKIP)", "-", 0.0, 0, f"Already moved {price_chg:.1f}% today"
+        score -= 4 if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else 2
+        reasons.append(f"Fut Short Buildup (OI +{fut_oi_chg:.1f}%)" if (pd.notna(fut_oi_chg) and fut_oi_chg > 2.0) else f"Bearish Momentum ({price_chg:.1f}%)")
 
-    if abs(ce_windup) > abs(ce_add) and abs(ce_windup) > 0:
-        score += 2
-        reasons.append("CE Writers Unwinding")
-    if pe_add > abs(pe_windup) and pe_add > 0:
-        score += 2
-        reasons.append("PE Support Added")
-
-    if abs(pe_windup) > abs(pe_add) and abs(pe_windup) > 0:
-        score -= 2
-        reasons.append("PE Writers Unwinding")
-    if ce_add > abs(ce_windup) and ce_add > 0:
-        score -= 2
-        reasons.append("CE Resistance Added")
+    if abs(ce_windup) > abs(ce_add) and abs(ce_windup) > 0: score += 2; reasons.append("CE Writers Unwinding")
+    if pe_add > abs(pe_windup) and pe_add > 0: score += 2; reasons.append("PE Support Added")
+    if abs(pe_windup) > abs(pe_add) and abs(pe_windup) > 0: score -= 2; reasons.append("PE Writers Unwinding")
+    if ce_add > abs(ce_windup) and ce_add > 0: score -= 2; reasons.append("CE Resistance Added")
 
     if score >= 4 and not ce_near.empty:
         trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
-        if not trapped_ce.empty:
-            best_row = trapped_ce.head(1).squeeze()
-            strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)"
-        else:
-            ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
-            best_row = ce_near.sort_values("DIST").head(1).squeeze()
-            strike_note = "ATM CE"
-        strike_str = f"{best_row['STRIKE']:g} CE"
-        full_reason = " + ".join(reasons) + f" | {strike_note}"
-        return "🟢 BUY CALL (CE)", strike_str, float(best_row["CLOSE"]), score, full_reason
+        ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
+        best_row = trapped_ce.head(1).squeeze() if not trapped_ce.empty else ce_near.sort_values("DIST").head(1).squeeze()
+        strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_ce.empty else "ATM CE"
+        return "🟢 BUY CALL (CE)", f"{best_row['STRIKE']:g} CE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"
 
-    elif score <= -4 and not pe_near.empty:
+    if score <= -4 and not pe_near.empty:
         trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
-        if not trapped_pe.empty:
-            best_row = trapped_pe.head(1).squeeze()
-            strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)"
-        else:
-            pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
-            best_row = pe_near.sort_values("DIST").head(1).squeeze()
-            strike_note = "ATM PE"
-        strike_str = f"{best_row['STRIKE']:g} PE"
-        full_reason = " + ".join(reasons) + f" | {strike_note}"
-        return "🔴 BUY PUT (PE)", strike_str, float(best_row["CLOSE"]), score, full_reason
+        pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
+        best_row = trapped_pe.head(1).squeeze() if not trapped_pe.empty else pe_near.sort_values("DIST").head(1).squeeze()
+        strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)" if not trapped_pe.empty else "ATM PE"
+        return "🔴 BUY PUT (PE)", f"{best_row['STRIKE']:g} PE", float(best_row["CLOSE"]), score, " + ".join(reasons) + f" | {strike_note}"
 
     return "NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge"
 
@@ -223,7 +146,22 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
 repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
 raw_sources = uploaded_files if uploaded_files else repo_files
-parsed_list = [load_fo_bhavcopy(f) for f in raw_sources]
-dfs = [d for d in parsed_list if not d.empty]
+dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
 
-if not dfs:
+if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or push them to data/daily_fo_bhavcopy/ in GitHub) to view the scanner."); st.stop()
+
+all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
+fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
+grouped = fut_df.groupby("SYMBOL")
+fut_df["1D_CHG_%"] = grouped["CLOSE"].pct_change(1) * 100
+fut_df["5D_CHG_%"] = grouped["CLOSE"].pct_change(5) * 100
+fut_df["20D_CHG_%"] = grouped["CLOSE"].pct_change(20) * 100
+fut_df["22D_CHG_%"] = grouped["CLOSE"].pct_change(22) * 100
+fut_df["FUT_OI_CHG_%"] = grouped["OPEN_INT"].pct_change(1) * 100
+
+latest_date = all_df["DATE"].max()
+latest_fut = fut_df[fut_df["DATE"] == latest_date].copy()
+
+opt_df = all_df[(all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)].copy()
+near_expiry = opt_df.groupby("SYMBOL")["EXPIRY"].min().reset_index()
+opt_df = opt_df.merge(near_expiry, on=["SYMBOL", "EXPIRY"])
