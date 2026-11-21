@@ -31,15 +31,15 @@ def load_fo_bhavcopy(file_obj):
         out["SYMBOL"] = df["TCKRSYMB"].astype(str).str.strip()
         out["DATE"] = pd.to_datetime(df["TRADDT"], errors="coerce")
         out["EXPIRY"] = pd.to_datetime(df["XPRYDT"], errors="coerce")
-        out["STRIKE"] = pd.to_numeric(df["STRKPRIC"], errors="coerce").fillna(0)
+        out["STRIKE"] = pd.to_numeric(df["STRKPRIC"], errors="coerce").fillna(0.0)
         out["OPTION_TYP"] = df["OPTNTP"].fillna("XX").astype(str).str.strip().str.upper()
         out["CLOSE"] = pd.to_numeric(df["CLSPRIC"], errors="coerce")
         out["HIGH"] = pd.to_numeric(df["HGHPRIC"] if "HGHPRIC" in df.columns else df["CLSPRIC"], errors="coerce")
         out["LOW"] = pd.to_numeric(df["LWPRIC"] if "LWPRIC" in df.columns else df["CLSPRIC"], errors="coerce")
-        out["OPEN_INT"] = pd.to_numeric(df["OPNINTRST"], errors="coerce").fillna(0)
-        out["CHG_IN_OI"] = pd.to_numeric(df["CHNGINOPNINTRST"], errors="coerce").fillna(0)
+        out["OPEN_INT"] = pd.to_numeric(df["OPNINTRST"], errors="coerce").fillna(0.0)
+        out["CHG_IN_OI"] = pd.to_numeric(df["CHNGINOPNINTRST"], errors="coerce").fillna(0.0)
         vol_col = "TTLTRADGVOL" if "TTLTRADGVOL" in df.columns else ("TTLTRFVAL" if "TTLTRFVAL" in df.columns else None)
-        out["VOLUME"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(1) if vol_col else 1
+        out["VOLUME"] = pd.to_numeric(df[vol_col], errors="coerce").fillna(1.0) if vol_col else 1.0
         return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
     if "INSTRUMENT" in df.columns:
@@ -50,14 +50,14 @@ def load_fo_bhavcopy(file_obj):
         out["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
         out["DATE"] = pd.to_datetime(df["TIMESTAMP"], errors="coerce")
         out["EXPIRY"] = pd.to_datetime(df["EXPIRY_DT"], errors="coerce")
-        out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0)
+        out["STRIKE"] = pd.to_numeric(df["STRIKE_PR"], errors="coerce").fillna(0.0)
         out["OPTION_TYP"] = df["OPTION_TYP"].fillna("XX").astype(str).str.strip().str.upper()
         out["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
         out["HIGH"] = pd.to_numeric(df["HIGH"] if "HIGH" in df.columns else df["CLOSE"], errors="coerce")
         out["LOW"] = pd.to_numeric(df["LOW"] if "LOW" in df.columns else df["CLOSE"], errors="coerce")
-        out["OPEN_INT"] = pd.to_numeric(df["OPEN_INT"], errors="coerce").fillna(0)
-        out["CHG_IN_OI"] = pd.to_numeric(df["CHG_IN_OI"], errors="coerce").fillna(0)
-        out["VOLUME"] = pd.to_numeric(df["CONTRACTS"], errors="coerce").fillna(0)
+        out["OPEN_INT"] = pd.to_numeric(df["OPEN_INT"], errors="coerce").fillna(0.0)
+        out["CHG_IN_OI"] = pd.to_numeric(df["CHG_IN_OI"], errors="coerce").fillna(0.0)
+        out["VOLUME"] = pd.to_numeric(df["CONTRACTS"], errors="coerce").fillna(0.0)
         return out.dropna(subset=["DATE", "EXPIRY", "CLOSE"])
 
     st.error(f"Unrecognized columns in {filename}: {list(df.columns)}")
