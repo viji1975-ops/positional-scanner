@@ -57,16 +57,18 @@ def load_fo_bhavcopy(file_obj):
 
 def analyze_all_metrics(fut_row, sym_opts):
     chg, f_oi, spot = fut_row["1D_CHG_%"], fut_row["FUT_OI_CHG_%"], fut_row["CLOSE"]
+    c3, oi3 = fut_row.get("3D_CHG_%", np.nan), fut_row.get("3D_OI_CHG_%", np.nan)
     if sym_opts.empty:
-        return {"OI_SCORE": 0, "SENTIMENT": "NEUTRAL / SIDEWAYS", "TOP_CE": "None", "TOP_PE": "None", "ACTION": "NO SETUP", "STRIKE": "-", "PREM": 0.0, "SCORE": 0, "REASON": "No options", "PCR": 0.0, "MAX_PAIN": 0.0, "PUT_FLOOR": "-", "CALL_WALL": "-", "NET_PE_CHG": 0.0, "NET_CE_CHG": 0.0, "INST_BIAS": "NO DATA"}
+        return {"OI_SCORE": 0, "SENTIMENT": "NEUTRAL / SIDEWAYS", "TOP_CE": "None", "TOP_PE": "None", "ACTION": "NO SETUP", "STRIKE": "-", "PREM": 0.0, "SCORE": 0, "REASON": "No options", "PCR": 0.0, "MAX_PAIN": 0.0, "PUT_FLOOR": "-", "CALL_WALL": "-", "NET_PE_CHG": 0.0, "NET_CE_CHG": 0.0, "INST_BIAS": "NO DATA", "BREAKOUT_RADAR": "NO DATA", "BREAKOUT_LEVEL": "-", "RADAR_NOTES": "-"}
 
-    ce = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy()
-    pe = sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
+    ce, pe = sym_opts[sym_opts["OPTION_TYP"] == "CE"].copy(), sym_opts[sym_opts["OPTION_TYP"] == "PE"].copy()
     tot_ce, tot_pe = ce["OPEN_INT"].sum(), pe["OPEN_INT"].sum()
     pcr = round(tot_pe / tot_ce, 2) if tot_ce > 0 else 0.0
     net_ce, net_pe = float(ce["CHG_IN_OI"].sum()), float(pe["CHG_IN_OI"].sum())
-    put_floor = f"{next(iter(pe.sort_values('OPEN_INT', ascending=False).to_dict('records')))['STRIKE']:g} PE" if not pe.empty else "-"
-    call_wall = f"{next(iter(ce.sort_values('OPEN_INT', ascending=False).to_dict('records')))['STRIKE']:g} CE" if not ce.empty else "-"
+    put_row = next(iter(pe.sort_values("OPEN_INT", ascending=False).to_dict("records")), None)
+    call_row = next(iter(ce.sort_values("OPEN_INT", ascending=False).to_dict("records")), None)
+    put_floor = f"{put_row['STRIKE']:g} PE" if put_row else "-"
+    call_wall = f"{call_row['STRIKE']:g} CE" if call_row else "-"
 
     strikes = sorted(sym_opts["STRIKE"].unique())
     max_pain = float(next(iter(strikes), 0.0))
@@ -110,6 +112,7 @@ def analyze_all_metrics(fut_row, sym_opts):
             elif -5.5 <= chg <= -0.4: sc -= 4 if (pd.notna(f_oi) and f_oi > 2) else 2; rsn.append(f"Fut Short (OI +{f_oi:.1f}%)" if (pd.notna(f_oi) and f_oi > 2) else f"Momentum {chg:.1f}%")
             if abs(ce_w) > abs(ce_a) and abs(ce_w) > 0: sc += 2; rsn.append("CE Unwinding")
             if pe_a > abs(pe_w) and pe_a > 0: sc += 2; rsn.append("PE Support")
+            if abs(pe_w) > abs(pe_add if False else pe_w) and abs(pe_w) > 0: pass
             if abs(pe_w) > abs(pe_a) and abs(pe_w) > 0: sc -= 2; rsn.append("PE Unwinding")
             if ce_a > abs(ce_w) and ce_a > 0: sc -= 2; rsn.append("CE Resistance")
             if sc >= 4 and not ce_n.empty:
@@ -120,7 +123,14 @@ def analyze_all_metrics(fut_row, sym_opts):
                 tr = pe_n[pe_n["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI"); pe_n["D"] = (pe_n["STRIKE"] - spot).abs()
                 br = next(iter((tr if not tr.empty else pe_n.sort_values("D")).to_dict("records")))
                 act, stk, prm, rsn_str = "🔴 BUY PUT (PE)", f"{br['STRIKE']:g} PE", float(br["CLOSE"]), " + ".join(rsn)
-            else:
-                act, rsn_str = "NEUTRAL / WAIT", "No clear edge"
+            else: act, rsn_str = "NEUTRAL / WAIT", "No clear edge"
 
-    return {"OI_SCORE": oi_sc, "SENTIMENT": sent, "TOP_CE": ce_s, "TOP_PE": pe_s, "ACTION": act, "STRIKE": stk, "PREM": prm, "SCORE": sc, "REASON": rsn_str, "PCR": pcr, "MAX_PAIN": max_pain, "PUT_FLOOR": put_floor, "CALL_WALL": call_wall, "NET_PE_CHG": net_pe, "NET_CE_CHG": net_ce, "INST_BIAS": bias}
+    radar, b_lvl, r_notes = "⚪ NO COIL", "-", []
+    c_strike = call_row["STRIKE"] if call_row else 0.0
+    p_strike = put_row["STRIKE"] if put_row else 0.0
+    if c_strike > 0 and 0 <= (c_strike - spot) / spot <= 0.025 and (net_pe > 0 or oi_sc >= 2):
+        radar, b_lvl = "🚀 IMMINENT UPSIDE BREAKOUT", f"Above {c_strike:g}"
+        r_notes.append(f"Spot within {((c_strike-spot)/spot)*100:.1f}% of {c_strike:g} Call Wall + Put Support")
+    elif p_strike > 0 and 0 <= (spot - p_strike) / spot <= 0.025 and (net_ce > 0 or oi_sc <= -2):
+        radar, b_lvl = "🔻 IMMINENT DOWNSIDE BREAKDOWN", f"Below {p_strike:g}"
+        r_notes.append(f"Spot within {((spot-p_strike)/spot)*100:.1f}% of {p_strike:g} Put Floor + Call Resistance")
