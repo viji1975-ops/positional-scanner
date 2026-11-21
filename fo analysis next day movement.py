@@ -222,12 +222,8 @@ def evaluate_next_day_setup(fut_row, sym_opts):
 
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
 repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-dfs = []
+raw_sources = uploaded_files if uploaded_files else repo_files
+parsed_list = [load_fo_bhavcopy(f) for f in raw_sources]
+dfs = [d for d in parsed_list if not d.empty]
 
-if uploaded_files:
-    for f in uploaded_files:
-        parsed = load_fo_bhavcopy(f)
-        if not parsed.empty:
-            dfs.append(parsed)
-elif repo_files:
-    for f in repo_files:
+if not dfs:
