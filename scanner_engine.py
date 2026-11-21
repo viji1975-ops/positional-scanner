@@ -126,3 +126,13 @@ def analyze_all_metrics(fut_row, sym_opts, strict_mode=False):
     c_strike, p_strike = (call_row["STRIKE"] if call_row else 0.0), (put_row["STRIKE"] if put_row else 0.0)
     if c_strike > 0 and 0 <= (c_strike - spot) / spot <= coil_frac and (net_pe > 0 or oi_sc >= 2):
         radar, b_lvl = "🚀 IMMINENT UPSIDE BREAKOUT", f"Above {c_strike:g}"; r_notes.append(f"Spot within {((c_strike-spot)/spot)*100:.1f}% of {c_strike:g} Call Wall + Put Support")
+    elif p_strike > 0 and 0 <= (spot - p_strike) / spot <= coil_frac and (net_ce > 0 or oi_sc <= -2):
+        radar, b_lvl = "🔻 IMMINENT DOWNSIDE BREAKDOWN", f"Below {p_strike:g}"
+        r_notes.append(f"Spot within {((spot-p_strike)/spot)*100:.1f}% of {p_strike:g} Put Floor + Call Resistance")
+    if pd.notna(c3) and pd.notna(oi3) and c3 >= 1.5 and oi3 >= min_oi3:
+        if radar == "⚪ NO COIL": radar, b_lvl = "🔥 3D STEALTH ACCUMULATION", f"Above {fut_row['HIGH']:g}"
+        r_notes.append(f"3D Price +{c3:.1f}% with 3D Fut OI +{oi3:.1f}%")
+    elif pd.notna(c3) and pd.notna(oi3) and c3 <= -1.5 and oi3 >= min_oi3:
+        if radar == "⚪ NO COIL": radar, b_lvl = "❄️ 3D STEALTH DISTRIBUTION", f"Below {fut_row['LOW']:g}"
+        r_notes.append(f"3D Price {c3:.1f}% with 3D Fut OI +{oi3:.1f}%")
+    return {"OI_SCORE": oi_sc, "SENTIMENT": sent, "TOP_CE": ce_s, "TOP_PE": pe_s, "ACTION": act, "STRIKE": stk, "PREM": prm, "SCORE": sc, "REASON": rsn_str, "PCR": pcr, "MAX_PAIN": max_pain, "PUT_FLOOR": put_floor, "CALL_WALL": call_wall, "NET_PE_CHG": net_pe, "NET_CE_CHG": net_ce, "INST_BIAS": bias, "BREAKOUT_RADAR": radar, "BREAKOUT_LEVEL": b_lvl, "RADAR_NOTES": " | ".join(r_notes) if r_notes else "Normal range"}
