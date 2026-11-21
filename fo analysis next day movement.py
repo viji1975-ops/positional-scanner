@@ -8,6 +8,13 @@ st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layo
 st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
+st.sidebar.header("⚙️ Filter Mode")
+strict_mode = st.sidebar.checkbox("🔥 Strict / High-Conviction Mode", value=False)
+if strict_mode:
+    st.sidebar.success("Active: Coil <= 1.0% | 3D OI >= 15% | Massive OI >= 30% | Score >= 6 | PCR >= 1.30 / <= 0.60")
+else:
+    st.sidebar.info("Active: Standard Mode (Coil <= 2.5% | 3D OI >= 5% | Massive OI >= 20% | Score >= 4 | PCR >= 1.25 / <= 0.65)")
+
 uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
 raw_sources = uploaded_files if uploaded_files else [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
 dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
@@ -27,13 +34,14 @@ near_exp = opt_df.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYM
 opt_df = opt_df[(opt_df["EXPIRY"] == opt_df["SYMBOL"].map(near_exp)) & (opt_df["OPEN_INT"] > 0)].copy()
 opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
 opt_df["OI_CHG_%"] = np.where(opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0.0)
+massive_pct = 30 if strict_mode else 20
 opt_df["OI_ACTION"] = "Neutral"
 opt_df.loc[opt_df["OI_CHG_%"] >= 5, "OI_ACTION"] = "Addition"
-opt_df.loc[(opt_df["OI_CHG_%"] >= 20) | ((opt_df["PREV_OI"] <= 0) & (opt_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
+opt_df.loc[(opt_df["OI_CHG_%"] >= massive_pct) | ((opt_df["PREV_OI"] <= 0) & (opt_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
 opt_df.loc[opt_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
-opt_df.loc[opt_df["OI_CHG_%"] <= -20, "OI_ACTION"] = "Massive Windup"
+opt_df.loc[opt_df["OI_CHG_%"] <= -massive_pct, "OI_ACTION"] = "Massive Windup"
 
-res = [analyze_all_metrics(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]]) for _, r in latest_fut.iterrows()]
+res = [analyze_all_metrics(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]], strict_mode) for _, r in latest_fut.iterrows()]
 for k in ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]:
     latest_fut[k] = [d.get(k, "-") for d in res]
 
@@ -72,6 +80,6 @@ if only_act: st_df = st_df[st_df["OI_ACTION"] != "Neutral"]
 tab3.dataframe(st_df[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
 
 tab4.markdown("### 🚀 Advance Breakout & Multi-Day (3D) Institutional Accumulation Radar")
-tab4.caption("Spots (1) stocks coiled within 2.5% of their Call Wall / Put Floor with opposing writer buildup, and (2) multi-day Futures OI accumulation across your uploaded Bhavcopy files.")
+tab4.caption("Spots (1) stocks coiled near their Call Wall / Put Floor with opposing writer buildup, and (2) multi-day Futures OI accumulation across your uploaded Bhavcopy files.")
 active_radar = latest_fut[latest_fut["BREAKOUT_RADAR"] != "⚪ NO COIL"].sort_values(by="3D_OI_CHG_%", ascending=False, na_position="last")
 tab4.dataframe(active_radar[["SYMBOL", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "CLOSE", "1D_CHG_%", "3D_CHG_%", "3D_OI_CHG_%", "PCR", "RADAR_NOTES"]], use_container_width=True, hide_index=True)
