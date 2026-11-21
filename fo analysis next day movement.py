@@ -1,11 +1,12 @@
 import glob
-import traceback
 import zipfile
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layout="wide")
+st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
+
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
 
@@ -219,12 +220,14 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     return "NEUTRAL / WAIT", "-", 0.0, score, "No clear next-day edge"
 
 
-def main():
-    st.title("📈 NSE F&O Positional Scanner & Next-Day Option Predictor")
-    uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
-    repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
-    dfs = []
+uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
+repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+dfs = []
 
-    if uploaded_files:
-        for f in uploaded_files:
-            parsed = load_fo_bhavcopy(f)
+if uploaded_files:
+    for f in uploaded_files:
+        parsed = load_fo_bhavcopy(f)
+        if not parsed.empty:
+            dfs.append(parsed)
+elif repo_files:
+    for f in repo_files:
