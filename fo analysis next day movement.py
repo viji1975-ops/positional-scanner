@@ -5,7 +5,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="NSE F&O Positional & Option Buying Scanner", layout="wide")
+st.set_page_config(
+    page_title="NSE F&O Positional & Option Buying Scanner", layout="wide"
+)
 
 DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
@@ -17,7 +19,7 @@ def load_fo_bhavcopy(file_obj):
       csv_files = [f for f in z.namelist() if f.lower().endswith(".csv")]
       if not csv_files:
         return pd.DataFrame()
-      with z.open(csv_files) as f:
+      with z.open(csv_files[0]) as f:
         df = pd.read_csv(f)
   else:
     df = pd.read_csv(file_obj)
@@ -236,7 +238,13 @@ def evaluate_next_day_setup(fut_row, sym_opts):
     else:
       reasons.append(f"Bearish Momentum ({price_chg:.1f}%)")
   elif abs(price_chg) > 5.5:
-    return "EXHAUSTED (SKIP)", "-", 0.0, 0, f"Already moved {price_chg:.1f}% today"
+    return (
+        "EXHAUSTED (SKIP)",
+        "-",
+        0.0,
+        0,
+        f"Already moved {price_chg:.1f}% today",
+    )
 
   if abs(ce_windup) > abs(ce_add) and abs(ce_windup) > 0:
     score += 2
@@ -255,11 +263,11 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   if score >= 4 and not ce_near.empty:
     trapped_ce = ce_near[ce_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
     if not trapped_ce.empty:
-      best_row = trapped_ce.iloc
+      best_row = trapped_ce.iloc[0]
       strike_note = f"Trapped CE ({best_row['OI_CHG_%']:.0f}% OI)"
     else:
       ce_near["DIST"] = (ce_near["STRIKE"] - spot).abs()
-      best_row = ce_near.sort_values("DIST").iloc
+      best_row = ce_near.sort_values("DIST").iloc[0]
       strike_note = "ATM CE"
 
     strike_str = f"{best_row['STRIKE']:g} CE"
@@ -274,11 +282,11 @@ def evaluate_next_day_setup(fut_row, sym_opts):
   elif score <= -4 and not pe_near.empty:
     trapped_pe = pe_near[pe_near["CHG_IN_OI"] < 0].sort_values("CHG_IN_OI")
     if not trapped_pe.empty:
-      best_row = trapped_pe.iloc
+      best_row = trapped_pe.iloc[0]
       strike_note = f"Trapped PE ({best_row['OI_CHG_%']:.0f}% OI)"
     else:
       pe_near["DIST"] = (pe_near["STRIKE"] - spot).abs()
-      best_row = pe_near.sort_values("DIST").iloc
+      best_row = pe_near.sort_values("DIST").iloc[0]
       strike_note = "ATM PE"
 
     strike_str = f"{best_row['STRIKE']:g} PE"
@@ -303,7 +311,9 @@ uploaded_files = st.file_uploader(
 )
 
 repo_files = [
-    f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))
+    f
+    for f in glob.glob(DATA_FOLDER)
+    if f.lower().endswith((".csv", ".zip"))
 ]
 dfs = []
 
