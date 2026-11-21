@@ -224,3 +224,5 @@ tab2.download_button(label="📥 Download Full EOD Sentiment Report (CSV)", data
 
 selected_stock = tab3.selectbox("Select Stock", sorted(latest_fut["SYMBOL"].unique()))
 opt_df["ABS_CHG_OI"] = opt_df["CHG_IN_OI"].abs()
+stock_strikes = opt_df[(opt_df["SYMBOL"] == selected_stock) & (opt_df["OI_ACTION"] != "Neutral")].sort_values(by="ABS_CHG_OI", ascending=False)
+tab3.dataframe(stock_strikes[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
