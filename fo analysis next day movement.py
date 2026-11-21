@@ -10,43 +10,55 @@ DATA_FOLDER = "data/daily_fo_bhavcopy/*.*"
 
 st.sidebar.header("⚙️ Filter Mode")
 strict_mode = st.sidebar.checkbox("🔥 Strict / High-Conviction Mode", value=False)
-if strict_mode:
-    st.sidebar.success("Active: Coil <= 1.0% | 3D OI >= 15% | Massive OI >= 30% | Score >= 6 | PCR >= 1.30 / <= 0.60")
-else:
-    st.sidebar.info("Active: Standard Mode (Coil <= 2.5% | 3D OI >= 5% | Massive OI >= 20% | Score >= 4 | PCR >= 1.25 / <= 0.65)")
+if strict_mode: st.sidebar.success("Active: Coil <= 1.0% | 3D OI >= 15% | Massive OI >= 30% | Score >= 6 | PCR >= 1.30 / <= 0.60")
+else: st.sidebar.info("Active: Standard Mode (Coil <= 2.5% | 3D OI >= 5% | Massive OI >= 20% | Score >= 4 | PCR >= 1.25 / <= 0.65)")
 
-uploaded_files = st.file_uploader("Upload Daily NSE F&O Bhavcopy ZIP or CSV files (2 to 25+ days)", type=["csv", "zip"], accept_multiple_files=True)
-raw_sources = uploaded_files if uploaded_files else [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+repo_files = [f for f in glob.glob(DATA_FOLDER) if f.lower().endswith((".csv", ".zip"))]
+uploaded_files = st.file_uploader(f"Upload New Daily Bhavcopy ZIP/CSV (Auto-merges with {len(repo_files)} saved repo files)", type=["csv", "zip"], accept_multiple_files=True)
+raw_sources = list(repo_files) + (list(uploaded_files) if uploaded_files else [])
 dfs = [d for d in [load_fo_bhavcopy(f) for f in raw_sources] if not d.empty]
-if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above to view the scanner."); st.stop()
+if not dfs: st.info("Upload 2 or more NSE F&O Bhavcopy ZIP/CSV files above (or save them in GitHub's data/daily_fo_bhavcopy/ folder)."); st.stop()
 
 all_df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["INSTRUMENT", "SYMBOL", "DATE", "EXPIRY", "STRIKE", "OPTION_TYP"])
-fut_df = all_df[all_df["INSTRUMENT"] == "FUTSTK"].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
-g_c, g_o = fut_df.groupby("SYMBOL")["CLOSE"], fut_df.groupby("SYMBOL")["OPEN_INT"]
-for col_n, lag in [("1D_CHG_%", 1), ("3D_CHG_%", 3), ("5D_CHG_%", 5), ("20D_CHG_%", 20), ("22D_CHG_%", 22)]: fut_df[col_n] = (fut_df["CLOSE"] - g_c.shift(lag)) / g_c.shift(lag) * 100
-fut_df["FUT_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_o.shift(1)) / g_o.shift(1) * 100
-fut_df["3D_OI_CHG_%"] = (fut_df["OPEN_INT"] - g_o.shift(3)) / g_o.shift(3) * 100
-
 latest_date = all_df["DATE"].max()
-latest_fut = fut_df[fut_df["DATE"] == latest_date].reset_index(drop=True)
-opt_df = all_df[(all_df["INSTRUMENT"] == "OPTSTK") & (all_df["DATE"] == latest_date)].copy()
-near_exp = opt_df.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYMBOL")["EXPIRY"]
-opt_df = opt_df[(opt_df["EXPIRY"] == opt_df["SYMBOL"].map(near_exp)) & (opt_df["OPEN_INT"] > 0)].copy()
-opt_df["PREV_OI"] = opt_df["OPEN_INT"] - opt_df["CHG_IN_OI"]
-opt_df["OI_CHG_%"] = np.where(opt_df["PREV_OI"] > 0, (opt_df["CHG_IN_OI"] / opt_df["PREV_OI"]) * 100, 0.0)
 massive_pct = 30 if strict_mode else 20
-opt_df["OI_ACTION"] = "Neutral"
-opt_df.loc[opt_df["OI_CHG_%"] >= 5, "OI_ACTION"] = "Addition"
-opt_df.loc[(opt_df["OI_CHG_%"] >= massive_pct) | ((opt_df["PREV_OI"] <= 0) & (opt_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
-opt_df.loc[opt_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
-opt_df.loc[opt_df["OI_CHG_%"] <= -massive_pct, "OI_ACTION"] = "Massive Windup"
+KEYS = ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]
 
-res = [analyze_all_metrics(r, opt_df[opt_df["SYMBOL"] == r["SYMBOL"]], strict_mode) for _, r in latest_fut.iterrows()]
-for k in ["OI_SCORE", "SENTIMENT", "TOP_CE", "TOP_PE", "ACTION", "STRIKE", "PREM", "SCORE", "REASON", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "NET_PE_CHG", "NET_CE_CHG", "INST_BIAS", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "RADAR_NOTES"]:
-    latest_fut[k] = [d.get(k, "-") for d in res]
+def prep_table(inst_fut, inst_opt, is_index=False):
+    f_df = all_df[all_df["INSTRUMENT"] == inst_fut].sort_values(["SYMBOL", "DATE", "EXPIRY"]).drop_duplicates(subset=["SYMBOL", "DATE"]).copy()
+    g_c, g_o = f_df.groupby("SYMBOL")["CLOSE"], f_df.groupby("SYMBOL")["OPEN_INT"]
+    for col_n, lag in [("1D_CHG_%", 1), ("3D_CHG_%", 3), ("5D_CHG_%", 5), ("20D_CHG_%", 20), ("22D_CHG_%", 22)]: f_df[col_n] = (f_df["CLOSE"] - g_c.shift(lag)) / g_c.shift(lag) * 100
+    f_df["FUT_OI_CHG_%"] = (f_df["OPEN_INT"] - g_o.shift(1)) / g_o.shift(1) * 100
+    f_df["3D_OI_CHG_%"] = (f_df["OPEN_INT"] - g_o.shift(3)) / g_o.shift(3) * 100
+    lat_f = f_df[f_df["DATE"] == latest_date].reset_index(drop=True)
+    o_df = all_df[(all_df["INSTRUMENT"] == inst_opt) & (all_df["DATE"] == latest_date) & (all_df["OPEN_INT"] > 0)].copy()
+    if is_index:
+        nifty_exp = o_df[o_df["SYMBOL"] == "NIFTY"]["EXPIRY"].min()
+        other_o = o_df[o_df["SYMBOL"] != "NIFTY"].copy()
+        other_o["YM"] = other_o["EXPIRY"].dt.to_period("M")
+        monthly_exp = other_o.groupby(["SYMBOL", "YM"])["EXPIRY"].transform("max")
+        other_m = other_o[other_o["EXPIRY"] == monthly_exp]
+        near_other = other_m.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYMBOL")["EXPIRY"]
+        o_df = pd.concat([o_df[(o_df["SYMBOL"] == "NIFTY") & (o_df["EXPIRY"] == nifty_exp)], other_m[other_m["EXPIRY"] == other_m["SYMBOL"].map(near_other)]], ignore_index=True)
+    else:
+        near_exp = o_df.sort_values("EXPIRY").drop_duplicates("SYMBOL").set_index("SYMBOL")["EXPIRY"]
+        o_df = o_df[o_df["EXPIRY"] == o_df["SYMBOL"].map(near_exp)].copy()
+    o_df["PREV_OI"] = o_df["OPEN_INT"] - o_df["CHG_IN_OI"]
+    o_df["OI_CHG_%"] = np.where(o_df["PREV_OI"] > 0, (o_df["CHG_IN_OI"] / o_df["PREV_OI"]) * 100, 0.0)
+    o_df["OI_ACTION"] = "Neutral"
+    o_df.loc[o_df["OI_CHG_%"] >= 5, "OI_ACTION"] = "Addition"
+    o_df.loc[(o_df["OI_CHG_%"] >= massive_pct) | ((o_df["PREV_OI"] <= 0) & (o_df["CHG_IN_OI"] > 0)), "OI_ACTION"] = "Massive Addition"
+    o_df.loc[o_df["OI_CHG_%"] <= -5, "OI_ACTION"] = "Windup"
+    o_df.loc[o_df["OI_CHG_%"] <= -massive_pct, "OI_ACTION"] = "Massive Windup"
+    res = [analyze_all_metrics(r, o_df[o_df["SYMBOL"] == r["SYMBOL"]], strict_mode) for _, r in lat_f.iterrows()]
+    for k in KEYS: lat_f[k] = [(d or {}).get(k, "-") for d in res]
+    return lat_f, o_df
 
-st.info(f"📅 Data Up To: {latest_date.strftime('%d %b %Y')} | Trading Days: {all_df['DATE'].nunique()} | Futures: {len(latest_fut)} | Options: {len(opt_df)}")
-tab1, tab2, tab3, tab4 = st.tabs(["🎯 Next-Day Option Buying", "📊 EOD Movers & Sentiment", "🏛️ Institutional Bias & Strikes", "🚀 Breakout & 3D Accumulation Radar"])
+latest_fut, opt_df = prep_table("FUTSTK", "OPTSTK", is_index=False)
+idx_fut, idx_opt = prep_table("FUTIDX", "OPTIDX", is_index=True)
+
+st.info(f"📅 Data Up To: {latest_date.strftime('%d %b %Y')} | Trading Days: {all_df['DATE'].nunique()} (Saved Repo: {len(repo_files)}) | Stocks: {len(latest_fut)} | Indices: {len(idx_fut)}")
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎯 Next-Day Option Buying", "📊 EOD Movers & Sentiment", "🏛️ Institutional Bias & Strikes", "🚀 Breakout & 3D Radar", "📈 Index Options (NIFTY Weekly / Monthly)"])
 
 c1, c2 = tab1.columns(2)
 c1.markdown("### 🟢 Next-Day CALL Buying (BUY CE)")
@@ -80,6 +92,21 @@ if only_act: st_df = st_df[st_df["OI_ACTION"] != "Neutral"]
 tab3.dataframe(st_df[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
 
 tab4.markdown("### 🚀 Advance Breakout & Multi-Day (3D) Institutional Accumulation Radar")
-tab4.caption("Spots (1) stocks coiled near their Call Wall / Put Floor with opposing writer buildup, and (2) multi-day Futures OI accumulation across your uploaded Bhavcopy files.")
 active_radar = latest_fut[latest_fut["BREAKOUT_RADAR"] != "⚪ NO COIL"].sort_values(by="3D_OI_CHG_%", ascending=False, na_position="last")
 tab4.dataframe(active_radar[["SYMBOL", "BREAKOUT_RADAR", "BREAKOUT_LEVEL", "CLOSE", "1D_CHG_%", "3D_CHG_%", "3D_OI_CHG_%", "PCR", "RADAR_NOTES"]], use_container_width=True, hide_index=True)
+
+tab5.markdown("### 📈 Index Institutional Bias (`NIFTY` = Weekly Expiry | `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY` = Monthly Expiry)")
+if not idx_fut.empty:
+    idx_fut["EXPIRY_TYPE"] = np.where(idx_fut["SYMBOL"] == "NIFTY", "Weekly (Nearest)", "Monthly (Nearest)")
+    tab5.dataframe(idx_fut[["SYMBOL", "EXPIRY_TYPE", "CLOSE", "1D_CHG_%", "INST_BIAS", "PCR", "MAX_PAIN", "PUT_FLOOR", "CALL_WALL", "ACTION", "STRIKE", "NET_PE_CHG", "NET_CE_CHG"]], use_container_width=True, hide_index=True)
+    tab5.divider()
+    sel_idx = tab5.selectbox("🔍 Select Index for Strike-Level Option Chain", sorted(idx_fut["SYMBOL"].unique()))
+    ir = next(iter(idx_fut[idx_fut["SYMBOL"] == sel_idx].to_dict("records")))
+    im1, im2, im3, im4 = tab5.columns(4)
+    im1.metric("Institutional Bias", next(iter(ir["INST_BIAS"].split(" (")), ir["INST_BIAS"]), f"PCR: {ir['PCR']}")
+    im2.metric("Max Pain Strike", f"{ir['MAX_PAIN']:g}", f"Spot: {ir['CLOSE']}")
+    im3.metric("Strongest Put Floor", ir["PUT_FLOOR"], f"Net PE OI: {ir['NET_PE_CHG']:+,.0f}")
+    im4.metric("Strongest Call Wall", ir["CALL_WALL"], f"Net CE OI: {ir['NET_CE_CHG']:+,.0f}")
+    idx_opt["ABS_CHG"] = idx_opt["CHG_IN_OI"].abs()
+    i_st = idx_opt[idx_opt["SYMBOL"] == sel_idx].sort_values(by="ABS_CHG", ascending=False)
+    tab5.dataframe(i_st[["STRIKE", "OPTION_TYP", "CLOSE", "PREV_OI", "OPEN_INT", "CHG_IN_OI", "OI_CHG_%", "OI_ACTION"]], use_container_width=True, hide_index=True)
