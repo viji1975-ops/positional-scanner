@@ -126,7 +126,7 @@ def load_all(bse_blobs, nse_blobs):
         for df in read_upload(pd.io.common.BytesIO(raw), name):
             if "OptnTp" in df.columns or ("FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO"]).any()):
                 if "FinInstrmTp" in df.columns:
-                    df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO" "IDF", "IDO"])]
+                    df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO"])]
                 fo_list.append(df)
             else:
                 df["Src"] = "NSE"
