@@ -1,6 +1,4 @@
-import io
 import zipfile
-import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -50,11 +48,6 @@ BUILTIN_SECTORS = {
     "POLYCAB": "Consumer Durables", "VOLTAS": "Consumer Durables"
 }
 
-@st.cache_data(ttl=86400)
-def get_sector_mapping():
-    records = [{"TckrSymb": k, "Sector": v} for k, v in BUILTIN_SECTORS.items()]
-    return pd.DataFrame(records).drop_duplicates(subset=["TckrSymb"], keep="first")
-
 def extract_dataframes_from_uploads(uploaded_files):
     extracted = []
     for f in uploaded_files:
@@ -95,7 +88,7 @@ if custom_sector_file is not None:
     sec_df = pd.read_csv(custom_sector_file)
     sec_df.columns = sec_df.columns.str.strip()
 else:
-    sec_df = get_sector_mapping()
+    sec_df = pd.DataFrame(list(BUILTIN_SECTORS.items()), columns=["TckrSymb", "Sector"])
 st.sidebar.success(f"✅ Sector Mapping Ready ({len(sec_df)} stocks)")
 
 def normalize_legacy_or_udiff(df):
@@ -110,7 +103,8 @@ def normalize_legacy_or_udiff(df):
         "OPEN_INT": "OpnIntrst", "CHG_IN_OI": "ChngInOpnIntrst",
         "INSTRUMENT": "FinInstrmTp"
     }
-    return df.rename(columns={k: v for k, v in col_map.items() if k in df.columns and v not in df.columns})
+    rename_dict = {k: v for k, v in col_map.items() if k in df.columns and v not in df.columns}
+    return df.rename(columns=rename_dict)
 
 def process_all_uploads(bse_uploads, nse_uploads):
     eq_list = []
@@ -177,9 +171,9 @@ def process_all_uploads(bse_uploads, nse_uploads):
     elif not combined_fo.empty and "FinInstrmTp" in combined_fo.columns:
         stf = combined_fo[combined_fo["FinInstrmTp"].astype(str).isin(["STF", "FUTSTK"])].copy()
         stf = stf.sort_values(["TradDt", "TckrSymb", "XpryDt"])
-        near_stf = stf.drop_duplicates(subset=["TradDt", "TckrSymb"], keep="first")
-        grouped_eq = pd.DataFrame({
-            "TradDt": near_stf["TradDt"],
-            "Unified_Symbol": near_stf["TckrSymb"].astype(str).str.strip(),
-            "Open": near_stf["OpnPric"],
-            "High": near_stf["HghPric"],
+        near_stf = stf.drop_duplicates(subset=["TradDt", "TckrSymb"], keep="first").copy()
+        grouped_eq = pd.DataFrame()
+        grouped_eq["TradDt"] = near_stf["TradDt"].values
+        grouped_eq["Unified_Symbol"] = near_stf["TckrSymb"].astype(str).str.strip().values
+        grouped_eq["Open"] = near_stf["OpnPric"].values
+        grouped_eq["High"] = near_stf["HghPric"].values
