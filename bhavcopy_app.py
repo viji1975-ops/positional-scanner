@@ -289,6 +289,58 @@ if bse_files or nse_files:
                         info = get_strikes(d_fo, r["TckrSymb"], r["ClsPric"], "PE", r["HghPric"], r["LwPric"], dt)
                         pe_rows.append({"Index": r["TckrSymb"], "Close": r["ClsPric"], "Chg%": round(r["Chg%"], 2), "OI_Signal": r["OI_Signal"], **info})
                     st.dataframe(pd.DataFrame(pe_rows), use_container_width=True, hide_index=True)
+                    # 3. Inspect Specific Strikes for Selected Index
+                    st.divider()
+                    st.subheader(f"🔎 Inspect Specific Index Strikes ({dt})")
+                    sel_idx = st.selectbox("Select Index to Inspect Option Chain Strikes", near_idx["TckrSymb"].tolist(), key=f"idx_pick_{dt}")
+                    idx_opts = d_fo[(d_fo["TckrSymb"].astype(str).str.strip() == sel_idx) & (d_fo["OptnTp"].isin(["CE", "PE"]))].copy()
+                    if not idx_opts.empty:
+                        near_exp_i = idx_opts["XpryDt"].min()
+                        chain = idx_opts[idx_opts["XpryDt"] == near_exp_i].copy()
+                        chain["Strk_Int"] = chain["StrkPric"].apply(lambda x: int(x) if float(x).is_integer() else round(float(x), 2))
+                        spot_val = float(near_idx.loc[near_idx["TckrSymb"] == sel_idx, "ClsPric"].values.tolist().pop(0))
+
+                        # Auto-select 3 strikes closest to spot by default
+                        all_strikes_list = sorted(chain["Strk_Int"].unique())
+                        closest_3 = sorted(all_strikes_list, key=lambda s: abs(s - spot_val))[:3]
+                        picked_strikes = st.multiselect(
+                            f"Select Strikes for {sel_idx} (Expiry: {near_exp_i} | Spot: {spot_val})",
+                            options=all_strikes_list,
+                            default=sorted(closest_3),
+                            key=f"strikes_{sel_idx}_{dt}"
+                        )
+                        if picked_strikes:
+                            sub_chain = chain[chain["Strk_Int"].isin(picked_strikes)].sort_values(["Strk_Int", "OptnTp"]).copy()
+                            sub_chain["Chg%"] = np.where(sub_chain["PrvsClsgPric"] > 0, ((sub_chain["ClsPric"] - sub_chain["PrvsClsgPric"]) / sub_chain["PrvsClsgPric"]) * 100, 0.0)
+                            sub_chain["Cr"] = sub_chain["TtlTrfVal"] / 1e7
+                            st.dataframe(
+                                sub_chain[["TckrSymb", "Strk_Int", "OptnTp", "ClsPric", "Chg%", "TtlTradgVol", "Cr", "OpnIntrst", "ChngInOpnIntrst"]].rename(
+                                    columns={"TckrSymb": "Index", "Strk_Int": "Strike", "OptnTp": "Type", "ClsPric": "Close", "TtlTradgVol": "Volume", "OpnIntrst": "OI", "ChngInOpnIntrst": "OI_Chg"}
+                                ),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+
+                    # 4. Institutional Turnover & High-OI Activity Across Index Strikes
+                    st.divider()
+                    st.subheader(f"🏦 Institutional Turnover & OI Activity in Index Strikes ({dt})")
+                    all_ido = d_fo[d_fo["OptnTp"].isin(["CE", "PE"])].copy()
+                    if not all_ido.empty:
+                        all_ido["TckrSymb"] = all_ido["TckrSymb"].astype(str).str.strip()
+                        all_ido["Cr"] = all_ido["TtlTrfVal"] / 1e7
+                        all_ido["Chg%"] = np.where(all_ido["PrvsClsgPric"] > 0, ((all_ido["ClsPric"] - all_ido["PrvsClsgPric"]) / all_ido["PrvsClsgPric"]) * 100, 0.0)
+                        all_ido["Strk_Int"] = all_ido["StrkPric"].apply(lambda x: int(x) if float(x).is_integer() else round(float(x), 2))
+                        all_ido["Activity"] = np.where(
+                            (all_ido["Chg%"] > 0) & (all_ido["ChngInOpnIntrst"] > 0), "🟢 Option Buying",
+                            np.where((all_ido["Chg%"] < 0) & (all_ido["ChngInOpnIntrst"] > 0), "🔴 Option Writing",
+                            np.where(all_ido["Chg%"] > 0, "🟡 Short Covering", "🟠 Long Unwinding"))
+                        )
+                        top_inst_strikes = all_ido.nlargest(15, "Cr")[
+                            ["TckrSymb", "XpryDt", "Strk_Int", "OptnTp", "ClsPric", "Chg%", "TtlTradgVol", "Cr", "OpnIntrst", "ChngInOpnIntrst", "Activity"]
+                        ].rename(
+                            columns={"TckrSymb": "Index", "XpryDt": "Expiry", "Strk_Int": "Strike", "OptnTp": "Type", "ClsPric": "Close", "TtlTradgVol": "Volume", "OpnIntrst": "OI", "ChngInOpnIntrst": "OI_Chg"}
+                        )
+                        st.dataframe(top_inst_strikes, use_container_width=True, hide_index=True)
                 else:
                     st.warning("No Index Futures (IDF) rows found in the uploaded F&O Bhavcopy for this date.")
             else:
