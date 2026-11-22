@@ -269,16 +269,20 @@ if bse_files or nse_files:
         liq = d_eq[d_eq["Cr"] >= 5.0] if not d_eq[d_eq["Cr"] >= 5.0].empty else d_eq
 
         coil_bull = liq[
-            (liq["Chg%"].between(-1.0, 2.2)) &
-            (liq["Range_Ratio"] <= 0.90) &
-            (liq["CLV"] >= 0.55)
-        ].nsmallest(12, "Range_Ratio").reset_index(drop=True)
+            (liq["Chg%"].between(0.8, 3.2)) &
+            (liq["Range_Ratio"] <= 1.05) &
+            (liq["Vol_Spike"].between(0.70, 1.49)) &
+            (liq["CLV"] >= 0.70) &
+            (liq["OI_Signal"] == "🟢 Long Buildup")
+        ].nlargest(10, "CLV").reset_index(drop=True)
 
         coil_bear = liq[
-            (liq["Chg%"].between(-2.2, 1.0)) &
-            (liq["Range_Ratio"] <= 0.90) &
-            (liq["CLV"] <= 0.45)
-        ].nsmallest(12, "Range_Ratio").reset_index(drop=True)
+            (liq["Chg%"].between(-3.2, -0.8)) &
+            (liq["Range_Ratio"] <= 1.05) &
+            (liq["Vol_Spike"].between(0.70, 1.49)) &
+            (liq["CLV"] <= 0.30) &
+            (liq["OI_Signal"] == "🔴 Short Buildup")
+        ].nsmallest(10, "CLV").reset_index(drop=True)
 
         c_b1, c_b2 = st.columns(2)
         with c_b1:
