@@ -244,7 +244,15 @@ if bse_files or nse_files:
             Adv=("Chg%", lambda x: (x > 0).sum()),
             Dec=("Chg%", lambda x: (x < 0).sum())
         ).sort_values("Avg_Chg", ascending=False)
-        
+
+        sec_avg_map = dict(zip(sec_tbl["Sector"], sec_tbl["Avg_Chg"]))
+        d_eq["Sec_Chg"] = d_eq["Sector"].map(sec_avg_map).fillna(0)
+        d_eq["Sector_Check"] = np.where(
+            ((d_eq["Chg%"] > 0) & (d_eq["Sec_Chg"] >= 0.3)) | ((d_eq["Chg%"] < 0) & (d_eq["Sec_Chg"] <= -0.3)),
+            "✅ Sector Aligned",
+            "⚠️ Counter-Trend"
+        )
+
         ev = st.dataframe(sec_tbl, on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True)
         
         # Works via left checkbox click OR direct dropdown selection
