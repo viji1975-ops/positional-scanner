@@ -124,9 +124,9 @@ def load_all(bse_blobs, nse_blobs):
             eq_list.append(df)
     for name, raw in nse_blobs:
         for df in read_upload(pd.io.common.BytesIO(raw), name):
-            if "OptnTp" in df.columns or ("FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO"]).any()):
+            if "OptnTp" in df.columns or ("FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO"]).any()):
                 if "FinInstrmTp" in df.columns:
-                    df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO"])]
+                    df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO" "IDF", "IDO"])]
                 fo_list.append(df)
             else:
                 df["Src"] = "NSE"
@@ -185,6 +185,8 @@ def get_strikes(day_fo, sym, spot, opt_tp, high_px=None, low_px=None, trade_dt=N
     wall_strike = int(raw_wall) if raw_wall.is_integer() else raw_wall
 
     # Gamma Blast Watch: Expiry week (<= 4 days) + Spot within 1.5% of OI_Wall strike
+    is_index = sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
+    gamma_window = 2 if is_index else 4
     dist_pct = abs(spot - raw_wall) / spot if spot > 0 else 1.0
     dte = (pd.to_datetime(exp) - pd.to_datetime(trade_dt)).days if trade_dt else 99
     if dte <= 4 and dist_pct <= 0.015:
@@ -243,6 +245,54 @@ if bse_files or nse_files:
         eq_df["Sector"] = eq_df["Sym"].map(sec_map).fillna("Other / F&O")
 
         dt = st.selectbox("📅 Select Date", sorted(eq_df["TradDt"].unique(), reverse=True))
+        segment = st.radio(
+            "🧭 Select Market Segment",
+            ["📊 Stocks", "🏛️ Indices (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY)"],
+            horizontal=True
+        )
+
+        if segment.startswith("🏛️ Indices"):
+            st.subheader(f"🏛️ F&O Indices EOD & Weekly Gamma Scanner ({dt})")
+            if not d_fo.empty and "FinInstrmTp" in d_fo.columns:
+                idx_futs = d_fo[d_fo["FinInstrmTp"] == "IDF"].copy()
+                if not idx_futs.empty:
+                    idx_futs["TckrSymb"] = idx_futs["TckrSymb"].astype(str).str.strip()
+                    near_idx = idx_futs.sort_values(["TckrSymb", "XpryDt"]).drop_duplicates("TckrSymb", keep="first").copy()
+                    near_idx["Chg%"] = ((near_idx["ClsPric"] - near_idx["PrvsClsgPric"]) / near_idx["PrvsClsgPric"]) * 100
+                    near_idx["OI_Signal"] = np.where(
+                        (near_idx["Chg%"] > 0) & (near_idx["ChngInOpnIntrst"] > 0), "🟢 Long Buildup",
+                        np.where((near_idx["Chg%"] < 0) & (near_idx["ChngInOpnIntrst"] > 0), "🔴 Short Buildup",
+                        np.where(near_idx["Chg%"] > 0, "🟡 Short Covering", "🟠 Long Unwinding"))
+                    )
+
+                    st.markdown("**1️⃣ Index Futures EOD Summary**")
+                    st.dataframe(
+                        near_idx[["TckrSymb", "XpryDt", "ClsPric", "Chg%", "TtlTradgVol", "OpnIntrst", "ChngInOpnIntrst", "OI_Signal"]].rename(
+                            columns={"TckrSymb": "Index", "XpryDt": "Fut_Expiry", "ClsPric": "Close", "TtlTradgVol": "Volume", "OpnIntrst": "OI", "ChngInOpnIntrst": "OI_Chg"}
+                        ),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    st.success("🟢 Index CALL (CE) Strikes, OI Walls & Gamma Watch (Nearest Expiry)")
+                    ce_rows = []
+                    for _, r in near_idx.iterrows():
+                        info = get_strikes(d_fo, r["TckrSymb"], r["ClsPric"], "CE", r["HghPric"], r["LwPric"], dt)
+                        ce_rows.append({"Index": r["TckrSymb"], "Close": r["ClsPric"], "Chg%": round(r["Chg%"], 2), "OI_Signal": r["OI_Signal"], **info})
+                    st.dataframe(pd.DataFrame(ce_rows), use_container_width=True, hide_index=True)
+
+                    st.error("🔴 Index PUT (PE) Strikes, OI Walls & Gamma Watch (Nearest Expiry)")
+                    pe_rows = []
+                    for _, r in near_idx.iterrows():
+                        info = get_strikes(d_fo, r["TckrSymb"], r["ClsPric"], "PE", r["HghPric"], r["LwPric"], dt)
+                        pe_rows.append({"Index": r["TckrSymb"], "Close": r["ClsPric"], "Chg%": round(r["Chg%"], 2), "OI_Signal": r["OI_Signal"], **info})
+                    st.dataframe(pd.DataFrame(pe_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No Index Futures (IDF) rows found in the uploaded F&O Bhavcopy for this date.")
+            else:
+                st.warning("Please upload NSE F&O Bhavcopy files to view Index setups.")
+            st.stop()
+
         d_eq = eq_df[eq_df["TradDt"] == dt].copy()
         d_fo = fo_df[fo_df["TradDt"] == dt] if not fo_df.empty else pd.DataFrame()
 
