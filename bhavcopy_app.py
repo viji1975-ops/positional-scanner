@@ -164,12 +164,12 @@ def load_all(bse_blobs, nse_blobs):
         eq_df = pd.DataFrame()
     return eq_df, fo_df
 
-def get_strikes(day_fo, sym, spot, opt_tp):
+def get_strikes(day_fo, sym, spot, opt_tp, high_px=None, low_px=None):
     if day_fo.empty:
-        return {"At-The-Money": "Upload F&O", "1-Step Out-Of-The-Money": "Upload F&O", "Highest OI Buildup Strike": "Upload F&O", "PCR": np.nan}
+        return {"At-The-Money": "Upload F&O", "1-Step Out-Of-The-Money": "Upload F&O", "Highest OI Buildup Strike": "Upload F&O", "OI_Wall": "N/A", "PCR": np.nan, "Next_Target": np.nan}
     opts = day_fo[(day_fo["TckrSymb"].astype(str).str.strip() == sym) & (day_fo["OptnTp"].astype(str).str.strip() == opt_tp)].copy()
     if opts.empty:
-        return {"At-The-Money": "Non-F&O", "1-Step Out-Of-The-Money": "Non-F&O", "Highest OI Buildup Strike": "Non-F&O", "PCR": np.nan}
+        return {"At-The-Money": "Non-F&O", "1-Step Out-Of-The-Money": "Non-F&O", "Highest OI Buildup Strike": "Non-F&O", "OI_Wall": "Non-F&O", "PCR": np.nan, "Next_Target": np.nan}
     exp = opts["XpryDt"].min()
     sub = opts[opts["XpryDt"] == exp].sort_values("StrkPric").reset_index(drop=True)
     all_e = day_fo[(day_fo["TckrSymb"].astype(str).str.strip() == sym) & (day_fo["XpryDt"] == exp)]
@@ -179,12 +179,23 @@ def get_strikes(day_fo, sym, spot, opt_tp):
     atm_i = (sub["StrkPric"] - spot).abs().idxmin()
     otm_i = min(atm_i + 1, len(sub) - 1) if opt_tp == "CE" else max(atm_i - 1, 0)
     oi_i = sub["ChngInOpnIntrst"].idxmax()
+    wall_i = sub["OpnIntrst"].idxmax()
     fmt = lambda r: f"{int(r['StrkPric']) if float(r['StrkPric']).is_integer() else r['StrkPric']} {opt_tp} @ ₹{r['ClsPric']:.2f}"
+    wall_strike = int(sub.loc[wall_i, "StrkPric"]) if float(sub.loc[wall_i, "StrkPric"]).is_integer() else sub.loc[wall_i, "StrkPric"]
+
+    # Classic Floor Pivot R1 (for CE) / S1 (for PE) target
+    target_px = np.nan
+    if high_px is not None and low_px is not None:
+        piv = (high_px + low_px + spot) / 3.0
+        target_px = round((2 * piv - low_px) if opt_tp == "CE" else (2 * piv - high_px), 2)
+
     return {
         "At-The-Money": fmt(sub.loc[atm_i]),
         "1-Step Out-Of-The-Money": fmt(sub.loc[otm_i]),
         "Highest OI Buildup Strike": f"{fmt(sub.loc[oi_i])} ({int(sub.loc[oi_i]['ChngInOpnIntrst']):+,} OI)",
-        "PCR": pcr
+        "OI_Wall": f"{wall_strike} {opt_tp}",
+        "PCR": pcr,
+        "Next_Target": target_px
     }
 
 c1, c2, c3 = st.columns(3)
