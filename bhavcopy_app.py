@@ -1,4 +1,5 @@
 import io
+import zipfile
 import requests
 import streamlit as st
 import pandas as pd
@@ -7,59 +8,96 @@ import numpy as np
 st.set_page_config(page_title="NSE & BSE Bhavcopy Pro Terminal", layout="wide")
 st.title("📈 NSE + BSE Multi-Day Bhavcopy & Multi-Strike Options Scanner")
 
-# --- AUTO-FETCH SECTOR MAPPING (NO SEPARATE SCRIPT NEEDED) ---
-@st.cache_data(ttl=86400)
-def fetch_live_sector_mapping():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    all_records = []
+# --- BUILT-IN FALLBACK SECTOR DICTIONARY (WORKS OFFLINE ON STREAMLIT CLOUD) ---
+BUILTIN_SECTORS = {
+    "HDFCBANK": "Banking & Finance", "ICICIBANK": "Banking & Finance", "SBIN": "Banking & Finance",
+    "KOTAKBANK": "Banking & Finance", "AXISBANK": "Banking & Finance", "INDUSINDBK": "Banking & Finance",
+    "BANKBARODA": "Banking & Finance", "PNB": "Banking & Finance", "CANBK": "Banking & Finance",
+    "BAJFINANCE": "Banking & Finance", "BAJAJFINSV": "Banking & Finance", "JIOFIN": "Banking & Finance",
+    "CHOLAFIN": "Banking & Finance", "SHRIRAMFIN": "Banking & Finance", "MUTHOOTFIN": "Banking & Finance",
+    "PFC": "Banking & Finance", "RECLTD": "Banking & Finance", "SBILIFE": "Banking & Finance",
+    "HDFCLIFE": "Banking & Finance", "ICICIPRULI": "Banking & Finance", "BAJAJHLDNG": "Banking & Finance",
+    "TCS": "IT", "INFY": "IT", "HCLTECH": "IT", "WIPRO": "IT", "TECHM": "IT",
+    "LTIM": "IT", "PERSISTENT": "IT", "COFORGE": "IT", "MPHASIS": "IT", "KPITTECH": "IT",
+    "TATAELXSI": "IT", "OFSS": "IT", "LTTS": "IT",
+    "RELIANCE": "Energy & Oil", "ONGC": "Energy & Oil", "NTPC": "Energy & Oil", "POWERGRID": "Energy & Oil",
+    "COALINDIA": "Energy & Oil", "BPCL": "Energy & Oil", "IOC": "Energy & Oil", "HINDPETRO": "Energy & Oil",
+    "GAIL": "Energy & Oil", "TATAPOWER": "Energy & Oil", "ADANIPOWER": "Energy & Oil", "ADANIGREEN": "Energy & Oil",
+    "JSWENERGY": "Energy & Oil", "NHPC": "Energy & Oil", "SJVN": "Energy & Oil",
+    "MARUTI": "Auto", "TATAMOTORS": "Auto", "M&M": "Auto", "BAJAJ-AUTO": "Auto",
+    "EICHERMOT": "Auto", "HEROMOTOCO": "Auto", "TVSMOTOR": "Auto", "ASHOKLEY": "Auto",
+    "BHARATFORG": "Auto", "MOTHERSON": "Auto", "BOSCHLTD": "Auto", "MRF": "Auto", "BALKRISIND": "Auto",
+    "SUNPHARMA": "Pharma & Healthcare", "CIPLA": "Pharma & Healthcare", "DRREDDY": "Pharma & Healthcare",
+    "DIVISLAB": "Pharma & Healthcare", "APOLLOHOSP": "Pharma & Healthcare", "LUPIN": "Pharma & Healthcare",
+    "AUROPHARMA": "Pharma & Healthcare", "TORNTPHARM": "Pharma & Healthcare", "ZYDUSLIFE": "Pharma & Healthcare",
+    "ALKEM": "Pharma & Healthcare", "BIOCON": "Pharma & Healthcare", "MAXHEALTH": "Pharma & Healthcare",
+    "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "BRITANNIA": "FMCG",
+    "TATACONSUM": "FMCG", "GODREJCP": "FMCG", "DABUR": "FMCG", "MARICO": "FMCG",
+    "VBL": "FMCG", "COLPAL": "FMCG", "UNITDSPR": "FMCG", "UBL": "FMCG",
+    "TATASTEEL": "Metals & Mining", "JSWSTEEL": "Metals & Mining", "HINDALCO": "Metals & Mining",
+    "VEDL": "Metals & Mining", "JINDALSTEL": "Metals & Mining", "NMDC": "Metals & Mining",
+    "SAIL": "Metals & Mining", "NATIONALUM": "Metals & Mining", "HINDZINC": "Metals & Mining",
+    "LT": "Infra & Capital Goods", "SIEMENS": "Infra & Capital Goods", "ABB": "Infra & Capital Goods",
+    "HAL": "Infra & Capital Goods", "BEL": "Infra & Capital Goods", "BHEL": "Infra & Capital Goods",
+    "ADANIPORTS": "Infra & Capital Goods", "INDIGO": "Infra & Capital Goods", "IRCTC": "Infra & Capital Goods",
+    "RVNL": "Infra & Capital Goods", "IRFC": "Infra & Capital Goods", "MAZDOCK": "Infra & Capital Goods",
+    "ULTRACEMCO": "Cement & Realty", "GRASIM": "Cement & Realty", "AMBUJACEM": "Cement & Realty",
+    "SHREECEM": "Cement & Realty", "DLF": "Cement & Realty", "LODHA": "Cement & Realty",
+    "GODREJPROP": "Cement & Realty", "OBEROIRLTY": "Cement & Realty", "PRESTIGE": "Cement & Realty",
+    "BHARTIARTL": "Telecom & Media", "INDUSTOWER": "Telecom & Media", "IDEA": "Telecom & Media",
+    "ZEEL": "Telecom & Media", "SUNTV": "Telecom & Media", "TITAN": "Consumer Durables",
+    "ASIANPAINT": "Consumer Durables", "PIDILITIND": "Consumer Durables", "HAVELLS": "Consumer Durables",
+    "TRENT": "Consumer Durables", "DMART": "Consumer Durables", "DIXON": "Consumer Durables",
+    "POLYCAB": "Consumer Durables", "VOLTAS": "Consumer Durables"
+}
 
-    # 1. Primary Source: Nifty 500 Industry Mapping
+@st.cache_data(ttl=86400)
+def get_sector_mapping():
+    records = [{"TckrSymb": k, "Sector": v} for k, v in BUILTIN_SECTORS.items()]
     try:
-        res = requests.get("https://niftyindices.com", headers=headers, timeout=10)
-        df_500 = pd.read_csv(io.StringIO(res.text))
-        df_500.columns = df_500.columns.str.strip()
-        if 'Symbol' in df_500.columns and 'Industry' in df_500.columns:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get("https://niftyindices.com", headers=headers, timeout=6)
+        if res.status_code == 200 and "Symbol" in res.text:
+            df_500 = pd.read_csv(io.StringIO(res.text))
+            df_500.columns = df_500.columns.str.strip()
+            live_records = []
             for _, row in df_500.dropna(subset=['Symbol', 'Industry']).iterrows():
-                all_records.append({"TckrSymb": str(row['Symbol']).strip(), "Sector": str(row['Industry']).strip()})
+                live_records.append({"TckrSymb": str(row['Symbol']).strip(), "Sector": str(row['Industry']).strip()})
+            if live_records:
+                records = live_records + records
     except Exception:
         pass
+    return pd.DataFrame(records).drop_duplicates(subset=['TckrSymb'], keep='first')
 
-    # 2. Supplement with Official Sectoral Indices
-    sector_urls = {
-        "Information Technology": "https://niftyindices.com",
-        "Financial Services": "https://niftyindices.com",
-        "Healthcare": "https://niftyindices.com",
-        "Automobile and Auto Components": "https://niftyindices.com",
-        "Fast Moving Consumer Goods": "https://niftyindices.com",
-        "Metals & Mining": "https://niftyindices.com",
-        "Oil Gas & Consumable Fuels": "https://niftyindices.com",
-        "Realty": "https://niftyindices.com",
-        "Media Entertainment & Publication": "https://niftyindices.com"
-    }
-    for sector, url in sector_urls.items():
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            df = pd.read_csv(io.StringIO(res.text))
+# --- HELPER TO READ BOTH .CSV AND .ZIP FILES ---
+def extract_dataframes_from_uploads(uploaded_files):
+    extracted_dfs = []
+    for f in uploaded_files:
+        fname = f.name.lower()
+        if fname.endswith(".zip"):
+            with zipfile.ZipFile(f) as z:
+                for inner_name in z.namelist():
+                    if inner_name.lower().endswith(".csv") and not inner_name.startswith("__MACOSX"):
+                        with z.open(inner_name) as csv_file:
+                            df = pd.read_csv(csv_file)
+                            df.columns = df.columns.str.strip()
+                            extracted_dfs.append(df)
+        elif fname.endswith(".csv"):
+            df = pd.read_csv(f)
             df.columns = df.columns.str.strip()
-            for sym in df['Symbol'].dropna():
-                all_records.append({"TckrSymb": str(sym).strip(), "Sector": sector})
-        except Exception:
-            pass
-
-    if not all_records:
-        return pd.DataFrame(columns=["TckrSymb", "Sector"])
-    return pd.DataFrame(all_records).drop_duplicates(subset=['TckrSymb'], keep='first')
+            extracted_dfs.append(df)
+    return extracted_dfs
 
 # --- SIDEBAR UPLOADS ---
 st.sidebar.header("1. Upload Bhavcopy Files")
-eq_files = st.sidebar.file_uploader(
-    "Upload NSE & BSE Equity Bhavcopies (20–22 CSVs)", 
-    type=["csv"], 
+bse_files = st.sidebar.file_uploader(
+    "Upload BSE Bhavcopy Files (.csv or .zip)", 
+    type=["csv", "zip"], 
     accept_multiple_files=True
 )
-fo_files = st.sidebar.file_uploader(
-    "Upload F&O Bhavcopies (20–22 CSVs)", 
-    type=["csv"], 
+nse_files = st.sidebar.file_uploader(
+    "Upload NSE Bhavcopy Files — Equity & F&O (.csv or .zip)", 
+    type=["csv", "zip"], 
     accept_multiple_files=True
 )
 
@@ -72,159 +110,83 @@ if custom_sector_file is not None:
     sec_df.columns = sec_df.columns.str.strip()
     st.sidebar.success(f"✅ Custom Sectors Loaded ({len(sec_df)} stocks)")
 else:
-    sec_df = fetch_live_sector_mapping()
-    if not sec_df.empty:
-        st.sidebar.success(f"✅ Auto-Loaded Nifty Sectors ({len(sec_df)} stocks)")
-    else:
-        st.sidebar.warning("⚠️ Could not reach Nifty server. Upload a Sector CSV manually if needed.")
+    sec_df = get_sector_mapping()
+    st.sidebar.success(f"✅ Sector Mapping Active ({len(sec_df)} stocks)")
 
 @st.cache_data
-def parse_equity_files(files):
-    dfs = []
-    for f in files:
-        df = pd.read_csv(f)
-        df.columns = df.columns.str.strip()
-        if 'SctySrs' in df.columns:
-            df = df[df['SctySrs'].isin(['EQ', 'BE', 'A', 'B', 'X', 'T'])]
-        dfs.append(df)
-    if not dfs:
-        return pd.DataFrame()
-    
-    raw = pd.concat(dfs, ignore_index=True)
-    raw['TradDt'] = pd.to_datetime(raw['TradDt']).dt.strftime('%Y-%m-%d')
-    
-    if 'ISIN' in raw.columns and 'Src' in raw.columns:
-        nse_map = raw[raw['Src'] == 'NSE'][['ISIN', 'TckrSymb']].drop_duplicates('ISIN')
-        isin_to_sym = dict(zip(nse_map['ISIN'], nse_map['TckrSymb']))
-        raw['Unified_Symbol'] = raw['ISIN'].map(isin_to_sym).fillna(raw['TckrSymb'])
+def process_all_uploads(bse_uploads, nse_uploads):
+    eq_list = []
+    fo_list = []
+
+    # 1. Process BSE Files (Equity)
+    if bse_uploads:
+        for df in extract_dataframes_from_uploads(bse_uploads):
+            df['Src_Tag'] = 'BSE'
+            if 'SctySrs' in df.columns:
+                df = df[df['SctySrs'].isin(['A', 'B', 'X', 'T', 'EQ', 'BE'])]
+            eq_list.append(df)
+
+    # 2. Process NSE Files (Auto-separate Equity CM vs F&O based on columns)
+    if nse_uploads:
+        for df in extract_dataframes_from_uploads(nse_uploads):
+            # F&O UDiFF files contain 'OptnTp' or 'FinInstrmTp' (STF/STO/IDF/IDO)
+            if 'OptnTp' in df.columns or ('FinInstrmTp' in df.columns and df['FinInstrmTp'].isin(['STF', 'STO', 'IDF', 'IDO']).any()):
+                fo_list.append(df)
+            else:
+                df['Src_Tag'] = 'NSE'
+                if 'SctySrs' in df.columns:
+                    df = df[df['SctySrs'].isin(['EQ', 'BE'])]
+                eq_list.append(df)
+
+    # Combine Equity Data
+    if eq_list:
+        raw_eq = pd.concat(eq_list, ignore_index=True)
+        raw_eq['TradDt'] = pd.to_datetime(raw_eq['TradDt']).dt.strftime('%Y-%m-%d')
+
+        # Map BSE ISINs to NSE alphabetical symbols so they merge cleanly
+        if 'ISIN' in raw_eq.columns:
+            nse_rows = raw_eq[raw_eq['Src_Tag'] == 'NSE']
+            if not nse_rows.empty:
+                nse_map = nse_rows[['ISIN', 'TckrSymb']].drop_duplicates('ISIN')
+                isin_to_sym = dict(zip(nse_map['ISIN'], nse_map['TckrSymb']))
+                raw_eq['Unified_Symbol'] = raw_eq['ISIN'].map(isin_to_sym).fillna(raw_eq['TckrSymb'])
+            else:
+                raw_eq['Unified_Symbol'] = raw_eq['TckrSymb']
+        else:
+            raw_eq['Unified_Symbol'] = raw_eq['TckrSymb']
+
+        grouped_eq = raw_eq.groupby(['TradDt', 'Unified_Symbol'], as_index=False).agg(
+            Open=('OpnPric', 'first'),
+            High=('HghPric', 'max'),
+            Low=('LwPric', 'min'),
+            Close=('ClsPric', 'first'),
+            Prev_Close=('PrvsClsgPric', 'first'),
+            Total_Vol=('TtlTradgVol', 'sum'),
+            Total_Turnover=('TtlTrfVal', 'sum'),
+            Exchanges=('Src_Tag', lambda x: '+'.join(sorted(set(x.dropna()))))
+        )
     else:
-        raw['Unified_Symbol'] = raw['TckrSymb']
+        grouped_eq = pd.DataFrame()
 
-    grouped = raw.groupby(['TradDt', 'Unified_Symbol'], as_index=False).agg(
-        Open=('OpnPric', 'first'),
-        High=('HghPric', 'max'),
-        Low=('LwPric', 'min'),
-        Close=('ClsPric', 'first'),
-        Prev_Close=('PrvsClsgPric', 'first'),
-        Total_Vol=('TtlTradgVol', 'sum'),
-        Total_Turnover=('TtlTrfVal', 'sum'),
-        Exchanges=('Src', lambda x: '+'.join(sorted(set(x.dropna())))) if 'Src' in raw.columns else ('Unified_Symbol', lambda x: 'NSE/BSE')
-    )
-    return grouped
+    # Combine F&O Data
+    if fo_list:
+        combined_fo = pd.concat(fo_list, ignore_index=True)
+        combined_fo['TradDt'] = pd.to_datetime(combined_fo['TradDt']).dt.strftime('%Y-%m-%d')
+        combined_fo['XpryDt'] = pd.to_datetime(combined_fo['XpryDt']).dt.strftime('%Y-%m-%d')
+    else:
+        combined_fo = pd.DataFrame()
 
-@st.cache_data
-def parse_fo_files(files):
-    dfs = []
-    for f in files:
-        df = pd.read_csv(f)
-        df.columns = df.columns.str.strip()
-        dfs.append(df)
-    if not dfs:
-        return pd.DataFrame()
-    fo = pd.concat(dfs, ignore_index=True)
-    fo['TradDt'] = pd.to_datetime(fo['TradDt']).dt.strftime('%Y-%m-%d')
-    fo['XpryDt'] = pd.to_datetime(fo['XpryDt']).dt.strftime('%Y-%m-%d')
-    return fo
+    return grouped_eq, combined_fo
 
 def format_strike(val):
     return int(val) if float(val).is_integer() else round(float(val), 2)
 
 def get_all_three_strikes(day_fo, symbol, spot, opt_type):
     if day_fo.empty:
-        return "Upload F&O", "Upload F&O", "Upload F&O", np.nan
+        return "Upload NSE F&O", "Upload NSE F&O", "Upload NSE F&O", np.nan
     
     opts = day_fo[(day_fo['TckrSymb'] == symbol) & (day_fo['OptnTp'] == opt_type)].copy()
     if opts.empty:
         return "Non-F&O", "Non-F&O", "Non-F&O", np.nan
     
     nearest_exp = opts['XpryDt'].min()
-    exp_opts = opts[opts['XpryDt'] == nearest_exp].sort_values('StrkPric').reset_index(drop=True)
-    
-    all_exp = day_fo[(day_fo['TckrSymb'] == symbol) & (day_fo['XpryDt'] == nearest_exp)]
-    ce_oi = all_exp[all_exp['OptnTp'] == 'CE']['OpnIntrst'].sum()
-    pe_oi = all_exp[all_exp['OptnTp'] == 'PE']['OpnIntrst'].sum()
-    pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else np.nan
-
-    # 1. At-The-Money
-    exp_opts['Dist'] = (exp_opts['StrkPric'] - spot).abs()
-    atm_idx = exp_opts['Dist'].idxmin()
-    atm_row = exp_opts.loc[atm_idx]
-    atm_str = f"{format_strike(atm_row['StrkPric'])} {opt_type} @ ₹{atm_row['ClsPric']:.2f}"
-
-    # 2. 1-Step Out-Of-The-Money
-    if opt_type == 'CE':
-        otm_idx = atm_idx + 1 if (atm_idx + 1) < len(exp_opts) else atm_idx
-    else:
-        otm_idx = atm_idx - 1 if (atm_idx - 1) >= 0 else atm_idx
-    otm_row = exp_opts.loc[otm_idx]
-    otm_str = f"{format_strike(otm_row['StrkPric'])} {opt_type} @ ₹{otm_row['ClsPric']:.2f}"
-
-    # 3. Highest OI Buildup Strike
-    max_oi_idx = exp_opts['ChngInOpnIntrst'].idxmax()
-    oi_row = exp_opts.loc[max_oi_idx]
-    oi_chg = int(oi_row['ChngInOpnIntrst'])
-    oi_str = f"{format_strike(oi_row['StrkPric'])} {opt_type} @ ₹{oi_row['ClsPric']:.2f} ({oi_chg:+,} OI)"
-
-    return atm_str, otm_str, oi_str, pcr
-
-if eq_files:
-    eq_df = parse_equity_files(eq_files)
-    
-    eq_df = eq_df.sort_values(['Unified_Symbol', 'TradDt'])
-    eq_df['Pct_Change'] = ((eq_df['Close'] - eq_df['Prev_Close']) / eq_df['Prev_Close']) * 100
-    eq_df['Avg_Vol_5D'] = eq_df.groupby('Unified_Symbol')['Total_Vol'].transform(lambda x: x.rolling(5, min_periods=1).mean())
-    eq_df['Vol_Spike'] = eq_df['Total_Vol'] / eq_df['Avg_Vol_5D']
-    eq_df['Turnover_Cr'] = eq_df['Total_Turnover'] / 1e7
-    
-    eq_df['CLV'] = np.where(
-        (eq_df['High'] - eq_df['Low']) > 0,
-        (eq_df['Close'] - eq_df['Low']) / (eq_df['High'] - eq_df['Low']),
-        0.5
-    )
-
-    if not sec_df.empty:
-        eq_df = eq_df.merge(sec_df, left_on='Unified_Symbol', right_on='TckrSymb', how='left')
-        eq_df['Sector'] = eq_df['Sector'].fillna('Other / Smallcap')
-    else:
-        eq_df['Sector'] = 'Unclassified'
-
-    dates = sorted(eq_df['TradDt'].unique(), reverse=True)
-    selected_date = st.selectbox("📅 Select Analysis Date", dates)
-    day_eq = eq_df[eq_df['TradDt'] == selected_date].copy()
-
-    fo_df = parse_fo_files(fo_files) if fo_files else pd.DataFrame()
-    day_fo = fo_df[fo_df['TradDt'] == selected_date] if not fo_df.empty else pd.DataFrame()
-
-    if not day_fo.empty:
-        futs = day_fo[day_fo['FinInstrmTp'].isin(['STF', 'IDF'])].copy()
-        if not futs.empty:
-            fut_agg = futs.groupby('TckrSymb', as_index=False).agg(
-                Fut_OI=('OpnIntrst', 'sum'),
-                Fut_OI_Chg=('ChngInOpnIntrst', 'sum')
-            )
-            day_eq = day_eq.merge(fut_agg, left_on='Unified_Symbol', right_on='TckrSymb', how='left')
-            
-            def classify_oi(row):
-                if pd.isna(row['Fut_OI_Chg']): return "Cash Only"
-                if row['Pct_Change'] > 0 and row['Fut_OI_Chg'] > 0: return "🟢 Long Buildup"
-                if row['Pct_Change'] < 0 and row['Fut_OI_Chg'] > 0: return "🔴 Short Buildup"
-                if row['Pct_Change'] > 0 and row['Fut_OI_Chg'] < 0: return "🟡 Short Covering"
-                return "🟠 Long Unwinding"
-            
-            day_eq['OI_Signal'] = day_eq.apply(classify_oi, axis=1)
-        else:
-            day_eq['OI_Signal'] = "N/A"
-    else:
-        day_eq['OI_Signal'] = "Upload F&O CSV"
-
-    # --- SECTION 1: TOP 10 GAINERS & LOSERS ---
-    st.subheader(f"🔥 Top 10 Movers ({selected_date}) — Consolidated NSE + BSE")
-    liquid_eq = day_eq[day_eq['Turnover_Cr'] >= 5.0]
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**🚀 Top 10 Gainers**")
-        gainers = liquid_eq.nlargest(10, 'Pct_Change')[['Unified_Symbol', 'Exchanges', 'Close', 'Pct_Change', 'Vol_Spike', 'OI_Signal']]
-        st.dataframe(gainers.style.format({'Close': '₹{:.2f}', 'Pct_Change': '+{:.2f}%', 'Vol_Spike': '{:.1f}x'}), use_container_width=True)
-    with c2:
-        st.markdown("**🔻 Top 10 Losers**")
