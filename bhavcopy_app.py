@@ -307,14 +307,22 @@ if bse_files or nse_files:
             else:
                 st.info("No tight bearish coils detected today.")
 
-        # Quick Stock Inspector: See exact EOD footprint of any stock on selected date
-        inspect_syms = st.multiselect("🔎 Inspect Specific Stocks on Selected Date (e.g., ANGELONE, MCX)", sorted(d_eq["Sym"].unique()), default=[s for s in ["ANGELONE", "MCX"] if s in d_eq["Sym"].values])
+        # Persistent Stock Inspector across date changes
+        all_syms = sorted(d_eq["Sym"].unique())
+        default_list = [s for s in ["ANGELONE", "MCX"] if s in all_syms]
+        inspect_syms = st.multiselect(
+            f"🔎 Inspect Specific Stocks on {dt}",
+            options=all_syms,
+            default=default_list,
+            key=f"inspect_{dt}"
+        )
         if inspect_syms:
             st.dataframe(
-                d_eq[d_eq["Sym"].isin(inspect_syms)][["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "CLV", "OI_Signal"]],
+                d_eq[d_eq["Sym"].isin(inspect_syms)][["Sym", "TradDt", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "CLV", "OI_Signal"]],
                 use_container_width=True,
                 hide_index=True
             )
+
 
         # --- MODE 2: MOMENTUM CONTINUATION (Your Existing Filter) ---
         st.markdown("### 🚀 Mode 2: Momentum Continuation (Strong Breakout Follow-Through)")
