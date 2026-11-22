@@ -303,7 +303,7 @@ if bse_files or nse_files:
             (liq["OI_Signal"] == "🔴 Short Buildup")
         ].nsmallest(10, "CLV").reset_index(drop=True)
 
-       c_b1, c_b2 = st.columns(2)
+        c_b1, c_b2 = st.columns(2)
         with c_b1:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
