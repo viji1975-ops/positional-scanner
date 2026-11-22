@@ -303,7 +303,7 @@ if bse_files or nse_files:
             (liq["OI_Signal"] == "🔴 Short Buildup")
         ].nsmallest(10, "CLV").reset_index(drop=True)
 
-        c_b1, c_b2 = st.columns(2)
+       c_b1, c_b2 = st.columns(2)
         with c_b1:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
@@ -312,11 +312,11 @@ if bse_files or nse_files:
                     for _, r in coil_bull.iterrows()
                 ])
                 st.dataframe(
-                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], strikes_c_bull], axis=1),
+                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal", "Sector_Check"]], strikes_c_bull], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
-
+            else:
                 st.info("No tight bullish coils detected today.")
 
         with c_b2:
@@ -327,11 +327,11 @@ if bse_files or nse_files:
                     for _, r in coil_bear.iterrows()
                 ])
                 st.dataframe(
-                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], strikes_c_bear], axis=1),
+                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal", "Sector_Check"]], strikes_c_bear], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
-
+            else:
                 st.info("No tight bearish coils detected today.")
 
         
@@ -347,24 +347,27 @@ if bse_files or nse_files:
                 for _, r in bull.iterrows()
             ])
             st.dataframe(
-                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], strikes_bull], axis=1),
+                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal", "Sector_Check"]], strikes_bull], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
+        else:
+            st.info("No bullish momentum breakouts detected today.")
 
         st.error("🔴 Momentum SELL (PE)")
-        
         if not bear.empty:
             strikes_bear = pd.DataFrame([
                 get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"])
                 for _, r in bear.iterrows()
             ])
             st.dataframe(
-                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], strikes_bear], axis=1),
+                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal", "Sector_Check"]], strikes_bear], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
-
+        else:
+            st.info("No bearish momentum breakdowns detected today.")
+            
         # --- PASTE THE NEW STOCK INSPECTOR RIGHT HERE (AT 8 SPACES INDENTATION) ---
         all_syms = sorted(d_eq["Sym"].unique())
         auto_picks = (coil_bull["Sym"].tolist() + bull["Sym"].tolist())[:3]
