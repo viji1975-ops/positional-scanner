@@ -108,7 +108,6 @@ def parse_cached_uploads(bse_blobs, nse_blobs):
                 "FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO", "FUTSTK", "OPTSTK"]).any()
             )
             if is_fo:
-                # Keep only Stock Futures & Stock Options to save 85% memory
                 if "FinInstrmTp" in df.columns:
                     df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO", "FUTSTK", "OPTSTK"])]
                 fo_list.append(df)
@@ -174,3 +173,5 @@ def parse_cached_uploads(bse_blobs, nse_blobs):
 def format_strike(val):
     return int(val) if float(val).is_integer() else round(float(val), 2)
 
+def compute_strike_dict(day_fo, symbol, spot, opt_type):
+    if day_fo.empty:
