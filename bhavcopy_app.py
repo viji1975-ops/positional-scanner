@@ -300,7 +300,7 @@ if bse_files or nse_files:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
                 st.dataframe(
-                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in coil_bull.iterrows()])], axis=1),
+                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE" r["High"], r["Low"]) for _, r in coil_bull.iterrows()])], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -311,7 +311,7 @@ if bse_files or nse_files:
             st.error("🔴 Early Bearish Coil (Watch for PE Breakdown)")
             if not coil_bear.empty:
                 st.dataframe(
-                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in coil_bear.iterrows()])], axis=1),
+                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE" r["High"], r["Low"]) for _, r in coil_bear.iterrows()])], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -327,7 +327,7 @@ if bse_files or nse_files:
         st.success("🟢 Momentum BUY (CE)")
         if not bull.empty:
             st.dataframe(
-                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in bull.iterrows()])], axis=1),
+                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE" r["High"], r["Low"]) for _, r in bull.iterrows()])], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
@@ -335,7 +335,7 @@ if bse_files or nse_files:
         st.error("🔴 Momentum SELL (PE)")
         if not bear.empty:
             st.dataframe(
-                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in bear.iterrows()])], axis=1),
+                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE" r["High"], r["Low"]) for _, r in bear.iterrows()])], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
