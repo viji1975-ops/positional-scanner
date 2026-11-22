@@ -263,3 +263,68 @@ if bse_files or nse_files:
         st.dataframe(liq[(liq["Vol_Spike"] >= 2.0) & (liq["Cr"] >= 50)].sort_values("Cr", ascending=False).head(15)[["Sym", "Sector", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
 else:
     st.info("Upload files above to start.")
+        # --- SECTION 5: OPTION CHAIN WALLS, MAX PAIN & EXPIRY RISK ---
+        st.divider()
+        st.subheader("🧱 F&O Option Walls, Max Pain & Expiry Risk (Selected Date)")
+        if not d_fo.empty and "OptnTp" in d_fo.columns:
+            wall_rows = []
+            top_fo_syms = liq.nlargest(20, "Cr")["Sym"].tolist()
+            for sym in top_fo_syms:
+                sub_opt = d_fo[(d_fo["TckrSymb"].astype(str).str.strip() == sym) & (d_fo["OptnTp"].isin(["CE", "PE"]))].copy()
+                if sub_opt.empty:
+                    continue
+                near_exp = sub_opt["XpryDt"].min()
+                exp_df = sub_opt[sub_opt["XpryDt"] == near_exp]
+                dte = (pd.to_datetime(near_exp) - pd.to_datetime(dt)).days
+
+                ce_df = exp_df[exp_df["OptnTp"] == "CE"]
+                pe_df = exp_df[exp_df["OptnTp"] == "PE"]
+                if ce_df.empty or pe_df.empty:
+                    continue
+
+                res_strike = ce_df.loc[ce_df["OpnIntrst"].idxmax(), "StrkPric"]
+                sup_strike = pe_df.loc[pe_df["OpnIntrst"].idxmax(), "StrkPric"]
+
+                # Max Pain calculation
+                strikes = sorted(exp_df["StrkPric"].unique())
+                min_pain, max_pain_strike = float("inf"), strikes
+                for s in strikes:
+                    ce_loss = ((s - ce_df["StrkPric"]).clip(lower=0) * ce_df["OpnIntrst"]).sum()
+                    pe_loss = ((pe_df["StrkPric"] - s).clip(lower=0) * pe_df["OpnIntrst"]).sum()
+                    if (ce_loss + pe_loss) < min_pain:
+                        min_pain = ce_loss + pe_loss
+                        max_pain_strike = s
+
+                spot_px = d_eq.loc[d_eq["Sym"] == sym, "Close"].values
+                wall_rows.append({
+                    "Sym": sym,
+                    "Spot": spot_px,
+                    "Support_Wall (Max PE OI)": sup_strike,
+                    "Resistance_Wall (Max CE OI)": res_strike,
+                    "Max_Pain": max_pain_strike,
+                    "Days_to_Expiry": dte,
+                    "Theta_Alert": "⚠️ High Decay (Use ATM)" if dte <= 4 else "✅ Safe Time Value"
+                })
+            if wall_rows:
+                st.dataframe(pd.DataFrame(wall_rows), use_container_width=True, hide_index=True)
+
+        # --- SECTION 6: MULTI-DAY CUMULATIVE TREND (ALL UPLOADED DATES) ---
+        st.divider()
+        all_dates = sorted(eq_df["TradDt"].unique())
+        if len(all_dates) > 1:
+            st.subheader(f"📆 Full-Period Positional Trend ({all_dates} to {all_dates[-1]})")
+            first_dt, last_dt = all_dates, all_dates[-1]
+            start_px = eq_df[eq_df["TradDt"] == first_dt][["Sym", "Close"]].rename(columns={"Close": "Start_Close"})
+            end_px = eq_df[eq_df["TradDt"] == last_dt][["Sym", "Sector", "Close"]].rename(columns={"Close": "End_Close"})
+            avg_vol = eq_df.groupby("Sym", as_index=False)["Vol_Spike"].mean().rename(columns={"Vol_Spike": "Avg_Vol_Spike"})
+
+            period_df = end_px.merge(start_px, on="Sym").merge(avg_vol, on="Sym")
+            period_df["Period_Return%"] = ((period_df["End_Close"] - period_df["Start_Close"]) / period_df["Start_Close"]) * 100
+
+            p1, p2 = st.columns(2)
+            with p1:
+                st.markdown("**🏆 Top 10 Positional Gainers (Full Window)**")
+                st.dataframe(period_df.nlargest(10, "Period_Return%")[["Sym", "Sector", "Start_Close", "End_Close", "Period_Return%", "Avg_Vol_Spike"]], use_container_width=True, hide_index=True)
+            with p2:
+                st.markdown("**📉 Top 10 Positional Losers (Full Window)**")
+                st.dataframe(period_df.nsmallest(10, "Period_Return%")[["Sym", "Sector", "Start_Close", "End_Close", "Period_Return%", "Avg_Vol_Spike"]], use_container_width=True, hide_index=True)
