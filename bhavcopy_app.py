@@ -248,16 +248,78 @@ if bse_files or nse_files:
             hide_index=True
         )
 
+        st.divider()
         st.subheader("🎯 Next-Day High-Probability Setups (CE / PE Strikes)")
+
+        # Calculate 5-Day Range Compression for Pre-Breakout Coiling Detection
+        eq_df["Range%"] = ((eq_df["High"] - eq_df["Low"]) / eq_df["Close"]) * 100
+        eq_df["Avg_Range_5D"] = eq_df.groupby("Sym")["Range%"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+        d_eq["Range%"] = ((d_eq["High"] - d_eq["Low"]) / d_eq["Close"]) * 100
+        d_eq["Range_Ratio"] = d_eq["Range%"] / eq_df.loc[d_eq.index, "Avg_Range_5D"]
+        liq = d_eq[d_eq["Cr"] >= 5.0] if not d_eq[d_eq["Cr"] >= 5.0].empty else d_eq
+
+        # --- MODE 1: PRE-BREAKOUT COILING (Catches stocks BEFORE the big move) ---
+        st.markdown("### 🧲 Mode 1: Pre-Breakout Coiling / Early Accumulation (Before Big Move)")
+        st.caption("Tight range compression (Range_Ratio < 0.85) + steady volume/OI absorption before expansion")
+
+        coil_bull = liq[
+            (liq["Chg%"].between(-0.5, 2.0)) &
+            (liq["Range_Ratio"] <= 0.85) &
+            (liq["Vol_Spike"] >= 1.05) &
+            (liq["CLV"] >= 0.65)
+        ].nlargest(6, "Vol_Spike").reset_index(drop=True)
+
+        coil_bear = liq[
+            (liq["Chg%"].between(-2.0, 0.5)) &
+            (liq["Range_Ratio"] <= 0.85) &
+            (liq["Vol_Spike"] >= 1.05) &
+            (liq["CLV"] <= 0.35)
+        ].nlargest(6, "Vol_Spike").reset_index(drop=True)
+
+        c_b1, c_b2 = st.columns(2)
+        with c_b1:
+            st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
+            if not coil_bull.empty:
+                st.dataframe(
+                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in coil_bull.iterrows()])], axis=1),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("No tight bullish coils detected today.")
+
+        with c_b2:
+            st.error("🔴 Early Bearish Coil (Watch for PE Breakdown)")
+            if not coil_bear.empty:
+                st.dataframe(
+                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in coil_bear.iterrows()])], axis=1),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("No tight bearish coils detected today.")
+
+        # --- MODE 2: MOMENTUM CONTINUATION (Your Existing Filter) ---
+        st.markdown("### 🚀 Mode 2: Momentum Continuation (Strong Breakout Follow-Through)")
         bull = liq[(liq["Chg%"] >= 1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] >= 0.75)].nlargest(8, "Vol_Spike").reset_index(drop=True)
         bear = liq[(liq["Chg%"] <= -1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] <= 0.25)].nlargest(8, "Vol_Spike").reset_index(drop=True)
 
-        st.success("🟢 Next-Day BUY (CE)")
+        st.success("🟢 Momentum BUY (CE)")
         if not bull.empty:
-            st.dataframe(pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in bull.iterrows()])], axis=1), use_container_width=True)
-        st.error("🔴 Next-Day SELL (PE)")
+            st.dataframe(
+                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in bull.iterrows()])], axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
+
+        st.error("🔴 Momentum SELL (PE)")
         if not bear.empty:
-            st.dataframe(pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in bear.iterrows()])], axis=1), use_container_width=True)
+            st.dataframe(
+                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in bear.iterrows()])], axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
+
 
         st.subheader("🏦 Institutional Turnover & Volume Spikes")
         st.dataframe(liq[(liq["Vol_Spike"] >= 2.0) & (liq["Cr"] >= 50)].sort_values("Cr", ascending=False).head(15)[["Sym", "Sector", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
