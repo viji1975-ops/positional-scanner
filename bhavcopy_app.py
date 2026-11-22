@@ -175,3 +175,4 @@ def format_strike(val):
 
 def compute_strike_dict(day_fo, symbol, spot, opt_type):
     if day_fo.empty:
+        return {"At-The-Money": "Upload NSE F&O", "1-Step Out-Of-The-Money": "Upload NSE F&O", "Highest OI Buildup Strike": "Upload NSE F&O", "PCR": np.nan}
