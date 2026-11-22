@@ -10,31 +10,88 @@ SECTORS = {
     "HDFCBANK": "Banking & Finance", "ICICIBANK": "Banking & Finance", "SBIN": "Banking & Finance",
     "KOTAKBANK": "Banking & Finance", "AXISBANK": "Banking & Finance", "INDUSINDBK": "Banking & Finance",
     "BANKBARODA": "Banking & Finance", "PNB": "Banking & Finance", "CANBK": "Banking & Finance",
-    "BAJFINANCE": "Banking & Finance", "BAJAJFINSV": "Banking & Finance", "JIOFIN": "Banking & Finance",
-    "CHOLAFIN": "Banking & Finance", "SHRIRAMFIN": "Banking & Finance", "PFC": "Banking & Finance",
-    "RECLTD": "Banking & Finance", "SBILIFE": "Banking & Finance", "HDFCLIFE": "Banking & Finance",
-    "TCS": "IT", "INFY": "IT", "HCLTECH": "IT", "WIPRO": "IT", "TECHM": "IT",
-    "LTIM": "IT", "PERSISTENT": "IT", "COFORGE": "IT", "MPHASIS": "IT", "KPITTECH": "IT",
-    "RELIANCE": "Energy & Oil", "ONGC": "Energy & Oil", "NTPC": "Energy & Oil", "POWERGRID": "Energy & Oil",
-    "COALINDIA": "Energy & Oil", "BPCL": "Energy & Oil", "IOC": "Energy & Oil", "GAIL": "Energy & Oil",
-    "TATAPOWER": "Energy & Oil", "ADANIPOWER": "Energy & Oil", "ADANIGREEN": "Energy & Oil",
-    "MARUTI": "Auto", "TATAMOTORS": "Auto", "M&M": "Auto", "BAJAJ-AUTO": "Auto",
-    "EICHERMOT": "Auto", "HEROMOTOCO": "Auto", "TVSMOTOR": "Auto", "ASHOKLEY": "Auto", "BHARATFORG": "Auto",
+    "UNIONBANK": "Banking & Finance", "INDIANB": "Banking & Finance", "BANKINDIA": "Banking & Finance",
+    "FEDERALBNK": "Banking & Finance", "IDFCFIRSTB": "Banking & Finance", "BANDHANBNK": "Banking & Finance",
+    "AUBANK": "Banking & Finance", "RBLBANK": "Banking & Finance", "BAJFINANCE": "Banking & Finance",
+    "BAJAJFINSV": "Banking & Finance", "JIOFIN": "Banking & Finance", "CHOLAFIN": "Banking & Finance",
+    "SHRIRAMFIN": "Banking & Finance", "MUTHOOTFIN": "Banking & Finance", "MANAPPURAM": "Banking & Finance",
+    "PFC": "Banking & Finance", "RECLTD": "Banking & Finance", "IREDA": "Banking & Finance",
+    "IRFC": "Banking & Finance", "SBILIFE": "Banking & Finance", "HDFCLIFE": "Banking & Finance",
+    "ICICIPRULI": "Banking & Finance", "ICICIGI": "Banking & Finance", "SBICARD": "Banking & Finance",
+    "ABCAPITAL": "Banking & Finance", "LTF": "Banking & Finance", "M&MFIN": "Banking & Finance",
+    "LICHSGFIN": "Banking & Finance", "CANFINHOME": "Banking & Finance", "POONAWALLA": "Banking & Finance",
+    "PEL": "Banking & Finance", "BSE": "Banking & Finance", "MCX": "Banking & Finance",
+    "CDSL": "Banking & Finance", "ANGELONE": "Banking & Finance", "CAMS": "Banking & Finance",
+    "HDFCAMC": "Banking & Finance", "NAM-INDIA": "Banking & Finance", "MFSL": "Banking & Finance",
+    "TCS": "IT & Tech", "INFY": "IT & Tech", "HCLTECH": "IT & Tech", "WIPRO": "IT & Tech",
+    "TECHM": "IT & Tech", "LTIM": "IT & Tech", "PERSISTENT": "IT & Tech", "COFORGE": "IT & Tech",
+    "MPHASIS": "IT & Tech", "KPITTECH": "IT & Tech", "LTTS": "IT & Tech", "TATAELXSI": "IT & Tech",
+    "OFSS": "IT & Tech", "CYIENT": "IT & Tech", "BSOFT": "IT & Tech", "SONATSOFTW": "IT & Tech",
+    "NAUKRI": "IT & Tech", "ZOMATO": "IT & Tech", "ETERNAL": "IT & Tech", "SWIGGY": "IT & Tech",
+    "PAYTM": "IT & Tech", "POLICYBZR": "IT & Tech", "DELHIVERY": "IT & Tech", "NYKAA": "IT & Tech",
+    "RELIANCE": "Energy & Power", "ONGC": "Energy & Power", "NTPC": "Energy & Power",
+    "POWERGRID": "Energy & Power", "COALINDIA": "Energy & Power", "BPCL": "Energy & Power",
+    "IOC": "Energy & Power", "HINDPETRO": "Energy & Power", "GAIL": "Energy & Power",
+    "PETRONET": "Energy & Power", "IGL": "Energy & Power", "MGL": "Energy & Power",
+    "GUJGASLTD": "Energy & Power", "TATAPOWER": "Energy & Power", "ADANIPOWER": "Energy & Power",
+    "ADANIGREEN": "Energy & Power", "ADANIENSOL": "Energy & Power", "JSWENERGY": "Energy & Power",
+    "NHPC": "Energy & Power", "SJVN": "Energy & Power", "TORNTPOWER": "Energy & Power",
+    "CESC": "Energy & Power", "IEX": "Energy & Power", "OIL": "Energy & Power",
+    "MARUTI": "Auto & Ancillaries", "TATAMOTORS": "Auto & Ancillaries", "M&M": "Auto & Ancillaries",
+    "BAJAJ-AUTO": "Auto & Ancillaries", "EICHERMOT": "Auto & Ancillaries", "HEROMOTOCO": "Auto & Ancillaries",
+    "TVSMOTOR": "Auto & Ancillaries", "ASHOKLEY": "Auto & Ancillaries", "ESCORTS": "Auto & Ancillaries",
+    "BHARATFORG": "Auto & Ancillaries", "MOTHERSON": "Auto & Ancillaries", "BOSCHLTD": "Auto & Ancillaries",
+    "MRF": "Auto & Ancillaries", "BALKRISIND": "Auto & Ancillaries", "APOLLOTYRE": "Auto & Ancillaries",
+    "EXIDEIND": "Auto & Ancillaries", "ARE&M": "Auto & Ancillaries", "SONACOMS": "Auto & Ancillaries",
+    "TIINDIA": "Auto & Ancillaries", "UNOMINDA": "Auto & Ancillaries", "SUNDRMFAST": "Auto & Ancillaries",
     "SUNPHARMA": "Pharma & Healthcare", "CIPLA": "Pharma & Healthcare", "DRREDDY": "Pharma & Healthcare",
     "DIVISLAB": "Pharma & Healthcare", "APOLLOHOSP": "Pharma & Healthcare", "LUPIN": "Pharma & Healthcare",
     "AUROPHARMA": "Pharma & Healthcare", "TORNTPHARM": "Pharma & Healthcare", "ZYDUSLIFE": "Pharma & Healthcare",
-    "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "BRITANNIA": "FMCG",
-    "TATACONSUM": "FMCG", "GODREJCP": "FMCG", "DABUR": "FMCG", "MARICO": "FMCG", "VBL": "FMCG",
-    "TATASTEEL": "Metals & Mining", "JSWSTEEL": "Metals & Mining", "HINDALCO": "Metals & Mining",
-    "VEDL": "Metals & Mining", "JINDALSTEL": "Metals & Mining", "NMDC": "Metals & Mining", "SAIL": "Metals & Mining",
-    "LT": "Infra & Capital Goods", "SIEMENS": "Infra & Capital Goods", "ABB": "Infra & Capital Goods",
-    "HAL": "Infra & Capital Goods", "BEL": "Infra & Capital Goods", "BHEL": "Infra & Capital Goods",
-    "ADANIPORTS": "Infra & Capital Goods", "INDIGO": "Infra & Capital Goods", "IRCTC": "Infra & Capital Goods",
+    "ALKEM": "Pharma & Healthcare", "BIOCON": "Pharma & Healthcare", "MAXHEALTH": "Pharma & Healthcare",
+    "FORTIS": "Pharma & Healthcare", "MANKIND": "Pharma & Healthcare", "GLENMARK": "Pharma & Healthcare",
+    "IPCALAB": "Pharma & Healthcare", "LAURUSLABS": "Pharma & Healthcare", "GRANULES": "Pharma & Healthcare",
+    "SYNGENE": "Pharma & Healthcare", "LALPATHLAB": "Pharma & Healthcare", "METROPOLIS": "Pharma & Healthcare",
+    "HINDUNILVR": "FMCG & Retail", "ITC": "FMCG & Retail", "NESTLEIND": "FMCG & Retail",
+    "BRITANNIA": "FMCG & Retail", "TATACONSUM": "FMCG & Retail", "GODREJCP": "FMCG & Retail",
+    "DABUR": "FMCG & Retail", "MARICO": "FMCG & Retail", "VBL": "FMCG & Retail",
+    "COLPAL": "FMCG & Retail", "UNITDSPR": "FMCG & Retail", "UBL": "FMCG & Retail",
+    "JUBLFOOD": "FMCG & Retail", "DEVYANI": "FMCG & Retail", "WESTLIFE": "FMCG & Retail",
+    "DMART": "FMCG & Retail", "TRENT": "FMCG & Retail", "ABFRL": "FMCG & Retail",
+    "PAGEIND": "FMCG & Retail", "BATAINDIA": "FMCG & Retail", "TITAN": "FMCG & Retail",
+    "KALYANKJIL": "FMCG & Retail", "INDHOTEL": "FMCG & Retail",
+    "TATASTEEL": "Metals & Chemicals", "JSWSTEEL": "Metals & Chemicals", "HINDALCO": "Metals & Chemicals",
+    "VEDL": "Metals & Chemicals", "JINDALSTEL": "Metals & Chemicals", "NMDC": "Metals & Chemicals",
+    "SAIL": "Metals & Chemicals", "NATIONALUM": "Metals & Chemicals", "HINDZINC": "Metals & Chemicals",
+    "HINDCOPPER": "Metals & Chemicals", "APLAPOLLO": "Metals & Chemicals", "JSL": "Metals & Chemicals",
+    "PIDILITIND": "Metals & Chemicals", "SRF": "Metals & Chemicals", "PIIND": "Metals & Chemicals",
+    "UPL": "Metals & Chemicals", "DEEPAKNTR": "Metals & Chemicals", "NAVINFLUOR": "Metals & Chemicals",
+    "TATACHEM": "Metals & Chemicals", "AARTIIND": "Metals & Chemicals", "ATUL": "Metals & Chemicals",
+    "CHAMBLFERT": "Metals & Chemicals", "COROMANDEL": "Metals & Chemicals", "GNFC": "Metals & Chemicals",
+    "LT": "Defence, Infra & Cap Goods", "HAL": "Defence, Infra & Cap Goods", "BEL": "Defence, Infra & Cap Goods",
+    "BHEL": "Defence, Infra & Cap Goods", "MAZDOCK": "Defence, Infra & Cap Goods",
+    "COCHINSHIP": "Defence, Infra & Cap Goods", "DATAPATTNS": "Defence, Infra & Cap Goods",
+    "BDL": "Defence, Infra & Cap Goods", "SOLARINDS": "Defence, Infra & Cap Goods",
+    "SIEMENS": "Defence, Infra & Cap Goods", "ABB": "Defence, Infra & Cap Goods",
+    "CUMMINSIND": "Defence, Infra & Cap Goods", "CGPOWER": "Defence, Infra & Cap Goods",
+    "THERMAX": "Defence, Infra & Cap Goods", "ASTRAL": "Defence, Infra & Cap Goods",
+    "SUPREMEIND": "Defence, Infra & Cap Goods", "POLYCAB": "Defence, Infra & Cap Goods",
+    "KEI": "Defence, Infra & Cap Goods", "HAVELLS": "Defence, Infra & Cap Goods",
+    "VOLTAS": "Defence, Infra & Cap Goods", "BLUESTARCO": "Defence, Infra & Cap Goods",
+    "AMBER": "Defence, Infra & Cap Goods", "DIXON": "Defence, Infra & Cap Goods",
+    "CROMPTON": "Defence, Infra & Cap Goods", "WHIRLPOOL": "Defence, Infra & Cap Goods",
+    "ADANIPORTS": "Defence, Infra & Cap Goods", "ADANIENT": "Defence, Infra & Cap Goods",
+    "INDIGO": "Defence, Infra & Cap Goods", "IRCTC": "Defence, Infra & Cap Goods",
+    "CONCOR": "Defence, Infra & Cap Goods", "RVNL": "Defence, Infra & Cap Goods",
+    "GMRAIRPORT": "Defence, Infra & Cap Goods", "NCC": "Defence, Infra & Cap Goods",
     "ULTRACEMCO": "Cement & Realty", "GRASIM": "Cement & Realty", "AMBUJACEM": "Cement & Realty",
+    "ACC": "Cement & Realty", "SHREECEM": "Cement & Realty", "DALBHARAT": "Cement & Realty",
+    "JKCEMENT": "Cement & Realty", "RAMCOCEM": "Cement & Realty", "INDIACEM": "Cement & Realty",
+    "ASIANPAINT": "Cement & Realty", "BERGEPAINT": "Cement & Realty",
     "DLF": "Cement & Realty", "LODHA": "Cement & Realty", "GODREJPROP": "Cement & Realty",
+    "OBEROIRLTY": "Cement & Realty", "PRESTIGE": "Cement & Realty", "PHOENIXLTD": "Cement & Realty",
     "BHARTIARTL": "Telecom & Media", "INDUSTOWER": "Telecom & Media", "IDEA": "Telecom & Media",
-    "TITAN": "Consumer Durables", "ASIANPAINT": "Consumer Durables", "TRENT": "Consumer Durables",
-    "DMART": "Consumer Durables", "DIXON": "Consumer Durables", "POLYCAB": "Consumer Durables"
+    "TATACOMM": "Telecom & Media", "HFCL": "Telecom & Media", "ITI": "Telecom & Media",
+    "ZEEL": "Telecom & Media", "SUNTV": "Telecom & Media", "PVRINOX": "Telecom & Media"
 }
 
 KEEP = ["TradDt", "TckrSymb", "SctySrs", "ISIN", "FinInstrmTp", "XpryDt", "StrkPric", "OptnTp",
@@ -169,13 +226,27 @@ if bse_files or nse_files:
         g_col.dataframe(liq.nlargest(10, "Chg%")[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], use_container_width=True)
         l_col.dataframe(liq.nsmallest(10, "Chg%")[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], use_container_width=True)
 
-        st.subheader("🏭 Sector Performance (Click row to view stocks)")
-        sec_tbl = d_eq.groupby("Sector", as_index=False).agg(Avg_Chg=("Chg%", "mean"), Turnover_Cr=("Cr", "sum"), Adv=("Chg%", lambda x: (x > 0).sum()), Dec=("Chg%", lambda x: (x < 0).sum())).sort_values("Avg_Chg", ascending=False)
-        ev = st.dataframe(sec_tbl, on_select="rerun", selection_mode="single-row", use_container_width=True)
-        if ev.selection.rows:
-            chosen = sec_tbl.iloc[ev.selection.rows.pop()]["Sector"]
-            st.markdown(f"**Stocks in {chosen}**")
-            st.dataframe(d_eq[d_eq["Sector"] == chosen].sort_values("Chg%", ascending=False)[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
+        st.subheader("🏭 Sector Performance (Select a Sector Below to View Stocks)")
+        sec_tbl = d_eq.groupby("Sector", as_index=False).agg(
+            Avg_Chg=("Chg%", "mean"),
+            Turnover_Cr=("Cr", "sum"),
+            Adv=("Chg%", lambda x: (x > 0).sum()),
+            Dec=("Chg%", lambda x: (x < 0).sum())
+        ).sort_values("Avg_Chg", ascending=False)
+        
+        ev = st.dataframe(sec_tbl, on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True)
+        
+        # Works via left checkbox click OR direct dropdown selection
+        selected_rows = ev.selection.rows if ev and hasattr(ev, "selection") else []
+        default_sec = sec_tbl.iloc[selected_rows[0]]["Sector"] if len(selected_rows) > 0 else sec_tbl.iloc[0]["Sector"]
+        chosen = st.selectbox("🔍 Drill-Down: View Constituent Stocks in Sector", sec_tbl["Sector"].tolist(), index=sec_tbl["Sector"].tolist().index(default_sec))
+        
+        st.markdown(f"**📌 Stocks in {chosen} (Sorted by % Change)**")
+        st.dataframe(
+            d_eq[d_eq["Sector"] == chosen].sort_values("Chg%", ascending=False)[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]],
+            use_container_width=True,
+            hide_index=True
+        )
 
         st.subheader("🎯 Next-Day High-Probability Setups (CE / PE Strikes)")
         bull = liq[(liq["Chg%"] >= 1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] >= 0.75)].nlargest(8, "Vol_Spike").reset_index(drop=True)
