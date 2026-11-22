@@ -48,50 +48,15 @@ BUILTIN_SECTORS = {
     "POLYCAB": "Consumer Durables", "VOLTAS": "Consumer Durables"
 }
 
-def extract_dataframes_from_uploads(uploaded_files):
-    extracted = []
-    for f in uploaded_files:
-        f.seek(0)
-        fname = f.name.lower()
-        if fname.endswith(".zip"):
-            with zipfile.ZipFile(f) as z:
-                for inner_name in z.namelist():
-                    if inner_name.lower().endswith(".csv") and not inner_name.startswith("__MACOSX"):
-                        with z.open(inner_name) as csv_file:
-                            df = pd.read_csv(csv_file, low_memory=False)
-                            df.columns = df.columns.str.strip()
-                            extracted.append((inner_name, df))
-        elif fname.endswith(".csv"):
-            df = pd.read_csv(f, low_memory=False)
-            df.columns = df.columns.str.strip()
-            extracted.append((f.name, df))
-    return extracted
+KEEP_COLS = [
+    "TradDt", "TckrSymb", "SctySrs", "ISIN", "FinInstrmTp",
+    "XpryDt", "StrkPric", "OptnTp", "OpnPric", "HghPric",
+    "LwPric", "ClsPric", "PrvsClsgPric", "TtlTradgVol",
+    "TtlTrfVal", "OpnIntrst", "ChngInOpnIntrst"
+]
 
-# --- SIDEBAR UPLOADS ---
-st.sidebar.header("1. Upload Bhavcopy Files")
-bse_files = st.sidebar.file_uploader(
-    "Upload BSE Bhavcopy Files (.csv or .zip)",
-    type=["csv", "zip"],
-    accept_multiple_files=True
-)
-nse_files = st.sidebar.file_uploader(
-    "Upload NSE Bhavcopy Files — Equity & F&O (.csv or .zip)",
-    type=["csv", "zip"],
-    accept_multiple_files=True
-)
-
-st.sidebar.divider()
-st.sidebar.header("2. Sector Database")
-custom_sector_file = st.sidebar.file_uploader("Optional: Upload Custom Sector CSV", type=["csv"])
-
-if custom_sector_file is not None:
-    sec_df = pd.read_csv(custom_sector_file)
-    sec_df.columns = sec_df.columns.str.strip()
-else:
-    sec_df = pd.DataFrame(list(BUILTIN_SECTORS.items()), columns=["TckrSymb", "Sector"])
-st.sidebar.success(f"✅ Sector Mapping Ready ({len(sec_df)} stocks)")
-
-def normalize_legacy_or_udiff(df):
+def normalize_cols(df):
+    df.columns = df.columns.str.strip()
     col_map = {
         "SYMBOL": "TckrSymb", "SC_NAME": "TckrSymb",
         "SERIES": "SctySrs", "SC_GROUP": "SctySrs",
@@ -104,30 +69,48 @@ def normalize_legacy_or_udiff(df):
         "INSTRUMENT": "FinInstrmTp"
     }
     rename_dict = {k: v for k, v in col_map.items() if k in df.columns and v not in df.columns}
-    return df.rename(columns=rename_dict)
+    df = df.rename(columns=rename_dict)
+    avail = [c for c in KEEP_COLS if c in df.columns]
+    return df[avail].copy()
 
-def process_all_uploads(bse_uploads, nse_uploads):
+def read_single_stream(file_obj, filename):
+    out = []
+    if filename.lower().endswith(".zip"):
+        with zipfile.ZipFile(file_obj) as z:
+            for inner in z.namelist():
+                if inner.lower().endswith(".csv") and not inner.startswith("__MACOSX"):
+                    with z.open(inner) as f:
+                        df = normalize_cols(pd.read_csv(f, low_memory=False))
+                        out.append((inner, df))
+    elif filename.lower().endswith(".csv"):
+        df = normalize_cols(pd.read_csv(file_obj, low_memory=False))
+        out.append((filename, df))
+    return out
+
+@st.cache_data(show_spinner=False)
+def parse_cached_uploads(bse_blobs, nse_blobs):
     eq_list = []
     fo_list = []
-    debug_info = []
+    log_lines = []
 
-    if bse_uploads:
-        for name, df in extract_dataframes_from_uploads(bse_uploads):
-            df = normalize_legacy_or_udiff(df)
-            debug_info.append(f"BSE: `{name}` ({len(df)} rows)")
+    for fname, raw_bytes in bse_blobs:
+        for inner_name, df in read_single_stream(pd.io.common.BytesIO(raw_bytes), fname):
+            log_lines.append(f"BSE: {inner_name} ({len(df)} rows)")
             df["Src_Tag"] = "BSE"
             if "SctySrs" in df.columns:
                 df = df[df["SctySrs"].astype(str).str.strip().isin(["A", "B", "X", "T", "EQ", "BE"])]
             eq_list.append(df)
 
-    if nse_uploads:
-        for name, df in extract_dataframes_from_uploads(nse_uploads):
-            df = normalize_legacy_or_udiff(df)
-            debug_info.append(f"NSE: `{name}` ({len(df)} rows)")
+    for fname, raw_bytes in nse_blobs:
+        for inner_name, df in read_single_stream(pd.io.common.BytesIO(raw_bytes), fname):
+            log_lines.append(f"NSE: {inner_name} ({len(df)} rows)")
             is_fo = ("OptnTp" in df.columns) or (
-                "FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO", "FUTSTK", "OPTSTK", "FUTIDX", "OPTIDX"]).any()
+                "FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO", "FUTSTK", "OPTSTK"]).any()
             )
             if is_fo:
+                # Keep only Stock Futures & Stock Options to save 85% memory
+                if "FinInstrmTp" in df.columns:
+                    df = df[df["FinInstrmTp"].astype(str).isin(["STF", "STO", "FUTSTK", "OPTSTK"])]
                 fo_list.append(df)
             else:
                 df["Src_Tag"] = "NSE"
@@ -177,3 +160,17 @@ def process_all_uploads(bse_uploads, nse_uploads):
         grouped_eq["Unified_Symbol"] = near_stf["TckrSymb"].astype(str).str.strip().values
         grouped_eq["Open"] = near_stf["OpnPric"].values
         grouped_eq["High"] = near_stf["HghPric"].values
+        grouped_eq["Low"] = near_stf["LwPric"].values
+        grouped_eq["Close"] = near_stf["ClsPric"].values
+        grouped_eq["Prev_Close"] = near_stf["PrvsClsgPric"].values
+        grouped_eq["Total_Vol"] = near_stf["TtlTradgVol"].values
+        grouped_eq["Total_Turnover"] = near_stf["TtlTrfVal"].values
+        grouped_eq["Exchanges"] = "NSE-FO (Fut)"
+    else:
+        grouped_eq = pd.DataFrame()
+
+    return grouped_eq, combined_fo, log_lines
+
+def format_strike(val):
+    return int(val) if float(val).is_integer() else round(float(val), 2)
+
