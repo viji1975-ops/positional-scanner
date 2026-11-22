@@ -8,7 +8,7 @@ import numpy as np
 st.set_page_config(page_title="NSE & BSE Bhavcopy Pro Terminal", layout="wide")
 st.title("📈 NSE + BSE Multi-Day Bhavcopy & Multi-Strike Options Scanner")
 
-# --- BUILT-IN FALLBACK SECTOR DICTIONARY (WORKS OFFLINE ON STREAMLIT CLOUD) ---
+# --- BUILT-IN FALLBACK SECTOR DICTIONARY ---
 BUILTIN_SECTORS = {
     "HDFCBANK": "Banking & Finance", "ICICIBANK": "Banking & Finance", "SBIN": "Banking & Finance",
     "KOTAKBANK": "Banking & Finance", "AXISBANK": "Banking & Finance", "INDUSINDBK": "Banking & Finance",
@@ -56,34 +56,35 @@ def get_sector_mapping():
     records = [{"TckrSymb": k, "Sector": v} for k, v in BUILTIN_SECTORS.items()]
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get("https://niftyindices.com", headers=headers, timeout=6)
+        res = requests.get("https://niftyindices.com", headers=headers, timeout=5)
         if res.status_code == 200 and "Symbol" in res.text:
             df_500 = pd.read_csv(io.StringIO(res.text))
             df_500.columns = df_500.columns.str.strip()
-            live_records = []
-            for _, row in df_500.dropna(subset=['Symbol', 'Industry']).iterrows():
-                live_records.append({"TckrSymb": str(row['Symbol']).strip(), "Sector": str(row['Industry']).strip()})
+            live_records = [
+                {"TckrSymb": str(row['Symbol']).strip(), "Sector": str(row['Industry']).strip()}
+                for _, row in df_500.dropna(subset=['Symbol', 'Industry']).iterrows()
+            ]
             if live_records:
                 records = live_records + records
     except Exception:
         pass
     return pd.DataFrame(records).drop_duplicates(subset=['TckrSymb'], keep='first')
 
-# --- HELPER TO READ BOTH .CSV AND .ZIP FILES ---
 def extract_dataframes_from_uploads(uploaded_files):
     extracted_dfs = []
     for f in uploaded_files:
+        f.seek(0)
         fname = f.name.lower()
         if fname.endswith(".zip"):
             with zipfile.ZipFile(f) as z:
                 for inner_name in z.namelist():
                     if inner_name.lower().endswith(".csv") and not inner_name.startswith("__MACOSX"):
                         with z.open(inner_name) as csv_file:
-                            df = pd.read_csv(csv_file)
+                            df = pd.read_csv(csv_file, low_memory=False)
                             df.columns = df.columns.str.strip()
                             extracted_dfs.append(df)
         elif fname.endswith(".csv"):
-            df = pd.read_csv(f)
+            df = pd.read_csv(f, low_memory=False)
             df.columns = df.columns.str.strip()
             extracted_dfs.append(df)
     return extracted_dfs
@@ -113,12 +114,10 @@ else:
     sec_df = get_sector_mapping()
     st.sidebar.success(f"✅ Sector Mapping Active ({len(sec_df)} stocks)")
 
-@st.cache_data
 def process_all_uploads(bse_uploads, nse_uploads):
     eq_list = []
     fo_list = []
 
-    # 1. Process BSE Files (Equity)
     if bse_uploads:
         for df in extract_dataframes_from_uploads(bse_uploads):
             df['Src_Tag'] = 'BSE'
@@ -126,10 +125,8 @@ def process_all_uploads(bse_uploads, nse_uploads):
                 df = df[df['SctySrs'].isin(['A', 'B', 'X', 'T', 'EQ', 'BE'])]
             eq_list.append(df)
 
-    # 2. Process NSE Files (Auto-separate Equity CM vs F&O based on columns)
     if nse_uploads:
         for df in extract_dataframes_from_uploads(nse_uploads):
-            # F&O UDiFF files contain 'OptnTp' or 'FinInstrmTp' (STF/STO/IDF/IDO)
             if 'OptnTp' in df.columns or ('FinInstrmTp' in df.columns and df['FinInstrmTp'].isin(['STF', 'STO', 'IDF', 'IDO']).any()):
                 fo_list.append(df)
             else:
@@ -138,12 +135,17 @@ def process_all_uploads(bse_uploads, nse_uploads):
                     df = df[df['SctySrs'].isin(['EQ', 'BE'])]
                 eq_list.append(df)
 
-    # Combine Equity Data
+    combined_fo = pd.DataFrame()
+    if fo_list:
+        combined_fo = pd.concat(fo_list, ignore_index=True)
+        combined_fo['TradDt'] = pd.to_datetime(combined_fo['TradDt']).dt.strftime('%Y-%m-%d')
+        combined_fo['XpryDt'] = pd.to_datetime(combined_fo['XpryDt']).dt.strftime('%Y-%m-%d')
+
+    # Build Equity DataFrame (or fallback to Near-Month Stock Futures if only F&O files were uploaded)
     if eq_list:
         raw_eq = pd.concat(eq_list, ignore_index=True)
         raw_eq['TradDt'] = pd.to_datetime(raw_eq['TradDt']).dt.strftime('%Y-%m-%d')
 
-        # Map BSE ISINs to NSE alphabetical symbols so they merge cleanly
         if 'ISIN' in raw_eq.columns:
             nse_rows = raw_eq[raw_eq['Src_Tag'] == 'NSE']
             if not nse_rows.empty:
@@ -165,28 +167,23 @@ def process_all_uploads(bse_uploads, nse_uploads):
             Total_Turnover=('TtlTrfVal', 'sum'),
             Exchanges=('Src_Tag', lambda x: '+'.join(sorted(set(x.dropna()))))
         )
+    elif not combined_fo.empty and 'FinInstrmTp' in combined_fo.columns:
+        # Fallback: Use Near-Month Stock Futures (STF) when only NSE F&O Bhavcopy is uploaded
+        stf = combined_fo[combined_fo['FinInstrmTp'] == 'STF'].copy()
+        stf = stf.sort_values(['TradDt', 'TckrSymb', 'XpryDt'])
+        near_stf = stf.drop_duplicates(subset=['TradDt', 'TckrSymb'], keep='first')
+        grouped_eq = pd.DataFrame({
+            'TradDt': near_stf['TradDt'],
+            'Unified_Symbol': near_stf['TckrSymb'],
+            'Open': near_stf['OpnPric'],
+            'High': near_stf['HghPric'],
+            'Low': near_stf['LwPric'],
+            'Close': near_stf['ClsPric'],
+            'Prev_Close': near_stf['PrvsClsgPric'],
+            'Total_Vol': near_stf['TtlTradgVol'],
+            'Total_Turnover': near_stf['TtlTrfVal'],
+            'Exchanges': 'NSE-FO (Fut)'
+        })
     else:
         grouped_eq = pd.DataFrame()
 
-    # Combine F&O Data
-    if fo_list:
-        combined_fo = pd.concat(fo_list, ignore_index=True)
-        combined_fo['TradDt'] = pd.to_datetime(combined_fo['TradDt']).dt.strftime('%Y-%m-%d')
-        combined_fo['XpryDt'] = pd.to_datetime(combined_fo['XpryDt']).dt.strftime('%Y-%m-%d')
-    else:
-        combined_fo = pd.DataFrame()
-
-    return grouped_eq, combined_fo
-
-def format_strike(val):
-    return int(val) if float(val).is_integer() else round(float(val), 2)
-
-def get_all_three_strikes(day_fo, symbol, spot, opt_type):
-    if day_fo.empty:
-        return "Upload NSE F&O", "Upload NSE F&O", "Upload NSE F&O", np.nan
-    
-    opts = day_fo[(day_fo['TckrSymb'] == symbol) & (day_fo['OptnTp'] == opt_type)].copy()
-    if opts.empty:
-        return "Non-F&O", "Non-F&O", "Non-F&O", np.nan
-    
-    nearest_exp = opts['XpryDt'].min()
