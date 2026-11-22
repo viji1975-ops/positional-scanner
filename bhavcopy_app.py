@@ -53,7 +53,7 @@ BUILTIN_SECTORS = {
 @st.cache_data(ttl=86400)
 def get_sector_mapping():
     records = [{"TckrSymb": k, "Sector": v} for k, v in BUILTIN_SECTORS.items()]
-    return pd.DataFrame(records).drop_duplicates(subset=['TckrSymb'], keep='first')
+    return pd.DataFrame(records).drop_duplicates(subset=["TckrSymb"], keep="first")
 
 def extract_dataframes_from_uploads(uploaded_files):
     extracted = []
@@ -77,13 +77,13 @@ def extract_dataframes_from_uploads(uploaded_files):
 # --- SIDEBAR UPLOADS ---
 st.sidebar.header("1. Upload Bhavcopy Files")
 bse_files = st.sidebar.file_uploader(
-    "Upload BSE Bhavcopy Files (.csv or .zip)", 
-    type=["csv", "zip"], 
+    "Upload BSE Bhavcopy Files (.csv or .zip)",
+    type=["csv", "zip"],
     accept_multiple_files=True
 )
 nse_files = st.sidebar.file_uploader(
-    "Upload NSE Bhavcopy Files — Equity & F&O (.csv or .zip)", 
-    type=["csv", "zip"], 
+    "Upload NSE Bhavcopy Files — Equity & F&O (.csv or .zip)",
+    type=["csv", "zip"],
     accept_multiple_files=True
 )
 
@@ -99,20 +99,18 @@ else:
 st.sidebar.success(f"✅ Sector Mapping Ready ({len(sec_df)} stocks)")
 
 def normalize_legacy_or_udiff(df):
-    """Maps legacy NSE/BSE column names to UDiFF standard names if needed."""
     col_map = {
-        'SYMBOL': 'TckrSymb', 'SC_NAME': 'TckrSymb',
-        'SERIES': 'SctySrs', 'SC_GROUP': 'SctySrs',
-        'OPEN': 'OpnPric', 'HIGH': 'HghPric', 'LOW': 'LwPric', 'CLOSE': 'ClsPric',
-        'PREVCLOSE': 'PrvsClsgPric', 'TOTTRDQTY': 'TtlTradgVol', 'NO_OF_SHRS': 'TtlTradgVol',
-        'TOTTRDVAL': 'TtlTrfVal', 'NET_TURNOV': 'TtlTrfVal',
-        'TIMESTAMP': 'TradDt', 'EXPIRY_DT': 'XpryDt',
-        'STRIKE_PR': 'StrkPric', 'OPTION_TYP': 'OptnTp',
-        'OPEN_INT': 'OpnIntrst', 'CHG_IN_OI': 'ChngInOpnIntrst',
-        'INSTRUMENT': 'FinInstrmTp'
+        "SYMBOL": "TckrSymb", "SC_NAME": "TckrSymb",
+        "SERIES": "SctySrs", "SC_GROUP": "SctySrs",
+        "OPEN": "OpnPric", "HIGH": "HghPric", "LOW": "LwPric", "CLOSE": "ClsPric",
+        "PREVCLOSE": "PrvsClsgPric", "TOTTRDQTY": "TtlTradgVol", "NO_OF_SHRS": "TtlTradgVol",
+        "TOTTRDVAL": "TtlTrfVal", "NET_TURNOV": "TtlTrfVal",
+        "TIMESTAMP": "TradDt", "EXPIRY_DT": "XpryDt",
+        "STRIKE_PR": "StrkPric", "OPTION_TYP": "OptnTp",
+        "OPEN_INT": "OpnIntrst", "CHG_IN_OI": "ChngInOpnIntrst",
+        "INSTRUMENT": "FinInstrmTp"
     }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns and v not in df.columns})
-    return df
+    return df.rename(columns={k: v for k, v in col_map.items() if k in df.columns and v not in df.columns})
 
 def process_all_uploads(bse_uploads, nse_uploads):
     eq_list = []
@@ -123,62 +121,65 @@ def process_all_uploads(bse_uploads, nse_uploads):
         for name, df in extract_dataframes_from_uploads(bse_uploads):
             df = normalize_legacy_or_udiff(df)
             debug_info.append(f"BSE: `{name}` ({len(df)} rows)")
-            df['Src_Tag'] = 'BSE'
-            if 'SctySrs' in df.columns:
-                df = df[df['SctySrs'].astype(str).str.strip().isin(['A', 'B', 'X', 'T', 'EQ', 'BE'])]
+            df["Src_Tag"] = "BSE"
+            if "SctySrs" in df.columns:
+                df = df[df["SctySrs"].astype(str).str.strip().isin(["A", "B", "X", "T", "EQ", "BE"])]
             eq_list.append(df)
 
     if nse_uploads:
         for name, df in extract_dataframes_from_uploads(nse_uploads):
             df = normalize_legacy_or_udiff(df)
             debug_info.append(f"NSE: `{name}` ({len(df)} rows)")
-            is_fo = ('OptnTp' in df.columns) or (
-                'FinInstrmTp' in df.columns and df['FinInstrmTp'].astype(str).isin(['STF', 'STO', 'IDF', 'IDO', 'FUTSTK', 'OPTSTK', 'FUTIDX', 'OPTIDX']).any()
+            is_fo = ("OptnTp" in df.columns) or (
+                "FinInstrmTp" in df.columns and df["FinInstrmTp"].astype(str).isin(["STF", "STO", "IDF", "IDO", "FUTSTK", "OPTSTK", "FUTIDX", "OPTIDX"]).any()
             )
             if is_fo:
                 fo_list.append(df)
             else:
-                df['Src_Tag'] = 'NSE'
-                if 'SctySrs' in df.columns:
-                    df = df[df['SctySrs'].astype(str).str.strip().isin(['EQ', 'BE'])]
+                df["Src_Tag"] = "NSE"
+                if "SctySrs" in df.columns:
+                    df = df[df["SctySrs"].astype(str).str.strip().isin(["EQ", "BE"])]
                 eq_list.append(df)
 
     combined_fo = pd.DataFrame()
     if fo_list:
         combined_fo = pd.concat(fo_list, ignore_index=True)
-        combined_fo['TradDt'] = pd.to_datetime(combined_fo['TradDt'], format='mixed').dt.strftime('%Y-%m-%d')
-        if 'XpryDt' in combined_fo.columns:
-            combined_fo['XpryDt'] = pd.to_datetime(combined_fo['XpryDt'], format='mixed').dt.strftime('%Y-%m-%d')
+        combined_fo["TradDt"] = pd.to_datetime(combined_fo["TradDt"], format="mixed").dt.strftime("%Y-%m-%d")
+        if "XpryDt" in combined_fo.columns:
+            combined_fo["XpryDt"] = pd.to_datetime(combined_fo["XpryDt"], format="mixed").dt.strftime("%Y-%m-%d")
 
     if eq_list:
         raw_eq = pd.concat(eq_list, ignore_index=True)
-        raw_eq['TradDt'] = pd.to_datetime(raw_eq['TradDt'], format='mixed').dt.strftime('%Y-%m-%d')
-        raw_eq['TckrSymb'] = raw_eq['TckrSymb'].astype(str).str.strip()
+        raw_eq["TradDt"] = pd.to_datetime(raw_eq["TradDt"], format="mixed").dt.strftime("%Y-%m-%d")
+        raw_eq["TckrSymb"] = raw_eq["TckrSymb"].astype(str).str.strip()
 
-        if 'ISIN' in raw_eq.columns:
-            nse_rows = raw_eq[raw_eq['Src_Tag'] == 'NSE']
+        if "ISIN" in raw_eq.columns:
+            nse_rows = raw_eq[raw_eq["Src_Tag"] == "NSE"]
             if not nse_rows.empty:
-                nse_map = nse_rows[['ISIN', 'TckrSymb']].drop_duplicates('ISIN')
-                isin_to_sym = dict(zip(nse_map['ISIN'], nse_map['TckrSymb']))
-                raw_eq['Unified_Symbol'] = raw_eq['ISIN'].map(isin_to_sym).fillna(raw_eq['TckrSymb'])
+                nse_map = nse_rows[["ISIN", "TckrSymb"]].drop_duplicates("ISIN")
+                isin_to_sym = dict(zip(nse_map["ISIN"], nse_map["TckrSymb"]))
+                raw_eq["Unified_Symbol"] = raw_eq["ISIN"].map(isin_to_sym).fillna(raw_eq["TckrSymb"])
             else:
-                raw_eq['Unified_Symbol'] = raw_eq['TckrSymb']
+                raw_eq["Unified_Symbol"] = raw_eq["TckrSymb"]
         else:
-            raw_eq['Unified_Symbol'] = raw_eq['TckrSymb']
+            raw_eq["Unified_Symbol"] = raw_eq["TckrSymb"]
 
-        grouped_eq = raw_eq.groupby(['TradDt', 'Unified_Symbol'], as_index=False).agg(
-            Open=('OpnPric', 'first'),
-            High=('HghPric', 'max'),
-            Low=('LwPric', 'min'),
-            Close=('ClsPric', 'first'),
-            Prev_Close=('PrvsClsgPric', 'first'),
-            Total_Vol=('TtlTradgVol', 'sum'),
-            Total_Turnover=('TtlTrfVal', 'sum'),
-            Exchanges=('Src_Tag', lambda x: '+'.join(sorted(set(x.dropna()))))
+        grouped_eq = raw_eq.groupby(["TradDt", "Unified_Symbol"], as_index=False).agg(
+            Open=("OpnPric", "first"),
+            High=("HghPric", "max"),
+            Low=("LwPric", "min"),
+            Close=("ClsPric", "first"),
+            Prev_Close=("PrvsClsgPric", "first"),
+            Total_Vol=("TtlTradgVol", "sum"),
+            Total_Turnover=("TtlTrfVal", "sum"),
+            Exchanges=("Src_Tag", lambda x: "+".join(sorted(set(x.dropna()))))
         )
-    elif not combined_fo.empty and 'FinInstrmTp' in combined_fo.columns:
-        stf = combined_fo[combined_fo['FinInstrmTp'].astype(str).isin(['STF', 'FUTSTK'])].copy()
-        stf = stf.sort_values(['TradDt', 'TckrSymb', 'XpryDt'])
-        near_stf = stf.drop_duplicates(subset=['TradDt', 'TckrSymb'], keep='first')
+    elif not combined_fo.empty and "FinInstrmTp" in combined_fo.columns:
+        stf = combined_fo[combined_fo["FinInstrmTp"].astype(str).isin(["STF", "FUTSTK"])].copy()
+        stf = stf.sort_values(["TradDt", "TckrSymb", "XpryDt"])
+        near_stf = stf.drop_duplicates(subset=["TradDt", "TckrSymb"], keep="first")
         grouped_eq = pd.DataFrame({
-            'TradDt': near_stf['TradDt'],
+            "TradDt": near_stf["TradDt"],
+            "Unified_Symbol": near_stf["TckrSymb"].astype(str).str.strip(),
+            "Open": near_stf["OpnPric"],
+            "High": near_stf["HghPric"],
