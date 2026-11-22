@@ -154,3 +154,41 @@ if bse_files or nse_files:
         if not d_fo.empty and "FinInstrmTp" in d_fo.columns:
             futs = d_fo[d_fo["FinInstrmTp"] == "STF"].groupby("TckrSymb", as_index=False)["ChngInOpnIntrst"].sum()
             d_eq = d_eq.merge(futs, left_on="Sym", right_on="TckrSymb", how="left")
+
+
+            d_eq["OI_Signal"] = np.where(d_eq["ChngInOpnIntrst"].isna(), "Cash",
+                np.where((d_eq["Chg%"] > 0) & (d_eq["ChngInOpnIntrst"] > 0), "🟢 Long Buildup",
+                np.where((d_eq["Chg%"] < 0) & (d_eq["ChngInOpnIntrst"] > 0), "🔴 Short Buildup",
+                np.where(d_eq["Chg%"] > 0, "🟡 Short Covering", "🟠 Long Unwinding"))))
+        else:
+            d_eq["OI_Signal"] = "N/A"
+
+        liq = d_eq[d_eq["Cr"] >= 5.0] if not d_eq[d_eq["Cr"] >= 5.0].empty else d_eq
+        st.subheader(f"🔥 Top 10 Gainers & Losers ({dt})")
+        g_col, l_col = st.columns(2)
+        g_col.dataframe(liq.nlargest(10, "Chg%")[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], use_container_width=True)
+        l_col.dataframe(liq.nsmallest(10, "Chg%")[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], use_container_width=True)
+
+        st.subheader("🏭 Sector Performance (Click row to view stocks)")
+        sec_tbl = d_eq.groupby("Sector", as_index=False).agg(Avg_Chg=("Chg%", "mean"), Turnover_Cr=("Cr", "sum"), Adv=("Chg%", lambda x: (x > 0).sum()), Dec=("Chg%", lambda x: (x < 0).sum())).sort_values("Avg_Chg", ascending=False)
+        ev = st.dataframe(sec_tbl, on_select="rerun", selection_mode="single-row", use_container_width=True)
+        if ev.selection.rows:
+            chosen = sec_tbl.iloc[ev.selection.rows.pop()]["Sector"]
+            st.markdown(f"**Stocks in {chosen}**")
+            st.dataframe(d_eq[d_eq["Sector"] == chosen].sort_values("Chg%", ascending=False)[["Sym", "Exch", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
+
+        st.subheader("🎯 Next-Day High-Probability Setups (CE / PE Strikes)")
+        bull = liq[(liq["Chg%"] >= 1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] >= 0.75)].nlargest(8, "Vol_Spike").reset_index(drop=True)
+        bear = liq[(liq["Chg%"] <= -1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] <= 0.25)].nlargest(8, "Vol_Spike").reset_index(drop=True)
+
+        st.success("🟢 Next-Day BUY (CE)")
+        if not bull.empty:
+            st.dataframe(pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in bull.iterrows()])], axis=1), use_container_width=True)
+        st.error("🔴 Next-Day SELL (PE)")
+        if not bear.empty:
+            st.dataframe(pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in bear.iterrows()])], axis=1), use_container_width=True)
+
+        st.subheader("🏦 Institutional Turnover & Volume Spikes")
+        st.dataframe(liq[(liq["Vol_Spike"] >= 2.0) & (liq["Cr"] >= 50)].sort_values("Cr", ascending=False).head(15)[["Sym", "Sector", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
+else:
+    st.info("Upload files above to start.")
