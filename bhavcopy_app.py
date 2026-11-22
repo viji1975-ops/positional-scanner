@@ -258,30 +258,34 @@ if bse_files or nse_files:
         d_eq["Range_Ratio"] = d_eq["Range%"] / eq_df.loc[d_eq.index, "Avg_Range_5D"]
         liq = d_eq[d_eq["Cr"] >= 5.0] if not d_eq[d_eq["Cr"] >= 5.0].empty else d_eq
 
-        # --- MODE 1: PRE-BREAKOUT COILING (Catches stocks BEFORE the big move) ---
+        # --- MODE 1: PRE-BREAKOUT COILING (Catches Dry-Up Coils & OI Accumulation Before Breakout) ---
         st.markdown("### 🧲 Mode 1: Pre-Breakout Coiling / Early Accumulation (Before Big Move)")
-        st.caption("Tight range compression (Range_Ratio < 0.85) + steady volume/OI absorption before expansion")
+        st.caption("Ranks tightest price compression (NR4/Coil) + positive Futures OI buildup before expansion")
+
+        eq_df["Range%"] = ((eq_df["High"] - eq_df["Low"]) / eq_df["Close"]) * 100
+        eq_df["Avg_Range_5D"] = eq_df.groupby("Sym")["Range%"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+        d_eq["Range%"] = ((d_eq["High"] - d_eq["Low"]) / d_eq["Close"]) * 100
+        d_eq["Range_Ratio"] = d_eq["Range%"] / eq_df.loc[d_eq.index, "Avg_Range_5D"]
+        liq = d_eq[d_eq["Cr"] >= 5.0] if not d_eq[d_eq["Cr"] >= 5.0].empty else d_eq
 
         coil_bull = liq[
-            (liq["Chg%"].between(-0.5, 2.0)) &
-            (liq["Range_Ratio"] <= 0.85) &
-            (liq["Vol_Spike"] >= 1.05) &
-            (liq["CLV"] >= 0.65)
-        ].nlargest(6, "Vol_Spike").reset_index(drop=True)
+            (liq["Chg%"].between(-1.0, 2.2)) &
+            (liq["Range_Ratio"] <= 0.90) &
+            (liq["CLV"] >= 0.55)
+        ].nsmallest(12, "Range_Ratio").reset_index(drop=True)
 
         coil_bear = liq[
-            (liq["Chg%"].between(-2.0, 0.5)) &
-            (liq["Range_Ratio"] <= 0.85) &
-            (liq["Vol_Spike"] >= 1.05) &
-            (liq["CLV"] <= 0.35)
-        ].nlargest(6, "Vol_Spike").reset_index(drop=True)
+            (liq["Chg%"].between(-2.2, 1.0)) &
+            (liq["Range_Ratio"] <= 0.90) &
+            (liq["CLV"] <= 0.45)
+        ].nsmallest(12, "Range_Ratio").reset_index(drop=True)
 
         c_b1, c_b2 = st.columns(2)
         with c_b1:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
                 st.dataframe(
-                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in coil_bull.iterrows()])], axis=1),
+                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE") for _, r in coil_bull.iterrows()])], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
@@ -292,12 +296,13 @@ if bse_files or nse_files:
             st.error("🔴 Early Bearish Coil (Watch for PE Breakdown)")
             if not coil_bear.empty:
                 st.dataframe(
-                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in coil_bear.iterrows()])], axis=1),
+                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE") for _, r in coil_bear.iterrows()])], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
             else:
                 st.info("No tight bearish coils detected today.")
+
 
         # --- MODE 2: MOMENTUM CONTINUATION (Your Existing Filter) ---
         st.markdown("### 🚀 Mode 2: Momentum Continuation (Strong Breakout Follow-Through)")
