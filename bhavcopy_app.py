@@ -245,6 +245,8 @@ if bse_files or nse_files:
         eq_df["Sector"] = eq_df["Sym"].map(sec_map).fillna("Other / F&O")
 
         dt = st.selectbox("📅 Select Date", sorted(eq_df["TradDt"].unique(), reverse=True))
+        d_eq = eq_df[eq_df["TradDt"] == dt].copy()
+        d_fo = fo_df[fo_df["TradDt"] == dt] if not fo_df.empty else pd.DataFrame()
         segment = st.radio(
             "🧭 Select Market Segment",
             ["📊 Stocks", "🏛️ Indices (NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY)"],
