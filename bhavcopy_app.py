@@ -335,7 +335,7 @@ if bse_files or nse_files:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
                 strikes_c_bull = pd.DataFrame([
-                    get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"])
+                    get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"], dt)
                     for _, r in coil_bull.iterrows()
                 ])
                 st.dataframe(
@@ -350,7 +350,7 @@ if bse_files or nse_files:
             st.error("🔴 Early Bearish Coil (Watch for PE Breakdown)")
             if not coil_bear.empty:
                 strikes_c_bear = pd.DataFrame([
-                    get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"])
+                    get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"], dt)
                     for _, r in coil_bear.iterrows()
                 ])
                 st.dataframe(
@@ -370,7 +370,7 @@ if bse_files or nse_files:
         st.success("🟢 Momentum BUY (CE)")
         if not bull.empty:
             strikes_bull = pd.DataFrame([
-                get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"])
+                get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"], dt)
                 for _, r in bull.iterrows()
             ])
             st.dataframe(
@@ -384,7 +384,7 @@ if bse_files or nse_files:
         st.error("🔴 Momentum SELL (PE)")
         if not bear.empty:
             strikes_bear = pd.DataFrame([
-                get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"])
+                get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"], dt)
                 for _, r in bear.iterrows()
             ])
             st.dataframe(
