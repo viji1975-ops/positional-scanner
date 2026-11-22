@@ -299,23 +299,31 @@ if bse_files or nse_files:
         with c_b1:
             st.success("🟢 Early Bullish Coil (Watch for CE Breakout)")
             if not coil_bull.empty:
+                strikes_c_bull = pd.DataFrame([
+                    get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"])
+                    for _, r in coil_bull.iterrows()
+                ])
                 st.dataframe(
-                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE" r["High"], r["Low"]) for _, r in coil_bull.iterrows()])], axis=1),
+                    pd.concat([coil_bull[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], strikes_c_bull], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
-            else:
+
                 st.info("No tight bullish coils detected today.")
 
         with c_b2:
             st.error("🔴 Early Bearish Coil (Watch for PE Breakdown)")
             if not coil_bear.empty:
+                strikes_c_bear = pd.DataFrame([
+                    get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"])
+                    for _, r in coil_bear.iterrows()
+                ])
                 st.dataframe(
-                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE" r["High"], r["Low"]) for _, r in coil_bear.iterrows()])], axis=1),
+                    pd.concat([coil_bear[["Sym", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "OI_Signal"]], strikes_c_bear], axis=1),
                     use_container_width=True,
                     hide_index=True
                 )
-            else:
+
                 st.info("No tight bearish coils detected today.")
 
         
@@ -326,16 +334,25 @@ if bse_files or nse_files:
 
         st.success("🟢 Momentum BUY (CE)")
         if not bull.empty:
+            strikes_bull = pd.DataFrame([
+                get_strikes(d_fo, r["Sym"], r["Close"], "CE", r["High"], r["Low"])
+                for _, r in bull.iterrows()
+            ])
             st.dataframe(
-                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "CE" r["High"], r["Low"]) for _, r in bull.iterrows()])], axis=1),
+                pd.concat([bull[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], strikes_bull], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
 
         st.error("🔴 Momentum SELL (PE)")
+        
         if not bear.empty:
+            strikes_bear = pd.DataFrame([
+                get_strikes(d_fo, r["Sym"], r["Close"], "PE", r["High"], r["Low"])
+                for _, r in bear.iterrows()
+            ])
             st.dataframe(
-                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], pd.DataFrame([get_strikes(d_fo, r["Sym"], r["Close"], "PE" r["High"], r["Low"]) for _, r in bear.iterrows()])], axis=1),
+                pd.concat([bear[["Sym", "Close", "Chg%", "Vol_Spike", "OI_Signal"]], strikes_bear], axis=1),
                 use_container_width=True,
                 hide_index=True
             )
