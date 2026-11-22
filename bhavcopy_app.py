@@ -307,23 +307,7 @@ if bse_files or nse_files:
             else:
                 st.info("No tight bearish coils detected today.")
 
-        # Persistent Stock Inspector across date changes
-        all_syms = sorted(d_eq["Sym"].unique())
-        default_list = [s for s in ["ANGELONE", "MCX"] if s in all_syms]
-        inspect_syms = st.multiselect(
-            f"🔎 Inspect Specific Stocks on {dt}",
-            options=all_syms,
-            default=default_list,
-            key=f"inspect_{dt}"
-        )
-        if inspect_syms:
-            st.dataframe(
-                d_eq[d_eq["Sym"].isin(inspect_syms)][["Sym", "TradDt", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "CLV", "OI_Signal"]],
-                use_container_width=True,
-                hide_index=True
-            )
-
-
+        
         # --- MODE 2: MOMENTUM CONTINUATION (Your Existing Filter) ---
         st.markdown("### 🚀 Mode 2: Momentum Continuation (Strong Breakout Follow-Through)")
         bull = liq[(liq["Chg%"] >= 1.5) & (liq["Vol_Spike"] >= 1.5) & (liq["CLV"] >= 0.75)].nlargest(8, "Vol_Spike").reset_index(drop=True)
@@ -345,6 +329,22 @@ if bse_files or nse_files:
                 hide_index=True
             )
 
+        # --- PASTE THE NEW STOCK INSPECTOR RIGHT HERE (AT 8 SPACES INDENTATION) ---
+        all_syms = sorted(d_eq["Sym"].unique())
+        auto_picks = (coil_bull["Sym"].tolist() + bull["Sym"].tolist())[:3]
+        default_list = [s for s in auto_picks if s in all_syms]
+        inspect_syms = st.multiselect(
+            f"🔎 Inspect Specific Stocks on {dt}",
+            options=all_syms,
+            default=default_list,
+            key=f"inspect_{dt}"
+        )
+        if inspect_syms:
+            st.dataframe(
+                d_eq[d_eq["Sym"].isin(inspect_syms)][["Sym", "TradDt", "Close", "Chg%", "Range_Ratio", "Vol_Spike", "CLV", "OI_Signal"]],
+                use_container_width=True,
+                hide_index=True
+            )
 
         st.subheader("🏦 Institutional Turnover & Volume Spikes")
         st.dataframe(liq[(liq["Vol_Spike"] >= 2.0) & (liq["Cr"] >= 50)].sort_values("Cr", ascending=False).head(15)[["Sym", "Sector", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
