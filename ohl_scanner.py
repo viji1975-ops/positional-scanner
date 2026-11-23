@@ -6,16 +6,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="NSE F&O OHL Ultimate Scanner Pro", layout="wide")
 
-# ==========================================
-# 1. SIDEBAR CONFIGURATION
-# ==========================================
 st.sidebar.header("🔑 Upstox Configuration")
 access_token = st.sidebar.text_input("Daily Upstox Access Token", type="password").strip()
 tolerance_pct = st.sidebar.number_input("OHL Tolerance (%)", min_value=0.0, max_value=1.0, value=0.0, step=0.05) / 100
 pattern_filter = st.sidebar.multiselect("Filter Patterns", ["Open=Low", "Open=High"], default=["Open=Low", "Open=High"])
 status_filter = st.sidebar.multiselect("Filter Status", ["Active", "Breached ❌"], default=["Active", "Breached ❌"])
-
-BASE_URL = "https://upstox.com"
 
 FNO_RAW = """
 AARTIIND:INE769A01020 ABB:INE117A01022 ABBOTINDIA:INE358A01014 ABCAPITAL:INE674K01013
@@ -82,25 +77,6 @@ for item in FNO_RAW.split():
     if ":" in item:
         sym, isin = item.split(":")
         ALL_FNO_STOCKS[f"NSE:{sym}"] = f"NSE_EQ|{isin}"
-
-# ==========================================
-# 2. FETCH CANDLES (SLASH-SAFE URL BUILDER)
-# ==========================================
-def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0", "Origin": "https://upstox.com", "Referer": "https://upstox.com"}
-    encoded_key = inst_key.replace("|", "%7C")
-    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    to_date = ist_now.strftime("%Y-%m-%d")
-    from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
-
-    api_debug = ""
-
-    # Build URLs safely with "/".join() so slashes never disappear on copy-paste
-    url_intra = "/".join(["https://upstox.com", "v3", "historical-candle", "intraday", encoded_key, "minutes", "15"])
-    url_hist_v3 = "/".join(["https://upstox.com", "v3", "historical-candle", encoded_key, "minutes", "15", to_date, from_date])
-    url_hist_v2 = "/".join(["https://upstox.com", "v2", "historical-candle", encoded_key, "15minute", to_date, from_date])
-    url_day_v2 = "/".join(["https://upstox.com", "v2", "historical-candle", encoded_key, "day", to_date, from_date])
-
     # Step 1: Try Live Intraday 15m (V3)
     try:
         r1 = requests.get(url_intra, headers=headers, timeout=8)
@@ -111,33 +87,29 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     except Exception as e:
         api_debug = f"Intra Err: {e}"
 
-    # Step 2: Try Historical 15m (V3, then V2)
+    # Step 2: Fetch Historical 15m (V3)
     try:
-        r2 = requests.get(url_hist_v3, headers=headers, timeout=10)
+        r2 = requests.get(url_hist_15m, headers=headers, timeout=10)
         if r2.status_code == 401:
             return {"error": "401"}
         if r2.status_code == 200:
             hist_15m = r2.json().get("data", {}).get("candles", [])
         else:
-            r2_v2 = requests.get(url_hist_v2, headers=headers, timeout=10)
-            if r2_v2.status_code == 200:
-                hist_15m = r2_v2.json().get("data", {}).get("candles", [])
-            else:
-                api_debug = f"Hist15m HTTP {r2.status_code}/{r2_v2.status_code}"
+            api_debug = f"15m HTTP {r2.status_code}"
     except Exception as e:
-        api_debug = f"Hist15m Err: {e}"
+        api_debug = f"15m Err: {e}"
 
-    # Step 3: If Live Intraday is empty, extract Last Trading Day from Historical 15m
+    # Step 3: If Live Intraday is empty (market closed/holiday), use Last Trading Day from 15m archive
     if not candles and hist_15m:
         session_mode = "Last Trading Day (15m)"
         latest_ts, *_ = next(iter(hist_15m))
         latest_date_str = str(latest_ts).split("T").pop(0)
         candles = [c for c in hist_15m if str(next(iter(c))).startswith(latest_date_str)]
 
-    # Step 4: Ultimate Fallback — Daily Candle (V2)
+    # Step 4: Ultimate Fallback — Daily Candle (V3) if 15m archive is delayed
     if not candles:
         try:
-            r_day = requests.get(url_day_v2, headers=headers, timeout=10)
+            r_day = requests.get(url_hist_day, headers=headers, timeout=10)
             if r_day.status_code == 200:
                 day_candles = r_day.json().get("data", {}).get("candles", [])
                 if day_candles:
@@ -146,7 +118,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
                     if not hist_15m:
                         hist_15m = day_candles
             else:
-                api_debug = f"Day HTTP {r_day.status_code}: {r_day.text}"
+                api_debug = f"Day HTTP {r_day.status_code}"
         except Exception as e:
             api_debug = f"Day Err: {e}"
 
@@ -270,7 +242,7 @@ if unauthorized:
 if detected_date:
     status_placeholder.success(f"📅 **Session:** {detected_mode} ({detected_date})")
 elif last_api_debug:
-    status_placeholder.error(f"⚠️ Upstox Response: {last_api_debug}")
+    status_placeholder.warning(f"⚠️ Upstox Response: {last_api_debug}")
 
 if results:
     df = pd.DataFrame(results)
