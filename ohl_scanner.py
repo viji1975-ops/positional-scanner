@@ -87,9 +87,14 @@ for item in FNO_RAW.split():
 # 2. FETCH CANDLES (SLASH-SAFE URL BUILDER)
 # ==========================================
 def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    encoded_key = inst_key.replace("|", "%7C")
-
+        headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Origin": "https://upstox.com",
+        "Referer": "https://upstox.com"
+    }
+    
     ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     to_date = ist_now.strftime("%Y-%m-%d")
     from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
