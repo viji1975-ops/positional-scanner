@@ -9,7 +9,7 @@ st.set_page_config(page_title="NSE OHL Ultimate Scanner Pro", layout="wide")
 # 1. SIDEBAR CONFIGURATION
 # ==========================================
 st.sidebar.header("🔑 Upstox Configuration")
-access_token = st.sidebar.text_input("Daily Upstox Access Token", type="password")
+access_token = st.sidebar.text_input("Daily Upstox Access Token", type="password").strip()
 tolerance_pct = st.sidebar.number_input("OHL Tolerance (%)", min_value=0.0, max_value=1.0, value=0.0, step=0.05) / 100
 
 WATCHLIST = {
@@ -26,7 +26,7 @@ WATCHLIST = {
 }
 
 # ==========================================
-# 2. CACHED API FUNCTIONS
+# 2. CACHED & SAFE API FUNCTIONS
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_20d_avg_15m_volume(instrument_key: str, token: str) -> float:
@@ -36,31 +36,33 @@ def get_20d_avg_15m_volume(instrument_key: str, token: str) -> float:
     encoded_key = instrument_key.replace("|", "%7C")
     
     url = f"https://upstox.com{encoded_key}/minutes/15/{to_date}/{from_date}"
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code != 200:
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return 0.0
+        candles = resp.json().get("data", {}).get("candles", [])
+        if not candles:
+            return 0.0
+        df = pd.DataFrame(candles, columns=["ts", "o", "h", "l", "c", "v", "oi"])
+        return float(df["v"].head(20).mean())
+    except Exception:
         return 0.0
-        
-    candles = resp.json().get("data", {}).get("candles", [])
-    if not candles:
-        return 0.0
-        
-    df = pd.DataFrame(candles, columns=["ts", "o", "h", "l", "c", "v", "oi"])
-    return float(df["v"].head(20).mean())
 
 def get_intraday_candles(instrument_key: str, token: str):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     encoded_key = instrument_key.replace("|", "%7C")
     url = f"https://upstox.comintraday/{encoded_key}/minutes/15"
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code != 200:
-        return None, resp.status_code
-        
-    candles = resp.json().get("data", {}).get("candles", [])
-    if not candles:
-        return None, 200
-        
-    candles.reverse()  # Index 0 becomes 09:15 AM candle
-    return candles, 200
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None, resp.status_code, resp.text
+        candles = resp.json().get("data", {}).get("candles", [])
+        if not candles:
+            return None, 200, "Empty candles"
+        candles.reverse()  # Index 0 becomes 09:15 AM candle
+        return candles, 200, "OK"
+    except requests.exceptions.RequestException as e:
+        return None, 0, str(e)
 
 # ==========================================
 # 3. DASHBOARD UI & SCANNER LOGIC
@@ -83,17 +85,24 @@ total = len(WATCHLIST)
 
 for idx, (symbol, inst_key) in enumerate(WATCHLIST.items()):
     progress.progress((idx + 1) / total)
-    candles, status_code = get_intraday_candles(inst_key, access_token)
+    candles, status_code, msg = get_intraday_candles(inst_key, access_token)
     
+    if status_code == 0:
+        st.error(f"🌐 Network/Firewall Error reaching Upstox from Streamlit Cloud: {msg}")
+        st.info("💡 Tip: Upstox frequently blocks non-Indian cloud IPs (like Streamlit Cloud in the US). Run this script locally on your PC using `streamlit run app.py` if this persists.")
+        st.stop()
     if status_code == 401:
-        st.error("❌ Unauthorized: Your Upstox daily token is invalid or expired.")
+        st.error("❌ Unauthorized (401): Your Upstox daily token is invalid or expired.")
         st.stop()
     if not candles:
         continue
 
     # Upstox candle format: [0:ts, 1:open, 2:high, 3:low, 4:close, 5:volume, 6:oi]
     first_candle = candles[0]
-    o, h, l, v = float(first_candle[1]), float(first_candle[2]), float(first_candle[3]), float(first_candle[5])
+    o = float(first_candle[1])
+    h = float(first_candle[2])
+    l = float(first_candle[3])
+    v = float(first_candle[5])
     c = float(candles[-1][4])
 
     is_ol = (abs(o - l) <= o * tolerance_pct) and (h > o)
