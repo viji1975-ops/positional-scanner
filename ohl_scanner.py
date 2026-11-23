@@ -25,6 +25,8 @@ WATCHLIST = {
     "NSE:BHARTIARTL":"NSE_EQ|INE397D01024",
 }
 
+BASE_URL = "https://upstox.com"
+
 # ==========================================
 # 2. CACHED & SAFE API FUNCTIONS
 # ==========================================
@@ -35,7 +37,7 @@ def get_20d_avg_15m_volume(instrument_key: str, token: str) -> float:
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     encoded_key = instrument_key.replace("|", "%7C")
     
-    url = f"https://upstox.com{encoded_key}/minutes/15/{to_date}/{from_date}"
+    url = f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}"
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -51,7 +53,7 @@ def get_20d_avg_15m_volume(instrument_key: str, token: str) -> float:
 def get_intraday_candles(instrument_key: str, token: str):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     encoded_key = instrument_key.replace("|", "%7C")
-    url = f"https://upstox.comintraday/{encoded_key}/minutes/15"
+    url = f"{BASE_URL}/intraday/{encoded_key}/minutes/15"
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -88,8 +90,7 @@ for idx, (symbol, inst_key) in enumerate(WATCHLIST.items()):
     candles, status_code, msg = get_intraday_candles(inst_key, access_token)
     
     if status_code == 0:
-        st.error(f"🌐 Network/Firewall Error reaching Upstox from Streamlit Cloud: {msg}")
-        st.info("💡 Tip: Upstox frequently blocks non-Indian cloud IPs (like Streamlit Cloud in the US). Run this script locally on your PC using `streamlit run app.py` if this persists.")
+        st.error(f"🌐 Network Error: {msg}")
         st.stop()
     if status_code == 401:
         st.error("❌ Unauthorized (401): Your Upstox daily token is invalid or expired.")
