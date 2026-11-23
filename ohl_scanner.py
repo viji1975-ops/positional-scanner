@@ -27,7 +27,6 @@ status_filter = st.sidebar.multiselect(
 BASE_URL = "https://upstox.com"
 INSTRUMENTS_CSV_URL = "https://upstox.com"
 
-# Backup Top F&O Stocks if Upstox CDN blocks cloud IP
 BACKUP_FNO_STOCKS = {
     "NSE:RELIANCE": "NSE_EQ|INE002A01018",
     "NSE:HDFCBANK": "NSE_EQ|INE040A01034",
@@ -61,21 +60,18 @@ BACKUP_FNO_STOCKS = {
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_fno_stocks() -> dict:
-    """Downloads Upstox NSE CSV instrument master and maps all F&O underlying stocks to NSE_EQ keys."""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         resp = requests.get(INSTRUMENTS_CSV_URL, headers=headers, timeout=20)
-        if resp.status_code == 200 and resp.content[:2] == b"\x1f\x8b":
+        if resp.status_code == 200 and resp.content.startswith(b"\x1f\x8b"):
             df_inst = pd.read_csv(io.BytesIO(resp.content), compression="gzip")
-            
-            # Filter NSE_FO for underlying symbols (or extract root symbol before digits)
             fo_df = df_inst[df_inst["exchange"] == "NSE_FO"]
             if "underlying_symbol" in fo_df.columns:
                 fno_symbols = set(fo_df["underlying_symbol"].dropna().astype(str).str.strip())
             else:
-                fno_symbols = set(fo_df["tradingsymbol"].dropna().astype(str).str.extract(r"^([A-Z&-]+)"))
+                extracted = fo_df["tradingsymbol"].dropna().astype(str).str.extract(r"^([A-Z&-]+)", expand=False)
+                fno_symbols = set(extracted.dropna())
 
-            # Match against NSE_EQ equity rows
             eq_df = df_inst[(df_inst["exchange"] == "NSE_EQ") & (df_inst["instrument_type"] == "EQUITY")]
             fno_eq_map = {}
             for _, row in eq_df.iterrows():
@@ -111,7 +107,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     except Exception:
         pass
 
-    # Step B: Fetch Historical 15m Candles (for 20-period vol + Last Trading Day fallback)
+    # Step B: Fetch Historical 15m Candles
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     hist_url = f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}"
@@ -126,28 +122,30 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     except Exception:
         pass
 
-    # Use Historical Last Trading Day if Live Intraday is empty
+    # Fallback to Last Trading Day if Live Intraday is empty
     if not candles:
         if not hist_candles:
             return None
         session_mode = "Last Trading Day"
-        latest_date_str = str(hist_candles[:10])
-        candles = [c for c in hist_candles if str(c).startswith(latest_date_str)]
+        latest_candle = next(iter(hist_candles))
+        latest_ts, *_ = latest_candle
+        latest_date_str = str(latest_ts).split("T").pop(0)
+        candles = [c for c in hist_candles if str(next(iter(c))).startswith(latest_date_str)]
 
     if not candles:
         return None
 
     # Reverse so index 0 is 09:15 AM candle
     candles = list(reversed(candles))
-    session_date = str(candles[:10])
+    first_c = next(iter(candles))
+    last_c = candles.pop()
 
-    # Upstox candle format: [0:ts, 1:open, 2:high, 3:low, 4:close, 5:volume, 6:oi]
-    first_c = candles
-    o = float(first_c)
-    h = float(first_c)
-    l = float(first_c)
-    v = float(first_c)
-    c = float(candles[-1])
+    # Unpack Upstox candle tuple: (timestamp, open, high, low, close, volume, oi)
+    ts_first, o, h, l, _, v, _ = first_c
+    _, _, _, _, c, _, _ = last_c
+
+    o, h, l, v, c = float(o), float(h), float(l), float(v), float(c)
+    session_date = str(ts_first).split("T").pop(0)
 
     is_ol = (abs(o - l) <= o * tol) and (h > o)
     is_oh = (abs(o - h) <= o * tol) and (l < o)
@@ -156,7 +154,12 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
         return None
 
     # 20-period average 15m volume
-    past_vols = [float(x) for x in hist_candles[1:21]] if len(hist_candles) > 1 else []
+    past_vols = []
+    for item in hist_candles:
+        _, _, _, _, _, item_v, _ = item
+        past_vols.append(float(item_v))
+    past_vols = past_vols[1:21]
+
     avg_vol = (sum(past_vols) / len(past_vols)) if past_vols else 0.0
     v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
     power = "🔥 Ultra" if v_mult > 3.0 else ("⚡ Strong" if v_mult > 1.5 else "⚠️ Weak")
@@ -210,7 +213,7 @@ if not access_token:
 
 fno_stocks = get_all_fno_stocks()
 
-col1, col2, col3 = st.columns()
+col1, col2, col3 = st.columns(3)
 with col1:
     st.button("🔄 Refresh Scan")
 with col2:
