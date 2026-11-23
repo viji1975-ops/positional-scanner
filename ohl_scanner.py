@@ -94,7 +94,8 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
         "Origin": "https://upstox.com",
         "Referer": "https://upstox.com"
     }
-    
+    encoded_key = inst_key.replace("|", "%7C")
+
     ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     to_date = ist_now.strftime("%Y-%m-%d")
     from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
