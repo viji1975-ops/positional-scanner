@@ -93,11 +93,6 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     to_date = ist_now.strftime("%Y-%m-%d")
     from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
 
-    from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
-
-    candles = []
-    hist_15m = []
-    session_mode = "Live Intraday"
     api_debug = ""
 
     # Build URLs safely with "/".join() so slashes never disappear on copy-paste
