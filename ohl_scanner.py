@@ -84,66 +84,75 @@ for item in FNO_RAW.split():
         ALL_FNO_STOCKS[f"NSE:{sym}"] = f"NSE_EQ|{isin}"
 
 # ==========================================
-# 2. FETCH CANDLES (LIVE OR LAST TRADING DAY)
-# ==========================================
-# ==========================================
-# 2. FETCH CANDLES (V3 + V2 FALLBACK + DIAGNOSTICS)
+# 2. FETCH CANDLES (INTRADAY -> 15M HIST -> DAILY FALLBACK)
 # ==========================================
 def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     encoded_key = inst_key.replace("|", "%7C")
-    
-    # Use IST date (UTC + 5:30) so server timezone never shifts the date
+
     ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     to_date = ist_now.strftime("%Y-%m-%d")
-    from_date = (ist_now - timedelta(days=30)).strftime("%Y-%m-%d")
+    from_date = (ist_now - timedelta(days=35)).strftime("%Y-%m-%d")
 
     candles = []
+    hist_15m = []
     session_mode = "Live Intraday"
-    debug_err = ""
+    api_debug = ""
 
-    # 1. Try V3 Intraday 15m
+    # Step 1: Try Live Intraday 15m (V3)
     try:
-        r_intra = requests.get(f"{BASE_URL}/intraday/{encoded_key}/minutes/15", headers=headers, timeout=8)
-        if r_intra.status_code == 401:
+        r1 = requests.get(f"https://upstox.com{encoded_key}/minutes/15", headers=headers, timeout=8)
+        if r1.status_code == 401:
             return {"error": "401"}
-        if r_intra.status_code == 200:
-            candles = r_intra.json().get("data", {}).get("candles", [])
-    except Exception as e:
-        debug_err = str(e)
-
-    # 2. Fetch V3 Historical 15m (with automatic V2 fallback)
-    hist_candles = []
-    try:
-        r_hist = requests.get(f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}", headers=headers, timeout=10)
-        if r_hist.status_code == 401:
-            return {"error": "401"}
-        if r_hist.status_code == 200:
-            hist_candles = r_hist.json().get("data", {}).get("candles", [])
+        if r1.status_code == 200:
+            candles = r1.json().get("data", {}).get("candles", [])
         else:
-            # Fallback to Upstox V2 Historical endpoint
-            v2_url = f"https://upstox.com{encoded_key}/15minute/{to_date}/{from_date}"
-            r_v2 = requests.get(v2_url, headers=headers, timeout=10)
-            if r_v2.status_code == 200:
-                hist_candles = r_v2.json().get("data", {}).get("candles", [])
-            else:
-                debug_err = f"HTTP {r_hist.status_code}: {r_hist.text[:120]}"
+            api_debug = f"Intra HTTP {r1.status_code}: {r1.text}"
     except Exception as e:
-        debug_err = str(e)
+        api_debug = f"Intra Err: {e}"
 
-    # 3. If market closed/holiday (intraday empty), extract Last Trading Day from historical candles
-    if not candles:
-        if not hist_candles:
-            return {"debug_err": debug_err} if debug_err else None
-        session_mode = "Last Trading Day"
-        latest_ts, *_ = next(iter(hist_candles))
+    # Step 2: Try Historical 15m (V3, then V2)
+    try:
+        r2 = requests.get(f"https://upstox.com{encoded_key}/minutes/15/{to_date}/{from_date}", headers=headers, timeout=10)
+        if r2.status_code == 401:
+            return {"error": "401"}
+        if r2.status_code == 200:
+            hist_15m = r2.json().get("data", {}).get("candles", [])
+        else:
+            r2_v2 = requests.get(f"https://upstox.com{encoded_key}/15minute/{to_date}/{from_date}", headers=headers, timeout=10)
+            if r2_v2.status_code == 200:
+                hist_15m = r2_v2.json().get("data", {}).get("candles", [])
+            else:
+                api_debug = f"Hist15m HTTP {r2.status_code}/{r2_v2.status_code}: {r2.text}"
+    except Exception as e:
+        api_debug = f"Hist15m Err: {e}"
+
+    # Step 3: If Live Intraday is empty, extract Last Trading Day from Historical 15m
+    if not candles and hist_15m:
+        session_mode = "Last Trading Day (15m)"
+        latest_ts, *_ = next(iter(hist_15m))
         latest_date_str = str(latest_ts).split("T").pop(0)
-        candles = [c for c in hist_candles if str(next(iter(c))).startswith(latest_date_str)]
+        candles = [c for c in hist_15m if str(next(iter(c))).startswith(latest_date_str)]
+
+    # Step 4: Ultimate Fallback — Daily Candle (V2/V3) if 15m archive is delayed after market close
+    if not candles:
+        try:
+            r_day = requests.get(f"https://upstox.com{encoded_key}/day/{to_date}/{from_date}", headers=headers, timeout=10)
+            if r_day.status_code == 200:
+                day_candles = r_day.json().get("data", {}).get("candles", [])
+                if day_candles:
+                    session_mode = "Last Trading Day (EOD)"
+                    candles = [next(iter(day_candles))]
+                    if not hist_15m:
+                        hist_15m = day_candles
+            else:
+                api_debug = f"Day HTTP {r_day.status_code}: {r_day.text}"
+        except Exception as e:
+            api_debug = f"Day Err: {e}"
 
     if not candles:
-        return None
+        return {"api_debug": api_debug}
 
-    # Sort chronologically (09:15 AM first, 03:15 PM last)
     candles = sorted(candles, key=lambda x: str(next(iter(x))))
     first_c = next(iter(candles))
     last_c = candles.pop()
@@ -159,9 +168,8 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     if not (is_ol or is_oh):
         return {"session_mode": session_mode, "session_date": session_date, "matched": False}
 
-    # 20-period average 15m volume
     past_vols = []
-    for idx_v, item in enumerate(hist_candles):
+    for idx_v, item in enumerate(hist_15m):
         if 1 <= idx_v <= 20:
             _, _, _, _, _, item_v, _ = item
             past_vols.append(float(item_v))
@@ -228,8 +236,9 @@ with col3:
 
 progress = st.progress(0)
 results = []
-detected_mode = "Checking..."
+detected_mode = ""
 detected_date = ""
+last_api_debug = ""
 unauthorized = False
 
 with ThreadPoolExecutor(max_workers=20) as executor:
@@ -244,14 +253,13 @@ with ThreadPoolExecutor(max_workers=20) as executor:
             if res.get("error") == "401":
                 unauthorized = True
                 break
-            if res.get("debug_err"):
-                last_api_error = res["debug_err"]
+            if res.get("api_debug"):
+                last_api_debug = res["api_debug"]
             if res.get("session_date"):
                 detected_mode = res["session_mode"]
                 detected_date = res["session_date"]
             if res.get("matched"):
                 results.append(res["row"])
-
 
 progress.empty()
 
@@ -260,7 +268,9 @@ if unauthorized:
     st.stop()
 
 if detected_date:
-    status_placeholder.info(f"📅 **Session:** {detected_mode} ({detected_date})")
+    status_placeholder.success(f"📅 **Session:** {detected_mode} ({detected_date})")
+elif last_api_debug:
+    status_placeholder.error(f"⚠️ Upstox Response: {last_api_debug}")
 
 if results:
     df = pd.DataFrame(results)
