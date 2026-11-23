@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import io
+import re
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -27,64 +28,56 @@ status_filter = st.sidebar.multiselect(
 BASE_URL = "https://upstox.com"
 INSTRUMENTS_CSV_URL = "https://upstox.com"
 
-BACKUP_FNO_STOCKS = {
-    "NSE:RELIANCE": "NSE_EQ|INE002A01018",
-    "NSE:HDFCBANK": "NSE_EQ|INE040A01034",
-    "NSE:ICICIBANK": "NSE_EQ|INE090A01021",
-    "NSE:INFY": "NSE_EQ|INE009A01021",
-    "NSE:TCS": "NSE_EQ|INE467B01029",
-    "NSE:SBIN": "NSE_EQ|INE062A01020",
-    "NSE:BHARTIARTL": "NSE_EQ|INE397D01024",
-    "NSE:AXISBANK": "NSE_EQ|INE238A01034",
-    "NSE:KOTAKBANK": "NSE_EQ|INE237A01028",
-    "NSE:LT": "NSE_EQ|INE018A01030",
-    "NSE:ITC": "NSE_EQ|INE154A01025",
-    "NSE:BAJFINANCE": "NSE_EQ|INE296A01024",
-    "NSE:MARUTI": "NSE_EQ|INE585B01010",
-    "NSE:SUNPHARMA": "NSE_EQ|INE044A01036",
-    "NSE:TITAN": "NSE_EQ|INE280A01028",
-    "NSE:TATAMOTORS": "NSE_EQ|INE155A01022",
-    "NSE:TATASTEEL": "NSE_EQ|INE081A01020",
-    "NSE:NTPC": "NSE_EQ|INE733E01010",
-    "NSE:POWERGRID": "NSE_EQ|INE752E01010",
-    "NSE:VEDL": "NSE_EQ|INE205A01025",
-    "NSE:HINDALCO": "NSE_EQ|INE038A01020",
-    "NSE:ADANIENT": "NSE_EQ|INE423A01024",
-    "NSE:WIPRO": "NSE_EQ|INE075A01022",
-    "NSE:HCLTECH": "NSE_EQ|INE860A01027",
-    "NSE:TECHM": "NSE_EQ|INE669C01036"
-}
-
 # ==========================================
-# 2. AUTO-FETCH ALL NSE F&O STOCKS
+# 2. AUTO-FETCH ALL NSE F&O STOCKS (FIXED)
 # ==========================================
 @st.cache_data(ttl=86400)
-def get_all_fno_stocks() -> dict:
+def get_all_fno_stocks() -> tuple:
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(INSTRUMENTS_CSV_URL, headers=headers, timeout=20)
-        if resp.status_code == 200 and resp.content.startswith(b"\x1f\x8b"):
-            df_inst = pd.read_csv(io.BytesIO(resp.content), compression="gzip")
-            fo_df = df_inst[df_inst["exchange"] == "NSE_FO"]
-            if "underlying_symbol" in fo_df.columns:
-                fno_symbols = set(fo_df["underlying_symbol"].dropna().astype(str).str.strip())
-            else:
-                extracted = fo_df["tradingsymbol"].dropna().astype(str).str.extract(r"^([A-Z&-]+)", expand=False)
-                fno_symbols = set(extracted.dropna())
+        resp = requests.get(INSTRUMENTS_CSV_URL, headers=headers, timeout=25)
+        resp.raise_for_status()
+        df_inst = pd.read_csv(io.BytesIO(resp.content), compression="gzip", low_memory=False)
+        
+        # Normalize column names to lowercase
+        df_inst.columns = [c.strip().lower() for c in df_inst.columns]
+        
+        # Identify segment/exchange column
+        seg_col = "segment" if "segment" in df_inst.columns else "exchange"
+        sym_col = "tradingsymbol" if "tradingsymbol" in df_inst.columns else "trading_symbol"
+        
+        # 1. Extract all underlying stock symbols from NSE_FO
+        fo_df = df_inst[df_inst[seg_col].astype(str).str.contains("NSE_FO", na=False)]
+        fno_symbols = set()
+        
+        if "underlying_symbol" in fo_df.columns:
+            fno_symbols.update(fo_df["underlying_symbol"].dropna().astype(str).str.strip())
+            
+        # Also parse root symbol from tradingsymbol (e.g., RELIANCE26NOVFUT -> RELIANCE)
+        for ts in fo_df[sym_col].dropna().astype(str):
+            m = re.match(r"^([A-Z&-]+?)(?:\d{2}|\s)", ts.strip())
+            if m:
+                fno_symbols.add(m.group(1))
+                
+        # Remove index symbols so only stocks remain
+        index_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX"}
+        fno_symbols = fno_symbols - index_names
 
-            eq_df = df_inst[(df_inst["exchange"] == "NSE_EQ") & (df_inst["instrument_type"] == "EQUITY")]
-            fno_eq_map = {}
-            for _, row in eq_df.iterrows():
-                sym = str(row["tradingsymbol"]).strip()
-                if sym in fno_symbols:
-                    fno_eq_map[f"NSE:{sym}"] = str(row["instrument_key"]).strip()
+        # 2. Map those F&O symbols to their NSE_EQ Equity instrument_key
+        eq_df = df_inst[
+            (df_inst[seg_col].astype(str) == "NSE_EQ") &
+            (df_inst["instrument_type"].astype(str).isin(["EQ", "EQUITY"]))
+        ]
+        
+        fno_eq_map = {}
+        for _, row in eq_df.iterrows():
+            sym = str(row[sym_col]).strip()
+            if sym in fno_symbols:
+                fno_eq_map[f"NSE:{sym}"] = str(row["instrument_key"]).strip()
 
-            if len(fno_eq_map) > 50:
-                return dict(sorted(fno_eq_map.items()))
-    except Exception:
-        pass
-
-    return BACKUP_FNO_STOCKS
+        return dict(sorted(fno_eq_map.items())), "OK"
+    except Exception as e:
+        return {}, str(e)
 
 # ==========================================
 # 3. FETCH CANDLES (LIVE OR LAST TRADING DAY)
@@ -107,7 +100,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     except Exception:
         pass
 
-    # Step B: Fetch Historical 15m Candles
+    # Step B: Fetch Historical 15m Candles (Last 35 days)
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     hist_url = f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}"
@@ -155,10 +148,10 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
 
     # 20-period average 15m volume
     past_vols = []
-    for item in hist_candles:
-        _, _, _, _, _, item_v, _ = item
-        past_vols.append(float(item_v))
-    past_vols = past_vols[1:21]
+    for idx_v, item in enumerate(hist_candles):
+        if 1 <= idx_v <= 20:
+            _, _, _, _, _, item_v, _ = item
+            past_vols.append(float(item_v))
 
     avg_vol = (sum(past_vols) / len(past_vols)) if past_vols else 0.0
     v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
@@ -211,11 +204,16 @@ if not access_token:
     st.info("👈 Paste your daily Upstox Access Token in the left sidebar to scan all NSE F&O stocks.")
     st.stop()
 
-fno_stocks = get_all_fno_stocks()
+fno_stocks, load_status = get_all_fno_stocks()
+
+if not fno_stocks:
+    st.error(f"Could not load F&O master list from Upstox: {load_status}")
+    st.stop()
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.button("🔄 Refresh Scan")
+    if st.button("🔄 Refresh Scan"):
+        st.cache_data.clear()
 with col2:
     st.metric("F&O Stocks Loaded", len(fno_stocks))
 with col3:
@@ -227,7 +225,7 @@ detected_mode = "Checking..."
 detected_date = ""
 unauthorized = False
 
-with ThreadPoolExecutor(max_workers=15) as executor:
+with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {
         executor.submit(scan_single_stock, sym, key, access_token, tolerance_pct): sym
         for sym, key in fno_stocks.items()
