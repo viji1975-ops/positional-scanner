@@ -86,23 +86,33 @@ for item in FNO_RAW.split():
 # ==========================================
 # 2. FETCH CANDLES (LIVE OR LAST TRADING DAY)
 # ==========================================
+# ==========================================
+# 2. FETCH CANDLES (V3 + V2 FALLBACK + DIAGNOSTICS)
+# ==========================================
 def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     encoded_key = inst_key.replace("|", "%7C")
+    
+    # Use IST date (UTC + 5:30) so server timezone never shifts the date
+    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    to_date = ist_now.strftime("%Y-%m-%d")
+    from_date = (ist_now - timedelta(days=30)).strftime("%Y-%m-%d")
+
     candles = []
     session_mode = "Live Intraday"
+    debug_err = ""
 
+    # 1. Try V3 Intraday 15m
     try:
         r_intra = requests.get(f"{BASE_URL}/intraday/{encoded_key}/minutes/15", headers=headers, timeout=8)
         if r_intra.status_code == 401:
             return {"error": "401"}
         if r_intra.status_code == 200:
             candles = r_intra.json().get("data", {}).get("candles", [])
-    except Exception:
-        pass
+    except Exception as e:
+        debug_err = str(e)
 
-    to_date = datetime.now().strftime("%Y-%m-%d")
-    from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
+    # 2. Fetch V3 Historical 15m (with automatic V2 fallback)
     hist_candles = []
     try:
         r_hist = requests.get(f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}", headers=headers, timeout=10)
@@ -110,12 +120,21 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
             return {"error": "401"}
         if r_hist.status_code == 200:
             hist_candles = r_hist.json().get("data", {}).get("candles", [])
-    except Exception:
-        pass
+        else:
+            # Fallback to Upstox V2 Historical endpoint
+            v2_url = f"https://upstox.com{encoded_key}/15minute/{to_date}/{from_date}"
+            r_v2 = requests.get(v2_url, headers=headers, timeout=10)
+            if r_v2.status_code == 200:
+                hist_candles = r_v2.json().get("data", {}).get("candles", [])
+            else:
+                debug_err = f"HTTP {r_hist.status_code}: {r_hist.text[:120]}"
+    except Exception as e:
+        debug_err = str(e)
 
+    # 3. If market closed/holiday (intraday empty), extract Last Trading Day from historical candles
     if not candles:
         if not hist_candles:
-            return None
+            return {"debug_err": debug_err} if debug_err else None
         session_mode = "Last Trading Day"
         latest_ts, *_ = next(iter(hist_candles))
         latest_date_str = str(latest_ts).split("T").pop(0)
@@ -124,7 +143,8 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     if not candles:
         return None
 
-    candles = list(reversed(candles))
+    # Sort chronologically (09:15 AM first, 03:15 PM last)
+    candles = sorted(candles, key=lambda x: str(next(iter(x))))
     first_c = next(iter(candles))
     last_c = candles.pop()
 
@@ -135,10 +155,17 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
 
     is_ol = (abs(o - l) <= o * tol) and (h > o)
     is_oh = (abs(o - h) <= o * tol) and (l < o)
-    if not (is_ol or is_oh):
-        return None
 
-    past_vols = [float(item[5]) for idx_v, item in enumerate(hist_candles) if 1 <= idx_v <= 20]
+    if not (is_ol or is_oh):
+        return {"session_mode": session_mode, "session_date": session_date, "matched": False}
+
+    # 20-period average 15m volume
+    past_vols = []
+    for idx_v, item in enumerate(hist_candles):
+        if 1 <= idx_v <= 20:
+            _, _, _, _, _, item_v, _ = item
+            past_vols.append(float(item_v))
+
     avg_vol = (sum(past_vols) / len(past_vols)) if past_vols else 0.0
     v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
     power = "🔥 Ultra" if v_mult > 3.0 else ("⚡ Strong" if v_mult > 1.5 else "⚠️ Weak")
@@ -167,6 +194,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     return {
         "session_mode": session_mode,
         "session_date": session_date,
+        "matched": True,
         "row": {
             "Symbol": symbol,
             "Pattern": pattern,
@@ -216,9 +244,14 @@ with ThreadPoolExecutor(max_workers=20) as executor:
             if res.get("error") == "401":
                 unauthorized = True
                 break
-            detected_mode = res["session_mode"]
-            detected_date = res["session_date"]
-            results.append(res["row"])
+            if res.get("debug_err"):
+                last_api_error = res["debug_err"]
+            if res.get("session_date"):
+                detected_mode = res["session_mode"]
+                detected_date = res["session_date"]
+            if res.get("matched"):
+                results.append(res["row"])
+
 
 progress.empty()
 
