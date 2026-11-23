@@ -1,8 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-import gzip
-import json
+import io
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -26,40 +25,70 @@ status_filter = st.sidebar.multiselect(
 )
 
 BASE_URL = "https://upstox.com"
-INSTRUMENTS_URL = "https://upstox.com"
+INSTRUMENTS_CSV_URL = "https://upstox.com"
+
+# Backup Top F&O Stocks if Upstox CDN blocks cloud IP
+BACKUP_FNO_STOCKS = {
+    "NSE:RELIANCE": "NSE_EQ|INE002A01018",
+    "NSE:HDFCBANK": "NSE_EQ|INE040A01034",
+    "NSE:ICICIBANK": "NSE_EQ|INE090A01021",
+    "NSE:INFY": "NSE_EQ|INE009A01021",
+    "NSE:TCS": "NSE_EQ|INE467B01029",
+    "NSE:SBIN": "NSE_EQ|INE062A01020",
+    "NSE:BHARTIARTL": "NSE_EQ|INE397D01024",
+    "NSE:AXISBANK": "NSE_EQ|INE238A01034",
+    "NSE:KOTAKBANK": "NSE_EQ|INE237A01028",
+    "NSE:LT": "NSE_EQ|INE018A01030",
+    "NSE:ITC": "NSE_EQ|INE154A01025",
+    "NSE:BAJFINANCE": "NSE_EQ|INE296A01024",
+    "NSE:MARUTI": "NSE_EQ|INE585B01010",
+    "NSE:SUNPHARMA": "NSE_EQ|INE044A01036",
+    "NSE:TITAN": "NSE_EQ|INE280A01028",
+    "NSE:TATAMOTORS": "NSE_EQ|INE155A01022",
+    "NSE:TATASTEEL": "NSE_EQ|INE081A01020",
+    "NSE:NTPC": "NSE_EQ|INE733E01010",
+    "NSE:POWERGRID": "NSE_EQ|INE752E01010",
+    "NSE:VEDL": "NSE_EQ|INE205A01025",
+    "NSE:HINDALCO": "NSE_EQ|INE038A01020",
+    "NSE:ADANIENT": "NSE_EQ|INE423A01024",
+    "NSE:WIPRO": "NSE_EQ|INE075A01022",
+    "NSE:HCLTECH": "NSE_EQ|INE860A01027",
+    "NSE:TECHM": "NSE_EQ|INE669C01036"
+}
 
 # ==========================================
 # 2. AUTO-FETCH ALL NSE F&O STOCKS
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_fno_stocks() -> dict:
-    """Downloads Upstox NSE instrument master and maps all F&O underlying stocks to NSE_EQ keys."""
+    """Downloads Upstox NSE CSV instrument master and maps all F&O underlying stocks to NSE_EQ keys."""
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(INSTRUMENTS_URL, timeout=20)
-        resp.raise_for_status()
-        decompressed = gzip.decompress(resp.content)
-        instruments = json.loads(decompressed.decode("utf-8"))
+        resp = requests.get(INSTRUMENTS_CSV_URL, headers=headers, timeout=20)
+        if resp.status_code == 200 and resp.content[:2] == b"\x1f\x8b":
+            df_inst = pd.read_csv(io.BytesIO(resp.content), compression="gzip")
+            
+            # Filter NSE_FO for underlying symbols (or extract root symbol before digits)
+            fo_df = df_inst[df_inst["exchange"] == "NSE_FO"]
+            if "underlying_symbol" in fo_df.columns:
+                fno_symbols = set(fo_df["underlying_symbol"].dropna().astype(str).str.strip())
+            else:
+                fno_symbols = set(fo_df["tradingsymbol"].dropna().astype(str).str.extract(r"^([A-Z&-]+)"))
 
-        # Find all unique underlying symbols present in NSE_FO (Futures & Options)
-        fno_underlyings = set()
-        for item in instruments:
-            if item.get("segment") == "NSE_FO" and item.get("instrument_type") in ("FUT", "CE", "PE"):
-                underlying = item.get("underlying_symbol") or item.get("name")
-                if underlying:
-                    fno_underlyings.add(underlying.strip())
+            # Match against NSE_EQ equity rows
+            eq_df = df_inst[(df_inst["exchange"] == "NSE_EQ") & (df_inst["instrument_type"] == "EQUITY")]
+            fno_eq_map = {}
+            for _, row in eq_df.iterrows():
+                sym = str(row["tradingsymbol"]).strip()
+                if sym in fno_symbols:
+                    fno_eq_map[f"NSE:{sym}"] = str(row["instrument_key"]).strip()
 
-        # Map those underlying symbols to their Equity (NSE_EQ) instrument_key
-        fno_eq_map = {}
-        for item in instruments:
-            if item.get("segment") == "NSE_EQ" and item.get("instrument_type") == "EQ":
-                sym = item.get("trading_symbol", "").strip()
-                if sym in fno_underlyings:
-                    fno_eq_map[f"NSE:{sym}"] = item.get("instrument_key")
+            if len(fno_eq_map) > 50:
+                return dict(sorted(fno_eq_map.items()))
+    except Exception:
+        pass
 
-        return dict(sorted(fno_eq_map.items()))
-    except Exception as e:
-        st.error(f"Failed to fetch NSE F&O instrument list: {e}")
-        return {}
+    return BACKUP_FNO_STOCKS
 
 # ==========================================
 # 3. FETCH CANDLES (LIVE OR LAST TRADING DAY)
@@ -82,7 +111,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     except Exception:
         pass
 
-    # Step B: If market closed / intraday empty, fallback to Historical 15m Candles (Last 7 days)
+    # Step B: Fetch Historical 15m Candles (for 20-period vol + Last Trading Day fallback)
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     hist_url = f"{BASE_URL}/{encoded_key}/minutes/15/{to_date}/{from_date}"
@@ -102,18 +131,17 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
         if not hist_candles:
             return None
         session_mode = "Last Trading Day"
-        # Extract the most recent trading date from the latest historical candle timestamp
-        latest_date_str = hist_candles[:10]  # e.g., "2026-11-23"
-        candles = [c for c in hist_candles if c.startswith(latest_date_str)]
+        latest_date_str = str(hist_candles[:10])
+        candles = [c for c in hist_candles if str(c).startswith(latest_date_str)]
 
     if not candles:
         return None
 
-    # Upstox returns newest candle first; reverse so index 0 is 09:15 AM
+    # Reverse so index 0 is 09:15 AM candle
     candles = list(reversed(candles))
-    session_date = candles[:10]
+    session_date = str(candles[:10])
 
-    # First 15-min candle (09:15 - 09:30 AM)
+    # Upstox candle format: [0:ts, 1:open, 2:high, 3:low, 4:close, 5:volume, 6:oi]
     first_c = candles
     o = float(first_c)
     h = float(first_c)
@@ -127,7 +155,7 @@ def scan_single_stock(symbol: str, inst_key: str, token: str, tol: float):
     if not (is_ol or is_oh):
         return None
 
-    # Compute 20-period average 15m volume from historical candles (excluding today's first candle)
+    # 20-period average 15m volume
     past_vols = [float(x) for x in hist_candles[1:21]] if len(hist_candles) > 1 else []
     avg_vol = (sum(past_vols) / len(past_vols)) if past_vols else 0.0
     v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
@@ -181,15 +209,12 @@ if not access_token:
     st.stop()
 
 fno_stocks = get_all_fno_stocks()
-if not fno_stocks:
-    st.warning("Could not load F&O stock list. Click Refresh to retry.")
-    st.stop()
 
-col1, col2, col3 = st.columns([1, 2, 2])
+col1, col2, col3 = st.columns()
 with col1:
     st.button("🔄 Refresh Scan")
 with col2:
-    st.metric("Total F&O Stocks Scanned", len(fno_stocks))
+    st.metric("F&O Stocks Loaded", len(fno_stocks))
 with col3:
     status_placeholder = st.empty()
 
@@ -199,7 +224,6 @@ detected_mode = "Checking..."
 detected_date = ""
 unauthorized = False
 
-# Parallel execution (15 workers) scans ~200 F&O stocks in ~4 seconds
 with ThreadPoolExecutor(max_workers=15) as executor:
     futures = {
         executor.submit(scan_single_stock, sym, key, access_token, tolerance_pct): sym
@@ -230,16 +254,13 @@ if detected_date:
 
 if results:
     df = pd.DataFrame(results)
-    # Apply Sidebar Filters
     df = df[df["Pattern"].isin(pattern_filter) & df["Status"].isin(status_filter)]
-    # Sort highest volume multiplier on top
     df = df.sort_values(by="Vol Mult", ascending=False).reset_index(drop=True)
     df["Volume"] = df["Vol Mult"].apply(lambda x: f"{x:.2f}x")
     df = df.drop(columns=["Vol Mult"])
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # CSV Download Button
     csv_data = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="📥 Download F&O Scanner Results (CSV)",
