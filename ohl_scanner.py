@@ -1,24 +1,17 @@
-import os
-import time
-from datetime import datetime, timedelta
+import streamlit as st
 import requests
 import pandas as pd
-from rich.console import Console
-from rich.table import Table
+from datetime import datetime, timedelta
+
+st.set_page_config(page_title="NSE OHL Ultimate Scanner Pro", layout="wide")
 
 # ==========================================
-# 1. CONFIGURATION & WATCHLIST
+# 1. SIDEBAR CONFIGURATION
 # ==========================================
-# Reads token from GitHub Secrets / Environment Variable, or fallback to string
-ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN", "PASTE_YOUR_DAILY_TOKEN_HERE")
+st.sidebar.header("🔑 Upstox Configuration")
+access_token = st.sidebar.text_input("Daily Upstox Access Token", type="password")
+tolerance_pct = st.sidebar.number_input("OHL Tolerance (%)", min_value=0.0, max_value=1.0, value=0.0, step=0.05) / 100
 
-HEADERS = {
-    "Accept": "application/json",
-    "Authorization": f"Bearer {ACCESS_TOKEN}"
-}
-
-# Expandable Watchlist (Symbol: Upstox Instrument Key)
-# You can download the full NSE instrument JSON from Upstox to add 100+ stocks
 WATCHLIST = {
     "NSE:RELIANCE":  "NSE_EQ|INE002A01018",
     "NSE:HDFCBANK":  "NSE_EQ|INE040A01034",
@@ -32,23 +25,18 @@ WATCHLIST = {
     "NSE:BHARTIARTL":"NSE_EQ|INE397D01024",
 }
 
-# Tolerance for Open==Low / Open==High (0.0 for strict match like Pine Script)
-TOLERANCE_PCT = 0.00  
-
-console = Console()
-
 # ==========================================
-# 2. DATA FETCHING FUNCTIONS (UPSTOX V3/V2)
+# 2. CACHED API FUNCTIONS
 # ==========================================
-def get_20d_avg_15m_volume(instrument_key: str) -> float:
-    """Fetches past 30 days of 15-min candles to compute 20-period SMA volume."""
+@st.cache_data(ttl=3600)
+def get_20d_avg_15m_volume(instrument_key: str, token: str) -> float:
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     encoded_key = instrument_key.replace("|", "%7C")
     
-    url = f"https://api.upstox.com/v3/historical-candle/{encoded_key}/minutes/15/{to_date}/{from_date}"
-    resp = requests.get(url, headers=HEADERS, timeout=10)
-    
+    url = f"https://upstox.com{encoded_key}/minutes/15/{to_date}/{from_date}"
+    resp = requests.get(url, headers=headers, timeout=10)
     if resp.status_code != 200:
         return 0.0
         
@@ -56,157 +44,105 @@ def get_20d_avg_15m_volume(instrument_key: str) -> float:
     if not candles:
         return 0.0
         
-    # Upstox candle format: [timestamp, open, high, low, close, volume, oi]
     df = pd.DataFrame(candles, columns=["ts", "o", "h", "l", "c", "v", "oi"])
-    # Take last 20 completed 15-min candles
     return float(df["v"].head(20).mean())
 
-def get_intraday_candles(instrument_key: str):
-    """Fetches today's 15-minute intraday candles."""
+def get_intraday_candles(instrument_key: str, token: str):
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     encoded_key = instrument_key.replace("|", "%7C")
-    url = f"https://api.upstox.com/v3/historical-candle/intraday/{encoded_key}/minutes/15"
-    resp = requests.get(url, headers=HEADERS, timeout=10)
-    
+    url = f"https://upstox.comintraday/{encoded_key}/minutes/15"
+    resp = requests.get(url, headers=headers, timeout=10)
     if resp.status_code != 200:
-        return None
+        return None, resp.status_code
         
     candles = resp.json().get("data", {}).get("candles", [])
     if not candles:
-        return None
+        return None, 200
         
-    # Upstox returns newest candle first; reverse so index 0 is 09:15 AM
-    candles.reverse()
-    return candles
+    candles.reverse()  # Index 0 becomes 09:15 AM candle
+    return candles, 200
 
 # ==========================================
-# 3. CORE SCANNER ENGINE (PINE SCRIPT LOGIC)
+# 3. DASHBOARD UI & SCANNER LOGIC
 # ==========================================
-def run_scanner():
-    console.clear()
-    console.print(f"[bold cyan]NSE OHL Ultimate Scanner Pro[/bold cyan] | Last Updated: {datetime.now().strftime('%H:%M:%S IST')}\n")
+st.title("📊 NSE OHL Ultimate Scanner Pro")
+
+if not access_token:
+    st.info("👈 Paste your daily Upstox Access Token in the left sidebar to run the scanner.")
+    st.stop()
+
+col1, col2 = st.columns([1, 4])
+with col1:
+    st.button("🔄 Refresh Now")
+with col2:
+    st.caption(f"Last Checked: {datetime.now().strftime('%H:%M:%S')} (Server Time)")
+
+rows = []
+progress = st.progress(0)
+total = len(WATCHLIST)
+
+for idx, (symbol, inst_key) in enumerate(WATCHLIST.items()):
+    progress.progress((idx + 1) / total)
+    candles, status_code = get_intraday_candles(inst_key, access_token)
     
-    table = Table(show_header=True, header_style="bold white on grey23")
-    table.add_column("Symbol", style="bold white")
-    table.add_column("Pattern")
-    table.add_column("Status")
-    table.add_column("Normal Tgt (1:1 | 1:2)", style="cyan")
-    table.add_column("Rev Target")
-    table.add_column("Stop Loss", style="red")
-    table.add_column("Volume", justify="right")
-    table.add_column("Power", justify="center")
+    if status_code == 401:
+        st.error("❌ Unauthorized: Your Upstox daily token is invalid or expired.")
+        st.stop()
+    if not candles:
+        continue
 
-    results_for_csv = []
+    # Upstox candle format: [0:ts, 1:open, 2:high, 3:low, 4:close, 5:volume, 6:oi]
+    first_candle = candles[0]
+    o, h, l, v = float(first_candle[1]), float(first_candle[2]), float(first_candle[3]), float(first_candle[5])
+    c = float(candles[-1][4])
 
-    for symbol, inst_key in WATCHLIST.items():
-        candles = get_intraday_candles(inst_key)
-        if not candles:
-            continue
+    is_ol = (abs(o - l) <= o * tolerance_pct) and (h > o)
+    is_oh = (abs(o - h) <= o * tolerance_pct) and (l < o)
 
-        # First 15-min candle of the day (09:15 AM - 09:30 AM)
-        first_candle = candles[0]
-        o = float(first_candle[1])
-        h = float(first_candle[2])
-        l = float(first_candle[3])
-        v = float(first_candle[5])
-        
-        # Latest closing price from most recent candle
-        c = float(candles[-1][4])
+    if not (is_ol or is_oh):
+        continue
 
-        # OHL Pattern Detection
-        is_ol = (abs(o - l) <= o * TOLERANCE_PCT) and (h > o)
-        is_oh = (abs(o - h) <= o * TOLERANCE_PCT) and (l < o)
+    avg_vol = get_20d_avg_15m_volume(inst_key, access_token)
+    v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
+    power = "🔥 Ultra" if v_mult > 3.0 else ("⚡ Strong" if v_mult > 1.5 else "⚠️ Weak")
 
-        if not (is_ol or is_oh):
-            continue
+    candle_range = h - l
+    status = "Active"
+    rev_tgt = "N/A"
 
-        # Volume Multiplier & Power Rating
-        avg_vol = get_20d_avg_15m_volume(inst_key)
-        v_mult = (v / avg_vol) if avg_vol > 0 else 1.0
-
-        if v_mult > 3.0:
-            power_txt = "[bold white on purple] 🔥 Ultra [/bold white on purple]"
-            power_raw = "Ultra"
-        elif v_mult > 1.5:
-            power_txt = "[bold white on blue] ⚡ Strong [/bold white on blue]"
-            power_raw = "Strong"
-        else:
-            power_txt = "[bold black on yellow] ⚠️ Weak [/bold black on yellow]"
-            power_raw = "Weak"
-
-        candle_range = h - l
-        status_txt = "[green]Active[/green]"
-        status_raw = "Active"
-        rev_tgt_txt = "[grey50]N/A[/grey50]"
-        rev_raw = "N/A"
-
-        if is_ol:
-            pat_txt = "[green]Open=Low[/green]"
-            pat_raw = "Open=Low"
-            t1 = o + candle_range
-            t2 = o + (2.0 * candle_range)
-            sl = l
-            norm_tgt = f"{t1:.1f} | {t2:.1f}"
-
-            if c < o:
-                rev_val = o - (2.0 * candle_range)
-                status_txt = "[magenta]Breached ❌[/magenta]"
-                status_raw = "Breached"
-                rev_tgt_txt = f"[magenta]{rev_val:.1f}[/magenta]"
-                rev_raw = f"{rev_val:.1f}"
-                sl = h  # Reversal stop loss
-
-        elif is_oh:
-            pat_txt = "[red]Open=High[/red]"
-            pat_raw = "Open=High"
-            t1 = o - candle_range
-            t2 = o - (2.0 * candle_range)
+    if is_ol:
+        pattern = "Open=Low"
+        t1, t2 = o + candle_range, o + (2.0 * candle_range)
+        sl = l
+        if c < o:
+            status = "Breached ❌"
+            rev_tgt = f"{o - (2.0 * candle_range):.1f}"
             sl = h
-            norm_tgt = f"{t1:.1f} | {t2:.1f}"
+    else:
+        pattern = "Open=High"
+        t1, t2 = o - candle_range, o - (2.0 * candle_range)
+        sl = h
+        if c > o:
+            status = "Breached ❌"
+            rev_tgt = f"{o + (2.0 * candle_range):.1f}"
+            sl = l
 
-            if c > o:
-                rev_val = o + (2.0 * candle_range)
-                status_txt = "[orange1]Breached ❌[/orange1]"
-                status_raw = "Breached"
-                rev_tgt_txt = f"[orange1]{rev_val:.1f}[/orange1]"
-                rev_raw = f"{rev_val:.1f}"
-                sl = l  # Reversal stop loss
+    rows.append({
+        "Symbol": symbol,
+        "Pattern": pattern,
+        "Status": status,
+        "LTP": round(c, 2),
+        "Normal Tgt (1:1 | 1:2)": f"{t1:.1f} | {t2:.1f}",
+        "Rev Target": rev_tgt,
+        "Stop Loss": round(sl, 1),
+        "Volume": f"{v_mult:.2f}x",
+        "Power": power
+    })
 
-        table.add_row(
-            symbol,
-            pat_txt,
-            status_txt,
-            norm_tgt,
-            rev_tgt_txt,
-            f"{sl:.1f}",
-            f"{v_mult:.2f}x",
-            power_txt
-        )
+progress.empty()
 
-        results_for_csv.append({
-            "Time": datetime.now().strftime("%H:%M:%S"),
-            "Symbol": symbol,
-            "Pattern": pat_raw,
-            "Status": status_raw,
-            "LTP": c,
-            "Targets_1_2": norm_tgt,
-            "Rev_Target": rev_raw,
-            "Stop_Loss": round(sl, 1),
-            "Vol_Mult": round(v_mult, 2),
-            "Power": power_raw
-        })
-
-    console.print(table)
-    
-    if results_for_csv:
-        filename = f"ohl_signals_{datetime.now().strftime('%Y-%m-%d')}.csv"
-        pd.DataFrame(results_for_csv).to_csv(filename, index=False)
-        console.print(f"\n[dim]Saved snapshot to {filename}[/dim]")
-
-if __name__ == "__main__":
-    # Runs every 60 seconds during market hours
-    while True:
-        try:
-            run_scanner()
-        except Exception as e:
-            console.print(f"[red]Error: {e}[/red]")
-        time.sleep(60)
+if rows:
+    df_results = pd.DataFrame(rows)
+    st.dataframe(df_results, use_container_width=True, hide_index=True)
+else:
+    st.warning("No Open=High or Open=Low setups matched right now (or market intraday data is empty).")
