@@ -244,7 +244,6 @@ def scan_all_fno():
         st.error(err)
         return pd.DataFrame(), "", total_fno
 
-    # Map quotes by instrument_token ('NSE_EQ|INE...')
     quotes_by_token = {}
     if quotes:
         for q_data in quotes.values():
@@ -259,7 +258,6 @@ def scan_all_fno():
     results = []
     source_note = "Live / Last Session Quote (Exact Match)"
 
-    # Primary Path: Batch Quotes API
     if has_live_open:
         candidates = []
         for key, symbol in fno_dict.items():
@@ -289,10 +287,9 @@ def scan_all_fno():
                 return None
             return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
 
-                with ThreadPoolExecutor(max_workers=6) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
 
-    # Fallback Path: Historical Daily Candle (if pre-open reset has open == 0)
     else:
         session_dates = []
         def scan_via_candle(kv):
@@ -312,9 +309,9 @@ def scan_all_fno():
             is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
 
             if is_open_high and "Open=Low Only" in pattern_filter:
-                return None
+                continue
             if is_open_low and "Open=High Only" in pattern_filter:
-                return None
+                continue
 
             if is_open_high or is_open_low:
                 return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
