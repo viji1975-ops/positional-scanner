@@ -113,7 +113,7 @@ def get_historical_stats(instrument_key, token):
         return None
 
     df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "volume", "oi"])
-    df = df.iloc[::-1].reset_index(drop=True)  # Oldest to newest
+    df = df.iloc[::-1].reset_index(drop=True)
 
     df["prev_close"] = df["close"].shift(1)
     df["tr"] = df[["high", "prev_close"]].max(axis=1) - df[["low", "prev_close"]].min(axis=1)
@@ -226,6 +226,38 @@ def is_exact_ohol(open_p, high_p, low_p):
         return False, False
     return (o == h), (o == l)
 
+def enrich_from_quote(item):
+    key, symbol, open_p, ltp, curr_vol, is_open_high = item
+    stats = get_historical_stats(key, ACCESS_TOKEN)
+    if not stats:
+        return None
+    return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
+
+def scan_via_candle(kv):
+    key, symbol = kv
+    stats = get_historical_stats(key, ACCESS_TOKEN)
+    if not stats:
+        return None, None
+    lc = stats["last_candle"]
+    candle_date = str(lc["time"])[:10]
+
+    open_p = lc["open"]
+    high_p = lc["high"]
+    low_p = lc["low"]
+    ltp = lc["close"]
+    curr_vol = lc["volume"]
+
+    is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
+
+    if is_open_high and "Open=Low Only" in pattern_filter:
+        return None, candle_date
+    if is_open_low and "Open=High Only" in pattern_filter:
+        return None, candle_date
+
+    if is_open_high or is_open_low:
+        return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats), candle_date
+    return None, candle_date
+
 def scan_all_fno():
     if not ACCESS_TOKEN:
         st.warning("👈 Please paste your daily Upstox Access Token in the left sidebar to start scanning.")
@@ -280,46 +312,15 @@ def scan_all_fno():
             if is_open_high or is_open_low:
                 candidates.append((key, symbol, open_p, ltp, curr_vol, is_open_high))
 
-        def enrich_from_quote(item):
-            key, symbol, open_p, ltp, curr_vol, is_open_high = item
-            stats = get_historical_stats(key, ACCESS_TOKEN)
-            if not stats:
-                return None
-            return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
-
         with ThreadPoolExecutor(max_workers=6) as executor:
             results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
 
     else:
-        session_dates = []
-        def scan_via_candle(kv):
-            key, symbol = kv
-            stats = get_historical_stats(key, ACCESS_TOKEN)
-            if not stats:
-                return None
-            lc = stats["last_candle"]
-            session_dates.append(str(lc["time"])[:10])
-
-            open_p = lc["open"]
-            high_p = lc["high"]
-            low_p = lc["low"]
-            ltp = lc["close"]
-            curr_vol = lc["volume"]
-
-            is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
-
-            if is_open_high and "Open=Low Only" in pattern_filter:
-                continue
-            if is_open_low and "Open=High Only" in pattern_filter:
-                continue
-
-            if is_open_high or is_open_low:
-                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
-            return None
-
         with ThreadPoolExecutor(max_workers=8) as executor:
-            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
+            candle_outputs = list(executor.map(scan_via_candle, list(fno_dict.items())))
 
+        session_dates = [d for _, d in candle_outputs if d is not None]
+        results = [r for r, _ in candle_outputs if r is not None]
         last_date = max(session_dates) if session_dates else "Last Trading Day"
         source_note = f"Last Trading Session ({last_date} — Exact Match)"
 
