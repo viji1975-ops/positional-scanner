@@ -472,49 +472,167 @@ def style_scanner_table(df):
     )
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_fyers_5m_range(sym, days_back, auth_token):
-    """Fetches up to 60 days of 5-minute intraday candles from Fyers API v3."""
+def fetch_fyers_5m_day(sym, target_date_str, auth_token):
+    """Fetches 5-minute intraday candles for a specific historical date from Fyers API v3."""
     url = "https://" + "api-t1." + "fyers.in" + "/data/history"
     headers = {
         "Authorization": auth_token,
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0"
     }
-    to_dt = datetime.now()
-    from_dt = to_dt - timedelta(days=days_back)
+    dt_obj = datetime.strptime(target_date_str, "%Y-%m-%d")
+    start_epoch = int(dt_obj.timestamp()) - 86400
+    end_epoch = int(dt_obj.timestamp()) + 86400
+
     params = {
         "symbol": f"NSE:{sym}-EQ",
         "resolution": "5",
         "date_format": "0",
-        "range_from": str(int(from_dt.timestamp())),
-        "range_to": str(int(to_dt.timestamp())),
+        "range_from": str(start_epoch),
+        "range_to": str(end_epoch),
         "cont_flag": "1"
     }
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=12)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         payload = res.json()
         candles = payload.get("candles", [])
-        if payload.get("s") == "ok" and len(candles) > 50:
+        if payload.get("s") == "ok" and candles:
             df = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
-            df["dt"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
-            df["date"] = df["dt"].dt.strftime("%Y-%m-%d")
-            return df
+            df["date_str"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d")
+            day_df = df[df["date_str"] == target_date_str].reset_index(drop=True)
+            if not day_df.empty:
+                return day_df
     except Exception:
         pass
     return None
 
-def run_ohol_backtest(symbols_list, days_back, orb_minutes, target_rr, auth_token):
-    """Simulates Open=High/Low + ORB intraday trades across historical 5m candles."""
-    trades = []
+def run_date_replay(symbols_list, replay_date_str, orb_minutes, auth_token):
+    """Replays a historical date and outputs the exact Live Scanner table + intraday outcome."""
+    lot_map = get_fyers_lot_sizes()
     candles_for_orb = 1 if orb_minutes == 5 else 3
-    progress_bar = st.progress(0, text="Running Fyers historical backtest...")
+    rows = []
+    progress = st.progress(0, text=f"Replaying {replay_date_str} across {len(symbols_list)} F&O stocks...")
 
     for idx, sym in enumerate(symbols_list):
-        progress_bar.progress((idx + 1) / len(symbols_list), text=f"Backtesting {sym} ({idx+1}/{len(symbols_list)})...")
-        time.sleep(0.12)  # Stay safely within Fyers API rate limits
-        df = fetch_fyers_5m_range(sym, days_back, auth_token)
-        if df is None or df.empty:
+        progress.progress((idx + 1) / len(symbols_list), text=f"Scanning {sym} ({idx+1}/{len(symbols_list)})...")
+        time.sleep(0.08)
+
+        # Fetch daily candles up to replay_date_str to get exact OHLC, prior ATR-14, AvgVol-20, PDH/PDL
+        url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+        headers = {"Authorization": auth_token, "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+        end_dt = datetime.strptime(replay_date_str, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=45)
+        params = {
+            "symbol": f"NSE:{sym}-EQ",
+            "resolution": "D",
+            "date_format": "1",
+            "range_from": start_dt.strftime("%Y-%m-%d"),
+            "range_to": replay_date_str,
+            "cont_flag": "1"
+        }
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            payload = res.json()
+            candles = payload.get("candles", [])
+            if payload.get("s") != "ok" or len(candles) < 15:
+                continue
+
+            df_d = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
+            df_d["date_str"] = pd.to_datetime(df_d["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d")
+            df_d = df_d[df_d["date_str"] <= replay_date_str].reset_index(drop=True)
+            if len(df_d) < 15 or df_d["date_str"].iloc[-1] != replay_date_str:
+                continue
+
+            last_r = df_d.iloc[-1]
+            prev_r = df_d.iloc[-2]
+            open_p = float(last_r["open"])
+            high_p = float(last_r["high"])
+            low_p = float(last_r["low"])
+            close_p = float(last_r["close"])
+            curr_vol = float(last_r["volume"])
+
+            is_oh, is_ol = is_exact_ohol(open_p, high_p, low_p)
+            if not (is_oh or is_ol):
+                continue
+
+            # Prior 14-day ATR and 20-day Avg Volume (strictly before replay_date_str)
+            hist_prior = df_d.iloc[:-1].copy()
+            hist_prior["prev_close"] = hist_prior["close"].shift(1)
+            hist_prior["tr"] = hist_prior[["high", "prev_close"]].max(axis=1) - hist_prior[["low", "prev_close"]].min(axis=1)
+            atr_14 = round(float(hist_prior["tr"].tail(14).mean()), 2)
+            avg_vol_20 = float(hist_prior["volume"].tail(20).mean())
+            pdh, pdl = float(prev_r["high"]), float(prev_r["low"])
+
+            # Fetch 5m intraday candles for replay_date_str to evaluate ORB & Target Hit/SL
+            day_5m = fetch_fyers_5m_day(sym, replay_date_str, auth_token)
+            orb_ok = False
+            orb_text = "⏳ Pending ORB"
+            outcome = "Closed In-Range"
+
+            risk_unit = atr_14 * 0.5
+            t1 = round(open_p - risk_unit, 1) if is_oh else round(open_p + risk_unit, 1)
+            t2 = round(open_p - risk_unit * 2, 1) if is_oh else round(open_p + risk_unit * 2, 1)
+
+            if day_5m is not None and len(day_5m) >= candles_for_orb:
+                orb_slice = day_5m.iloc[:candles_for_orb]
+                orb_h = float(orb_slice["high"].max())
+                orb_l = float(orb_slice["low"].min())
+                after_orb = day_5m.iloc[candles_for_orb:]
+
+                if is_oh:
+                    broke_orb = (after_orb["low"] < orb_l).any() if not after_orb.empty else False
+                    orb_ok = bool(broke_orb)
+                    orb_text = f"✅ {orb_minutes}m Broken (<{orb_l:.1f})" if orb_ok else f"⏳ Inside (>{orb_l:.1f})"
+                    if low_p <= t2:
+                        outcome = "🎯 1:2 Target Hit"
+                    elif low_p <= t1:
+                        outcome = "✅ 1:1 Target Hit"
+                    elif close_p < open_p:
+                        outcome = "🟢 Closed in Profit"
+                    else:
+                        outcome = "🔴 Closed at Open"
+                else:
+                    broke_orb = (after_orb["high"] > orb_h).any() if not after_orb.empty else False
+                    orb_ok = bool(broke_orb)
+                    orb_text = f"✅ {orb_minutes}m Breakout (>{orb_h:.1f})" if orb_ok else f"⏳ Inside (<{orb_h:.1f})"
+                    if high_p >= t2:
+                        outcome = "🎯 1:2 Target Hit"
+                    elif high_p >= t1:
+                        outcome = "✅ 1:1 Target Hit"
+                    elif close_p > open_p:
+                        outcome = "🟢 Closed in Profit"
+                    else:
+                        outcome = "🔴 Closed at Open"
+
+            vol_ratio = round(curr_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 0
+            power, p_rank = ("🔥 Ultra", 3) if vol_ratio >= 4.0 else (("⚡ Strong", 2) if vol_ratio >= 2.0 else ("Normal", 1))
+            lvl_tag = "Above PDH 🟢" if close_p > pdh else ("Below PDL 🔴" if close_p < pdl else "Inside Prev Day")
+
+            rows.append({
+                "Symbol": f"NSE:{sym}",
+                "Pattern": f"Open=High ({open_p:.2f})" if is_oh else f"Open=Low ({open_p:.2f})",
+                "ORB Confirm": orb_text,
+                "Day Outcome": outcome,
+                "Close (₹)": f"{close_p:.2f}",
+                "ATM | 1-ITM Option": get_option_strikes(open_p, is_oh),
+                "Lot Size": lot_map.get(sym) or DEFAULT_LOT_SIZES.get(sym, 0),
+                "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
+                "PDH/PDL": lvl_tag,
+                "Volume": f"{vol_ratio}x",
+                "Power": power,
+                "_orb_ok": orb_ok,
+                "_vol_ratio": vol_ratio,
+                "_power_rank": p_rank
+            })
+        except Exception:
             continue
+
+    progress.empty()
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_orb_ok", "_power_rank", "_vol_ratio"], ascending=[False, False, False])
+        df_out = df_out.drop(columns=["_orb_ok", "_vol_ratio", "_power_rank"])
+    return df_out
 
         # Build daily ATR-14 from grouped 5m bars
         daily = df.groupby("date").agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last")).reset_index()
@@ -640,42 +758,46 @@ with tab_live:
         st.info("No F&O stocks matched your current filters right now.")
 
 with tab_bt:
-    st.markdown("Test how **Exact Open=High / Open=Low + ORB** performed over past trading days using **Fyers 5-Min Historical Data**.")
-    b1, b2, b3, b4 = st.columns(4)
+    st.markdown("Select any past NSE trading date to replay the exact **Open=High / Open=Low + ORB** scanner and see which targets hit.")
+    b1, b2, b3 = st.columns(3)
     with b1:
-        bt_universe = st.selectbox("Stock Universe", ("Top 30 Liquid F&O (Fast ~6s)", "All 148 F&O Stocks (~25s)"))
+        default_past_day = datetime.now().date() - timedelta(days=1)
+        selected_date = st.date_input("Select Historical Trading Date", value=default_past_day, max_value=datetime.now().date())
     with b2:
-        bt_days = st.selectbox("Lookback Period", (15, 30, 60), index=1, format_func=lambda d: f"Last {d} Calendar Days")
+        bt_universe = st.selectbox("Stock Universe", ("All 148 F&O Stocks (~15s)", "Top 40 Liquid F&O (Fast ~5s)"))
     with b3:
         bt_orb = st.selectbox("ORB Confirmation", (5, 15), format_func=lambda m: f"{m}-Min ORB")
-    with b4:
-        bt_rr = st.selectbox("Target Multiple", (1.0, 1.5, 2.0), format_func=lambda r: f"1:{r} ATR Target")
 
-    if st.button("▶️ Run Fyers Backtest", type="primary"):
+    if st.button("▶️ Replay Selected Date", type="primary"):
         if not FYERS_TOKEN:
             st.warning("⚠️ Please log in to Fyers in the left sidebar first.")
         else:
-            test_syms = sorted(set(FNO_SYMBOLS))[:30] if "Top 30" in bt_universe else sorted(set(FNO_SYMBOLS))
-            df_bt = run_ohol_backtest(test_syms, bt_days, bt_orb, bt_rr, FYERS_TOKEN)
+            date_str = selected_date.strftime("%Y-%m-%d")
+            test_syms = sorted(set(FNO_SYMBOLS)) if "All 148" in bt_universe else sorted(set(FNO_SYMBOLS))[:40]
+            df_replay = run_date_replay(test_syms, date_str, bt_orb, FYERS_TOKEN)
 
-            if df_bt.empty:
-                st.info("No triggered trades found in this period.")
+            if df_replay.empty:
+                st.info(f"No exact Open=High or Open=Low matches found on **{date_str}** (check if {date_str} was a weekend or NSE holiday).")
             else:
-                df_bt = df_bt.sort_values(by=["Date", "Entry Time"], ascending=[False, True])
-                wins = (df_bt["Return (%)"] > 0).sum()
-                total_t = len(df_bt)
-                win_rate = round((wins / total_t) * 100, 1)
-                avg_ret = round(df_bt["Return (%)"].mean(), 2)
-                net_ret = round(df_bt["Return (%)"].sum(), 2)
+                bull_c = df_replay["Pattern"].str.contains("Open=Low").sum()
+                bear_c = df_replay["Pattern"].str.contains("Open=High").sum()
+                orb_c = df_replay["ORB Confirm"].str.contains("✅").sum()
+                tgt_c = df_replay["Day Outcome"].str.contains("Target Hit").sum()
 
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Total Triggered Trades", total_t)
-                k2.metric("Win Rate (%)", f"{win_rate}%")
-                k3.metric("Avg Return / Trade", f"{avg_ret}%")
-                k4.metric("Cumulative Return (Unleveraged)", f"{net_ret}%")
+                k1.metric("Total Exact Matches", len(df_replay))
+                k2.metric("🟢 Open=Low | 🔴 Open=High", f"{int(bull_c)} | {int(bear_c)}")
+                k3.metric("✅ ORB Confirmed", int(orb_c))
+                k4.metric("🎯 ATR Targets Hit", int(tgt_c))
 
-                st.dataframe(df_bt, use_container_width=True, hide_index=True, height=500)
+                styled_replay = (
+                    df_replay.style
+                    .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Profit" in str(v) else "color: #ff5252;", subset=["Day Outcome"])
+                    .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+                    .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+                    .map(lambda v: "background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else ""), subset=["Power"])
+                )
+                st.dataframe(styled_replay, use_container_width=True, hide_index=True, height=560)
 
-if auto_refresh and FYERS_TOKEN:
-    time.sleep(60)
-    st.rerun()
