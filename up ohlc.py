@@ -1,6 +1,7 @@
 import os
 import gzip
 import json
+import time
 import requests
 import pandas as pd
 import streamlit as st
@@ -9,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Upstox F&O OHOL Scanner", layout="wide")
 
-# --- Sidebar: Token & Scanner Filters ---
+# --- Sidebar: Token & Scanner Controls ---
 st.sidebar.header("🔑 Upstox API Settings")
 default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
 
@@ -32,96 +33,177 @@ else:
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Scanner Filters")
-pattern_filter = st.sidebar.selectbox("Show Patterns", ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"])
-tolerance_pct = st.sidebar.slider("Open=High/Low Tolerance (%)", min_value=0.00, max_value=0.15, value=0.02, step=0.01, help="0.00% = exact match; 0.02% allows minor 1-tick noise.")
-
-import time  # Add this import at the top with your other imports
+pattern_filter = st.sidebar.selectbox(
+    "Show Patterns",
+    ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
+)
+tolerance_pct = st.sidebar.slider(
+    "Open=High/Low Tolerance (%)",
+    min_value=0.00,
+    max_value=0.15,
+    value=0.02,
+    step=0.01,
+    help="0.00% = exact match; 0.02% allows minor 1-tick opening noise."
+)
+auto_refresh = st.sidebar.checkbox("🔄 Auto-Refresh Every 60s", value=False)
 
 HEADERS = {
     "Accept": "application/json",
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Api-Version": "2.0",
+    "Authorization": f"Bearer {ACCESS_TOKEN}"
 }
 
 @st.cache_data(ttl=43200)
 def get_all_fno_stocks():
     """Downloads Upstox NSE instrument master and extracts all unique F&O equity underlyings."""
-    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+    url = "https://upstox.com"
     res = requests.get(url, timeout=20)
     res.raise_for_status()
-    
+
     raw_data = gzip.decompress(res.content).decode("utf-8")
     instruments = json.loads(raw_data)
-    
+
     fno_equities = {}
     for item in instruments:
         if item.get("segment") == "NSE_FO":
             u_key = item.get("underlying_key", "")
             u_sym = item.get("underlying_symbol", "")
             u_type = item.get("underlying_type", "")
-            # Keep only NSE Equity stocks (excludes NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY)
             if u_key.startswith("NSE_EQ|") and u_type == "EQUITY" and u_sym:
                 fno_equities[u_key] = f"NSE:{u_sym}"
-                
+
     return dict(sorted(fno_equities.items(), key=lambda x: x[1]))
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=900)
 def get_historical_stats(instrument_key, token):
-    """Fetches daily candles to compute 14-day ATR, 20-day Avg Vol, and latest completed candle."""
+    """Fetches daily candles to compute 14-day ATR, 20-day Avg Vol, PDH/PDL, and latest candle."""
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
-    
+
     url = f"https://upstox.com{instrument_key.strip()}/day/{to_date}/{from_date}"
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    
+    headers = {
+        "Accept": "application/json",
+        "Api-Version": "2.0",
+        "Authorization": f"Bearer {token}"
+    }
+
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200 or not res.text.strip():
-            return None, None, None
-        candles = res.json().get("data", {}).get("candles", [])
+        if res.status_code != 200:
+            return None
+        payload = res.json()
+        candles = payload.get("data", {}).get("candles", [])
     except Exception:
-        return None, None, None
-    
+        return None
+
     if len(candles) < 15:
-        return None, None, None
+        return None
 
     df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "volume", "oi"])
-    df = df.iloc[::-1].reset_index(drop=True)
+    df = df.iloc[::-1].reset_index(drop=True)  # Oldest to newest
 
     df["prev_close"] = df["close"].shift(1)
     df["tr"] = df[["high", "prev_close"]].max(axis=1) - df[["low", "prev_close"]].min(axis=1)
     atr_14 = round(df["tr"].tail(14).mean(), 2)
     avg_vol_20 = df["volume"].tail(20).mean()
+
     last_candle = df.iloc[-1].to_dict()
-    
-    return atr_14, avg_vol_20, last_candle
+    prev_candle = df.iloc[-2].to_dict()
+
+    return {
+        "atr": atr_14,
+        "avg_vol": avg_vol_20,
+        "last_candle": last_candle,
+        "pdh": prev_candle["high"],
+        "pdl": prev_candle["low"]
+    }
 
 def fetch_batched_quotes(instrument_keys):
-    """Fetches live/last-session quotes in batches of 50 with CloudFront-safe headers."""
-    url = "https://upstox.com"
+    """Fetches quotes in batches of 50 with safe JSON parsing."""
+    url = "https://api.upstox.com/v2/market-quote/quotes"
     all_quotes = {}
     batch_size = 50
 
     for i in range(0, len(instrument_keys), batch_size):
         batch = instrument_keys[i:i + batch_size]
         params = {"instrument_key": ",".join(batch)}
-        res = requests.get(url, headers=HEADERS, params=params, timeout=15)
-        
+        try:
+            res = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        except requests.RequestException as e:
+            return None, f"Network error: {e}"
+
         if res.status_code == 401:
             return None, "🔒 Token Expired or Invalid (HTTP 401). Please generate a fresh Upstox token and paste it in the sidebar."
-        elif res.status_code == 403:
-            return None, "🛡️ Blocked by Upstox Firewall (HTTP 403). Try refreshing in 10 seconds or check your token."
-        elif res.status_code != 200 or not res.text.strip():
-            return None, f"Upstox API Error (HTTP {res.status_code}): {res.text[:250]}"
-            
-        data = res.json()
+        if res.status_code != 200:
+            return None, f"HTTP {res.status_code}"
+
+        try:
+            data = res.json()
+        except Exception:
+            # Non-JSON response (e.g., CloudFront HTML page) -> trigger historical fallback
+            return None, "NON_JSON"
+
         if data.get("status") != "success":
-            return None, f"Upstox API Error: {data}"
-            
+            return None, f"API Error: {data}"
+
         all_quotes.update(data.get("data", {}))
         time.sleep(0.15)
-        
+
     return all_quotes, None
+
+def build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats):
+    """Builds a formatted result row with ATR targets, Volume Power, and PDH/PDL status."""
+    atr = stats["atr"]
+    avg_vol = stats["avg_vol"]
+    pdh = stats["pdh"]
+    pdl = stats["pdl"]
+
+    risk_unit = atr * 0.5
+    vol_ratio = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 0
+
+    if vol_ratio >= 4.0:
+        power = "🔥 Ultra"
+        power_rank = 3
+    elif vol_ratio >= 2.0:
+        power = "⚡ Strong"
+        power_rank = 2
+    else:
+        power = "Normal"
+        power_rank = 1
+
+    if ltp > pdh:
+        level_tag = "Above PDH 🟢"
+    elif ltp < pdl:
+        level_tag = "Below PDL 🔴"
+    else:
+        level_tag = "Inside Prev Day"
+
+    if is_open_high:
+        pattern = f"Open=High ({open_p:.2f})"
+        status = "Active" if ltp <= open_p else "Reversed"
+        t1 = round(open_p - risk_unit, 1)
+        t2 = round(open_p - (risk_unit * 2), 1)
+        rev_tgt = str(round(open_p + risk_unit, 1)) if status == "Reversed" else "N/A"
+    else:
+        pattern = f"Open=Low ({open_p:.2f})"
+        status = "Active" if ltp >= open_p else "Reversed"
+        t1 = round(open_p + risk_unit, 1)
+        t2 = round(open_p + (risk_unit * 2), 1)
+        rev_tgt = str(round(open_p - risk_unit, 1)) if status == "Reversed" else "N/A"
+
+    return {
+        "Symbol": symbol,
+        "Pattern": pattern,
+        "Status": status,
+        "Price (₹)": f"{ltp:.2f}",
+        "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
+        "Rev Target": rev_tgt,
+        "PDH/PDL": level_tag,
+        "Volume": f"{vol_ratio}x",
+        "Power": power,
+        "_vol_ratio": vol_ratio,
+        "_power_rank": power_rank
+    }
 
 def scan_all_fno():
     if not ACCESS_TOKEN:
@@ -135,113 +217,99 @@ def scan_all_fno():
         return pd.DataFrame(), "", 0
 
     total_fno = len(fno_dict)
+    tol_multiplier = tolerance_pct / 100.0
     quotes, err = fetch_batched_quotes(list(fno_dict.keys()))
-    if err:
+
+    if err and "401" in err:
         st.error(err)
         return pd.DataFrame(), "", total_fno
 
-    candidates = []
-    data_source_note = "Live / Last Session Quote"
-    tol_multiplier = tolerance_pct / 100.0
-
-    # Stage 1: Filter all F&O quotes for Open=High or Open=Low
-    for key, symbol in fno_dict.items():
-        resp_key = key.replace("|", ":")
-        data = quotes.get(resp_key, {})
-        ohlc = data.get("ohlc", {})
-
-        open_p = ohlc.get("open", 0)
-        high_p = ohlc.get("high", 0)
-        low_p = ohlc.get("low", 0)
-        ltp = data.get("last_price", 0)
-        curr_vol = data.get("volume", 0)
-
-        if open_p == 0:
-            continue
-
-        tolerance = open_p * tol_multiplier
-        is_open_high = abs(open_p - high_p) <= tolerance
-        is_open_low = abs(open_p - low_p) <= tolerance
-
-        # Avoid flagging flat/illiquid stocks where Open == High == Low
-        if is_open_high and is_open_low:
-            continue
-
-        if is_open_high and "Open=Low Only" in pattern_filter:
-            continue
-        if is_open_low and "Open=High Only" in pattern_filter:
-            continue
-
-        if is_open_high or is_open_low:
-            candidates.append({
-                "key": key,
-                "symbol": symbol,
-                "open": open_p,
-                "ltp": ltp,
-                "vol": curr_vol,
-                "is_open_high": is_open_high
-            })
-
-    # Stage 2: Fetch ATR & 20-Day Avg Volume in parallel ONLY for matched candidates
     results = []
-    def enrich_candidate(item):
-        atr, avg_vol, _ = get_historical_stats(item["key"], ACCESS_TOKEN)
-        if not atr or not avg_vol:
+    source_note = "Live / Last Session Quote"
+
+    # Primary Path: Fast Live Quotes API
+    if quotes:
+        candidates = []
+        for key, symbol in fno_dict.items():
+            resp_key = key.replace("|", ":")
+            data = quotes.get(resp_key, {})
+            ohlc = data.get("ohlc", {})
+
+            open_p = ohlc.get("open", 0)
+            high_p = ohlc.get("high", 0)
+            low_p = ohlc.get("low", 0)
+            ltp = data.get("last_price", 0)
+            curr_vol = data.get("volume", 0)
+
+            if open_p == 0:
+                continue
+
+            tolerance = open_p * tol_multiplier
+            is_open_high = abs(open_p - high_p) <= tolerance
+            is_open_low = abs(open_p - low_p) <= tolerance
+
+            if is_open_high and is_open_low:
+                continue
+            if is_open_high and "Open=Low Only" in pattern_filter:
+                continue
+            if is_open_low and "Open=High Only" in pattern_filter:
+                continue
+
+            if is_open_high or is_open_low:
+                candidates.append((key, symbol, open_p, ltp, curr_vol, is_open_high))
+
+        def enrich_from_quote(item):
+            key, symbol, open_p, ltp, curr_vol, is_open_high = item
+            stats = get_historical_stats(key, ACCESS_TOKEN)
+            if not stats:
+                return None
+            return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
+
+    # Fallback Path: If Quote API returned empty/non-JSON or open==0 (pre-open/weekend)
+    if not results and (err is not None or not quotes):
+        source_note = "Last Completed Session (Historical Daily Candle)"
+        def scan_via_candle(kv):
+            key, symbol = kv
+            stats = get_historical_stats(key, ACCESS_TOKEN)
+            if not stats:
+                return None
+            lc = stats["last_candle"]
+            open_p = lc["open"]
+            high_p = lc["high"]
+            low_p = lc["low"]
+            ltp = lc["close"]
+            curr_vol = lc["volume"]
+
+            if open_p == 0:
+                return None
+
+            tolerance = open_p * tol_multiplier
+            is_open_high = abs(open_p - high_p) <= tolerance
+            is_open_low = abs(open_p - low_p) <= tolerance
+
+            if is_open_high and is_open_low:
+                return None
+            if is_open_high and "Open=Low Only" in pattern_filter:
+                return None
+            if is_open_low and "Open=High Only" in pattern_filter:
+                return None
+
+            if is_open_high or is_open_low:
+                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
             return None
 
-        open_p = item["open"]
-        ltp = item["ltp"]
-        risk_unit = atr * 0.5
-        vol_ratio = round(item["vol"] / avg_vol, 2) if avg_vol > 0 else 0
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
 
-        if vol_ratio >= 4.0:
-            power = "🔥 Ultra"
-            power_rank = 3
-        elif vol_ratio >= 2.0:
-            power = "⚡ Strong"
-            power_rank = 2
-        else:
-            power = "Normal"
-            power_rank = 1
-
-        if item["is_open_high"]:
-            pattern = f"Open=High ({open_p:.2f})"
-            status = "Active" if ltp <= open_p else "Reversed"
-            t1 = round(open_p - risk_unit, 1)
-            t2 = round(open_p - (risk_unit * 2), 1)
-            rev_tgt = str(round(open_p + risk_unit, 1)) if status == "Reversed" else "N/A"
-        else:
-            pattern = f"Open=Low ({open_p:.2f})"
-            status = "Active" if ltp >= open_p else "Reversed"
-            t1 = round(open_p + risk_unit, 1)
-            t2 = round(open_p + (risk_unit * 2), 1)
-            rev_tgt = str(round(open_p - risk_unit, 1)) if status == "Reversed" else "N/A"
-
-        return {
-            "Symbol": item["symbol"],
-            "Pattern": pattern,
-            "Status": status,
-            "Price (₹)": f"{ltp:.2f}",
-            "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
-            "Rev Target": rev_tgt,
-            "Volume": f"{vol_ratio}x",
-            "Power": power,
-            "_vol_ratio": vol_ratio,
-            "_power_rank": power_rank
-        }
-
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        enriched = list(executor.map(enrich_candidate, candidates))
-
-    results = [r for r in enriched if r is not None]
     df_out = pd.DataFrame(results)
-
     if not df_out.empty:
-        # Sort highest volume momentum setups to the top
         df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
         df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
 
-    return df_out, data_source_note, total_fno
+    return df_out, source_note, total_fno
 
 def style_scanner_table(df):
     def highlight_pattern(val):
@@ -284,5 +352,8 @@ if total_fno > 0:
 if not df_results.empty:
     st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
 elif ACCESS_TOKEN:
-    st.info("No F&O stocks matched Open=High or Open=Low right now (if it is 9:00–9:15 AM IST pre-open, check again at 9:16 AM IST).")
+    st.info("No F&O stocks matched Open=High or Open=Low with the current tolerance. Try increasing the Tolerance slider in the sidebar.")
 
+if auto_refresh and ACCESS_TOKEN:
+    time.sleep(60)
+    st.rerun()
