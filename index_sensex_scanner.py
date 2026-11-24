@@ -124,34 +124,43 @@ def is_exact_ohol(open_p, high_p, low_p):
     return (o == h), (o == l)
 
 @st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_index_option_masters():
-    """Fetches current NSE & BSE index lot sizes and nearest-expiry option contracts."""
+    """Fetches current NSE & BSE index lot sizes and nearest-expiry option contracts safely."""
     idx_lots = {k: v["lot"] for k, v in INDEX_CONFIG.items()}
     csv_to_idx = {v["csv_sym"]: k for k, v in INDEX_CONFIG.items()}
     opt_raw = {}
-    now_epoch = int(time.time()) - 3600
+    now_epoch = int(time.time()) - 86400
 
     for csv_url in ("https://fyers.in", "https://fyers.in"):
         try:
-            res = requests.get(csv_url, timeout=15)
+            res = requests.get(csv_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
             if res.status_code != 200:
                 continue
             for line in res.text.splitlines():
-                if ",OPTIDX," not in line:
+                if "OPTIDX" not in line:
                     continue
-                cols = line.split(",")
+                cols = [c.strip() for c in line.split(",")]
                 if len(cols) < 17:
                     continue
-                lot_val = int(float(cols.__getitem__(3).strip()))
-                expiry_ts = int(float(cols.__getitem__(8).strip()))
-                fyers_sym = cols.__getitem__(9).strip()
-                u_sym = cols.__getitem__(13).strip()
-                strike = round(float(cols.__getitem__(15).strip()), 2)
-                opt_type = cols.__getitem__(16).strip()
 
-                if u_sym in csv_to_idx and lot_val > 0:
+                fyers_sym = next((c for c in cols if (c.startswith("NSE:") or c.startswith("BSE:")) and (c.endswith("CE") or c.endswith("PE"))), "")
+                u_sym = next((c for c in cols if c in csv_to_idx), "")
+                opt_type = "CE" if fyers_sym.endswith("CE") else ("PE" if fyers_sym.endswith("PE") else "")
+
+                if not (fyers_sym and u_sym and opt_type):
+                    continue
+
+                try:
+                    lot_val = int(float(cols.__getitem__(3)))
+                    expiry_ts = int(float(cols.__getitem__(8)))
+                    strike = round(float(cols.__getitem__(15)), 2)
+                except Exception:
+                    continue
+
+                if lot_val > 0:
                     idx_lots[csv_to_idx[u_sym]] = lot_val
-                if u_sym in csv_to_idx and expiry_ts >= now_epoch and opt_type in ("CE", "PE"):
+                if expiry_ts >= now_epoch and strike > 0:
                     opt_raw.setdefault(u_sym, []).append((expiry_ts, strike, opt_type, fyers_sym))
         except Exception:
             continue
