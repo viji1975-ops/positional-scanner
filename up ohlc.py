@@ -45,21 +45,35 @@ if redirected_input and FYERS_APP_ID and FYERS_SECRET_ID:
     auth_code = redirected_input
     if "auth_code=" in redirected_input:
         parsed = parse_qs(urlparse(redirected_input).query)
-        auth_code = parsed.get("auth_code", [""])[0]
+        auth_code = parsed.get("auth_code", [""])
 
     if auth_code and st.session_state.get("last_used_auth_code") != auth_code:
         app_id_hash = hashlib.sha256(f"{FYERS_APP_ID}:{FYERS_SECRET_ID}".encode()).hexdigest()
-        res = requests.post(
-            "https://fyers.in",
-            json={"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code},
-            timeout=10
-        ).json()
-        if res.get("s") == "ok" and res.get("access_token"):
-            st.session_state["fyers_jwt_token"] = res["access_token"]
-            st.session_state["last_used_auth_code"] = auth_code
-            st.sidebar.success("✅ Daily Fyers JWT Token Generated!")
-        else:
-            st.sidebar.error(f"Token Error: {res.get('message', res)}")
+        validate_url = "https://" + "api-t1." + "fyers.in" + "/api/v3/validate-authcode"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        try:
+            resp = requests.post(
+                validate_url,
+                headers=headers,
+                json={"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code},
+                timeout=12
+            )
+            if resp.status_code != 200 or not resp.text.strip():
+                st.sidebar.error(f"Fyers Auth Error (HTTP {resp.status_code}): Click Step 1 again for a fresh auth_code (expires in 60s) & check Secret ID.")
+            else:
+                res = resp.json()
+                if res.get("s") == "ok" and res.get("access_token"):
+                    st.session_state["fyers_jwt_token"] = res["access_token"]
+                    st.session_state["last_used_auth_code"] = auth_code
+                    st.sidebar.success("✅ Daily Fyers JWT Token Generated!")
+                else:
+                    st.sidebar.error(f"Token Error: {res.get('message', res)}")
+        except Exception as e:
+            st.sidebar.error(f"Connection Error: {e}")
 
 # Optional manual paste box if you already have the eyJ... token
 manual_jwt = st.sidebar.text_input("Or Paste JWT Token Directly (eyJ...)", value="", type="password").strip()
