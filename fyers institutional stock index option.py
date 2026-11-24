@@ -1009,12 +1009,155 @@ def style_scanner_table(df):
         .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
         .map(lambda v: "background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else ""), subset=["Power"])
     )
+import zipfile
+import io
+
+def parse_udiff_bhavcopies(uploaded_files, filter_sensex_only=False):
+    """Reads multiple NSE or BSE UDiFF F&O Bhavcopy (.csv or .zip) files into a unified DataFrame."""
+    frames = []
+    allowed_nse = set(FNO_SYMBOLS) | {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+
+    for f in uploaded_files:
+        try:
+            raw_bytes = f.read()
+            if f.name.lower().endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                    csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                    if not csv_names:
+                        continue
+                    df = pd.read_csv(zf.open(csv_names.__getitem__(0)), low_memory=False)
+            else:
+                df = pd.read_csv(io.BytesIO(raw_bytes), low_memory=False)
+
+            df.columns = [c.strip() for c in df.columns]
+            if "TckrSymb" not in df.columns or "TradDt" not in df.columns:
+                continue
+
+            df["TckrSymb"] = df["TckrSymb"].astype(str).str.strip().str.upper()
+            if filter_sensex_only:
+                df = df[df["TckrSymb"] == "SENSEX"]
+            else:
+                df = df[df["TckrSymb"].isin(allowed_nse)]
+
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+def analyze_institutional_activity(df_bhav):
+    """Detects abnormal Futures OI buildup, Long/Short positioning, and Option Writing Walls on the latest Bhavcopy date."""
+    if df_bhav.empty:
+        return pd.DataFrame()
+
+    num_cols = ("OpnPric", "HghPric", "LwPric", "ClsPric", "OpnIntrst", "ChngInOpnIntrst", "TtlTradgVol", "StrkPric")
+    for col in num_cols:
+        if col in df_bhav.columns:
+            df_bhav[col] = pd.to_numeric(df_bhav[col], errors="coerce").fillna(0.0)
+
+    df_bhav["TradDt"] = pd.to_datetime(df_bhav["TradDt"]).dt.strftime("%Y-%m-%d")
+    df_bhav["XpryDt"] = pd.to_datetime(df_bhav["XpryDt"]).dt.strftime("%Y-%m-%d")
+    all_dates = sorted(df_bhav["TradDt"].unique())
+    latest_dt = all_dates[-1]
+
+    # 1. Futures Institutional Activity (Nearest Expiry per Symbol per Date)
+    fut_df = df_bhav[df_bhav["FinInstrmTp"].isin(("IDF", "STF"))].copy()
+    fut_df = fut_df.sort_values("XpryDt").groupby(["TradDt", "TckrSymb"], as_index=False).first()
+
+    # 2. Options Institutional Writing Walls on Latest Date (Nearest Active Expiry)
+    opt_latest = df_bhav[(df_bhav["TradDt"] == latest_dt) & (df_bhav["FinInstrmTp"].isin(("IDO", "STO")))].copy()
+    nearest_exp_map = opt_latest.groupby("TckrSymb")["XpryDt"].min().to_dict()
+    opt_latest = opt_latest[opt_latest["XpryDt"] == opt_latest["TckrSymb"].map(nearest_exp_map)]
+
+    results = []
+    for sym, grp in fut_df.groupby("TckrSymb"):
+        grp = grp.sort_values("TradDt").reset_index(drop=True)
+        if grp["TradDt"].iloc[-1] != latest_dt or len(grp) < 3:
+            continue
+
+        last_r = grp.iloc[-1]
+        prev_r = grp.iloc[-2]
+        price_chg_pct = round(((last_r["ClsPric"] - prev_r["ClsPric"]) / prev_r["ClsPric"]) * 100, 2) if prev_r["ClsPric"] > 0 else 0.0
+        oi_chg = float(last_r["ChngInOpnIntrst"])
+        oi_chg_pct = round((oi_chg / prev_r["OpnIntrst"]) * 100, 2) if prev_r["OpnIntrst"] > 0 else 0.0
+
+        prior_grp = grp.iloc[:-1]
+        avg_abs_oi_chg = prior_grp["ChngInOpnIntrst"].abs().mean()
+        avg_vol = prior_grp["TtlTradgVol"].mean()
+
+        oi_spike_ratio = round(abs(oi_chg) / avg_abs_oi_chg, 2) if avg_abs_oi_chg > 0 else 0.0
+        vol_spike_ratio = round(last_r["TtlTradgVol"] / avg_vol, 2) if avg_vol > 0 else 0.0
+
+        # Classify Institutional Footprint
+        if abs(price_chg_pct) <= 0.6 and oi_chg > 0 and oi_spike_ratio >= 2.0:
+            footprint = "🕵️ Silent Accumulation (Flat Price + Huge OI)"
+            score = 4
+        elif price_chg_pct > 0.5 and oi_chg > 0 and (oi_spike_ratio >= 1.8 or vol_spike_ratio >= 1.8):
+            footprint = "🟢 Institutional Long Buildup"
+            score = 3
+        elif price_chg_pct < -0.5 and oi_chg > 0 and (oi_spike_ratio >= 1.8 or vol_spike_ratio >= 1.8):
+            footprint = "🔴 Institutional Short Buildup"
+            score = 3
+        elif price_chg_pct > 0.8 and oi_chg < 0 and oi_spike_ratio >= 1.8:
+            footprint = "⚡ Aggressive Short Covering"
+            score = 2
+        elif price_chg_pct < -0.8 and oi_chg < 0 and oi_spike_ratio >= 1.8:
+            footprint = "⚠️ Long Unwinding"
+            score = 2
+        else:
+            footprint = "Normal Flow"
+            score = 1
+
+        # Option Writing Walls & Option Open=Low / Open=High on Latest Date
+        sym_opts = opt_latest[opt_latest["TckrSymb"] == sym]
+        ce_opts = sym_opts[sym_opts["OptnTp"] == "CE"]
+        pe_opts = sym_opts[sym_opts["OptnTp"] == "PE"]
+
+        call_wall = "—"
+        put_wall = "—"
+        opt_ohol_note = "—"
+
+        if not ce_opts.empty:
+            top_ce = ce_opts.loc[ce_opts["ChngInOpnIntrst"].idxmax()]
+            if top_ce["ChngInOpnIntrst"] > 0:
+                call_wall = f"{int(top_ce['StrkPric'])} CE (+{int(top_ce['ChngInOpnIntrst']):,})"
+        if not pe_opts.empty:
+            top_pe = pe_opts.loc[pe_opts["ChngInOpnIntrst"].idxmax()]
+            if top_pe["ChngInOpnIntrst"] > 0:
+                put_wall = f"{int(top_pe['StrkPric'])} PE (+{int(top_pe['ChngInOpnIntrst']):,})"
+
+        # Check if Futures itself had Exact Open=High or Open=Low on latest date
+        f_oh, f_ol = is_exact_ohol(last_r["OpnPric"], last_r["HghPric"], last_r["LwPric"])
+        fut_ohol = "Fut Open=Low 🟢" if f_ol else ("Fut Open=High 🔴" if f_oh else "—")
+
+        results.append({
+            "Symbol": sym,
+            "Institutional Footprint": footprint,
+            "Fut Close": f"{last_r['ClsPric']:.2f}",
+            "Price Chg (%)": f"{price_chg_pct:+.2f}%",
+            "OI Chg (%)": f"{oi_chg_pct:+.2f}%",
+            "OI Spike": f"{oi_spike_ratio}x",
+            "Vol Spike": f"{vol_spike_ratio}x",
+            "Fut OHOL": fut_ohol,
+            "Max Call Wall (+OI)": call_wall,
+            "Max Put Wall (+OI)": put_wall,
+            "_score": score,
+            "_oi_spike": oi_spike_ratio
+        })
+
+    df_out = pd.DataFrame(results)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_score", "_oi_spike"], ascending=[False, False]).drop(columns=["_score", "_oi_spike"])
+    return df_out, latest_dt, len(all_dates)
 
 # --- Main App UI ---
 st.subheader("📊 Fyers NSE/BSE Indices & F&O Triple-Aligned Open=High / Open=Low Scanner")
 
 stock_lots, idx_lots, nearest_opts = get_fyers_masters()
-tab_live, tab_bt = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester"))
+tab_live, tab_bt = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester", "🏦 Institutional Bhavcopy Radar"))
 
 with tab_live:
     col_btn, col_info = st.columns((1, 5))
@@ -1127,6 +1270,86 @@ with tab_bt:
                     file_name=f"fyers_ohol_replay_{date_str}.csv",
                     mime="text/csv"
                 )
+with tab_inst:
+    st.markdown("Upload **20–25 days of NSE & BSE F&O UDiFF Bhavcopy files (`.csv` or `.zip`)** to detect mid-cycle **Silent Institutional Accumulation**, **Long/Short Buildups**, and **Option Writing Walls**.")
+
+    u1, u2 = st.columns(2)
+    with u1:
+        nse_files = st.file_uploader(
+            "📂 Upload NSE F&O Bhavcopies (NSE Indices + F&O Stocks)",
+            type=("csv", "zip"),
+            accept_multiple_files=True,
+            key="nse_bhav_uploader"
+        )
+    with u2:
+        bse_files = st.file_uploader(
+            "📂 Upload BSE F&O Bhavcopies (Filters BSE SENSEX Only)",
+            type=("csv", "zip"),
+            accept_multiple_files=True,
+            key="bse_bhav_uploader"
+        )
+
+    only_unusual = st.checkbox("🕵️ Show Only Unusual Institutional Activity (Hide Normal Flow)", value=True)
+
+    if nse_files or bse_files:
+        combined_frames = []
+        if nse_files:
+            df_nse = parse_udiff_bhavcopies(nse_files, filter_sensex_only=False)
+            if not df_nse.empty:
+                combined_frames.append(df_nse)
+        if bse_files:
+            df_bse = parse_udiff_bhavcopies(bse_files, filter_sensex_only=True)
+            if not df_bse.empty:
+                combined_frames.append(df_bse)
+
+        if not combined_frames:
+            st.warning("⚠️ Could not find valid NSE F&O or BSE SENSEX records in the uploaded files. Ensure they are UDiFF F&O Bhavcopy files.")
+        else:
+            df_all_bhav = pd.concat(combined_frames, ignore_index=True)
+            df_inst, latest_bhav_dt, days_loaded = analyze_institutional_activity(df_all_bhav)
+
+            if only_unusual and not df_inst.empty:
+                df_inst = df_inst[df_inst["Institutional Footprint"] != "Normal Flow"]
+
+            st.caption(f"Analyzed **{days_loaded} Trading Days** | Latest Bhavcopy Date: **{latest_bhav_dt}** | Unusual Setups Found: **{len(df_inst)}**")
+
+            if not df_inst.empty:
+                silent_c = df_inst["Institutional Footprint"].str.contains("Silent Accumulation").sum()
+                long_c = df_inst["Institutional Footprint"].str.contains("Long Buildup|Short Covering").sum()
+                short_c = df_inst["Institutional Footprint"].str.contains("Short Buildup|Long Unwinding").sum()
+
+                ic1, ic2, ic3, ic4 = st.columns(4)
+                ic1.metric("Total Institutional Alerts", len(df_inst))
+                ic2.metric("🕵️ Silent Accumulation", int(silent_c))
+                ic3.metric("🟢 Bullish Buildup", int(long_c))
+                ic4.metric("🔴 Bearish Buildup", int(short_c))
+
+                def style_inst(val):
+                    s = str(val)
+                    if "Silent Accumulation" in s:
+                        return "background-color: #d500f9; color: white; font-weight: bold;"
+                    elif "Long Buildup" in s or "Short Covering" in s:
+                        return "color: #00e676; font-weight: bold;"
+                    elif "Short Buildup" in s or "Long Unwinding" in s:
+                        return "color: #ff5252; font-weight: bold;"
+                    return ""
+
+                styled_inst = (
+                    df_inst.style
+                    .map(style_inst, subset=["Institutional Footprint"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Open=Low" in str(v) else ("color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else ""), subset=["Fut OHOL"])
+                )
+                st.dataframe(styled_inst, use_container_width=True, hide_index=True, height=560)
+                st.download_button(
+                    f"📥 Download Institutional Activity ({latest_bhav_dt}).csv",
+                    data=df_inst.to_csv(index=False).encode("utf-8"),
+                    file_name=f"institutional_bhavcopy_{latest_bhav_dt}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No unusual institutional OI/Volume spikes found on the latest uploaded date (try unchecking 'Show Only Unusual Institutional Activity' to inspect all symbols).")
+    else:
+        st.info("Upload 5 to 25 days of NSE F&O Bhavcopy files on the left and/or BSE F&O Bhavcopy files on the right (supports bulk multi-select of `.csv` or `.zip` files).")
 
 if auto_refresh and FYERS_TOKEN:
     time.sleep(60)
