@@ -1,7 +1,5 @@
 import os
-import io
 import time
-import zipfile
 import hashlib
 import requests
 import pandas as pd
@@ -109,12 +107,12 @@ only_dual_locked = st.sidebar.checkbox("🔥 Show Only Dual-Strike Locked (CE O=
 auto_refresh = st.sidebar.checkbox("⚡ Fast Auto-Refresh Every 30s", value=False)
 
 INDEX_CONFIG = {
-    "NIFTY 50": {"fyers": "NSE:NIFTY50-INDEX", "step": 50, "lot": 75, "csv_sym": "NIFTY", "exch": "NSE"},
-    "SENSEX": {"fyers": "BSE:SENSEX-INDEX", "step": 100, "lot": 20, "csv_sym": "SENSEX", "exch": "BSE"},
-    "BANK NIFTY": {"fyers": "NSE:NIFTYBANK-INDEX", "step": 100, "lot": 30, "csv_sym": "BANKNIFTY", "exch": "NSE"},
-    "FIN NIFTY": {"fyers": "NSE:FINNIFTY-INDEX", "step": 50, "lot": 65, "csv_sym": "FINNIFTY", "exch": "NSE"},
-    "MIDCAP NIFTY": {"fyers": "NSE:MIDCPNIFTY-INDEX", "step": 25, "lot": 120, "csv_sym": "MIDCPNIFTY", "exch": "NSE"},
-    "BANKEX": {"fyers": "BSE:BANKEX-INDEX", "step": 100, "lot": 30, "csv_sym": "BANKEX", "exch": "BSE"},
+    "NIFTY 50": {"fyers": "NSE:NIFTY50-INDEX", "step": 50, "lot": 75, "csv_sym": "NIFTY"},
+    "SENSEX": {"fyers": "BSE:SENSEX-INDEX", "step": 100, "lot": 20, "csv_sym": "SENSEX"},
+    "BANK NIFTY": {"fyers": "NSE:NIFTYBANK-INDEX", "step": 100, "lot": 30, "csv_sym": "BANKNIFTY"},
+    "FIN NIFTY": {"fyers": "NSE:FINNIFTY-INDEX", "step": 50, "lot": 65, "csv_sym": "FINNIFTY"},
+    "MIDCAP NIFTY": {"fyers": "NSE:MIDCPNIFTY-INDEX", "step": 25, "lot": 120, "csv_sym": "MIDCPNIFTY"},
+    "BANKEX": {"fyers": "BSE:BANKEX-INDEX", "step": 100, "lot": 30, "csv_sym": "BANKEX"},
 }
 
 def is_exact_ohol(open_p, high_p, low_p):
@@ -123,57 +121,55 @@ def is_exact_ohol(open_p, high_p, low_p):
         return False, False
     return (o == h), (o == l)
 
-@st.cache_data(ttl=21600, show_spinner=False)
-@st.cache_data(ttl=21600, show_spinner=False)
-def get_index_option_masters():
-    """Fetches current NSE & BSE index lot sizes and nearest-expiry option contracts safely."""
-    idx_lots = {k: v["lot"] for k, v in INDEX_CONFIG.items()}
-    csv_to_idx = {v["csv_sym"]: k for k, v in INDEX_CONFIG.items()}
-    opt_raw = {}
-    now_epoch = int(time.time()) - 86400
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_index_option_chains_v3(auth_token, active_indices, depth):
+    """Fetches exact nearest-expiry ±N option symbols and expiry dates directly from Fyers Option Chain API v3."""
+    if not auth_token or len(auth_token.split(":", 1).pop()) < 50:
+        return {}, {}
 
-    for csv_url in ("https://fyers.in", "https://fyers.in"):
+    headers = {"Authorization": auth_token, "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    url_oc = "https://" + "api-t1." + "fyers.in" + "/data/options-chain-v3"
+
+    opt_meta = {}
+    expiry_dates = {}
+
+    for idx_name in active_indices:
+        cfg = INDEX_CONFIG[idx_name]
+        f_sym = cfg["fyers"]
+        step = cfg["step"]
         try:
-            res = requests.get(csv_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            if res.status_code != 200:
+            res = requests.get(url_oc, headers=headers, params={"symbol": f_sym, "strikecount": max(depth + 2, 8)}, timeout=10).json()
+            if res.get("s") != "ok":
                 continue
-            for line in res.text.splitlines():
-                if "OPTIDX" not in line:
-                    continue
-                cols = [c.strip() for c in line.split(",")]
-                if len(cols) < 17:
-                    continue
+            data = res.get("data", {})
+            exp_list = data.get("expiryData", ())
+            if exp_list:
+                expiry_dates[cfg["csv_sym"]] = exp_list.__getitem__(0).get("date", "")
 
-                fyers_sym = next((c for c in cols if (c.startswith("NSE:") or c.startswith("BSE:")) and (c.endswith("CE") or c.endswith("PE"))), "")
-                u_sym = next((c for c in cols if c in csv_to_idx), "")
-                opt_type = "CE" if fyers_sym.endswith("CE") else ("PE" if fyers_sym.endswith("PE") else "")
+            chains = data.get("optionsChain", ())
+            spot_item = next((c for c in chains if c.get("option_type") == ""), None)
+            spot_ltp = float(spot_item.get("ltp", 0)) if spot_item else 0.0
+            atm = round(spot_ltp / step) * step if spot_ltp > 0 else 0
 
-                if not (fyers_sym and u_sym and opt_type):
-                    continue
-
-                try:
-                    lot_val = int(float(cols.__getitem__(3)))
-                    expiry_ts = int(float(cols.__getitem__(8)))
-                    strike = round(float(cols.__getitem__(15)), 2)
-                except Exception:
-                    continue
-
-                if lot_val > 0:
-                    idx_lots[csv_to_idx[u_sym]] = lot_val
-                if expiry_ts >= now_epoch and strike > 0:
-                    opt_raw.setdefault(u_sym, []).append((expiry_ts, strike, opt_type, fyers_sym))
+            for item in chains:
+                o_type = item.get("option_type", "")
+                o_sym = item.get("symbol", "")
+                st_val = float(item.get("strike_price", 0))
+                if o_type in ("CE", "PE") and o_sym and st_val > 0:
+                    offset = int(round((st_val - atm) / step)) if atm > 0 else 0
+                    if abs(offset) <= depth:
+                        opt_meta[o_sym] = {
+                            "idx_name": idx_name,
+                            "csv_sym": cfg["csv_sym"],
+                            "strike": int(st_val),
+                            "opt_type": o_type,
+                            "offset": offset,
+                            "expiry": expiry_dates.get(cfg["csv_sym"], "")
+                        }
         except Exception:
             continue
 
-    nearest_opts = {}
-    expiry_dates = {}
-    for u_sym, contracts in opt_raw.items():
-        min_exp = min(c.__getitem__(0) for c in contracts)
-        expiry_dates[u_sym] = datetime.fromtimestamp(min_exp).strftime("%Y-%m-%d")
-        nearest_opts[u_sym] = {(c.__getitem__(1), c.__getitem__(2)): c.__getitem__(3) for c in contracts if c.__getitem__(0) == min_exp}
-
-    return idx_lots, nearest_opts, expiry_dates
-
+    return opt_meta, expiry_dates
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_fyers_orb(fyers_symbol, target_date, orb_minutes, auth_token):
     url = "https://" + "api-t1." + "fyers.in" + "/data/history"
@@ -227,16 +223,14 @@ def fetch_fyers_daily_atr(fyers_symbol, auth_token):
         pass
     return 150.0, 0.0, 0.0
 
-def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lots, nearest_opts, expiry_dates):
-    """Scans Spot Indices AND every ±N ATM CE/PE strike directly in under 1 second."""
+def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lots):
     if not auth_token or len(auth_token.split(":", 1).pop()) < 50 or not active_indices:
-        return {}, pd.DataFrame(), pd.DataFrame(), "Log in to Fyers in the left sidebar"
+        return {}, pd.DataFrame(), pd.DataFrame(), "Log in to Fyers in the left sidebar", {}
 
     headers = {"Authorization": auth_token, "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
     url_quotes = "https://" + "api-t1." + "fyers.in" + "/data/quotes"
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # 1. Fetch Live Quotes for Selected Spot Indices
     idx_fyers_syms = ",".join(INDEX_CONFIG[k]["fyers"] for k in active_indices)
     fyers_to_name = {INDEX_CONFIG[k]["fyers"]: k for k in active_indices}
     spot_quotes = {}
@@ -244,10 +238,10 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
     try:
         res = requests.get(url_quotes, headers=headers, params={"symbols": idx_fyers_syms}, timeout=10)
         if res.status_code in (401, 403):
-            return {}, pd.DataFrame(), pd.DataFrame(), "Token expired (HTTP 401)"
+            return {}, pd.DataFrame(), pd.DataFrame(), "Token expired (HTTP 401)", {}
         payload = res.json()
         if payload.get("s") != "ok":
-            return {}, pd.DataFrame(), pd.DataFrame(), payload.get("message", "Fyers API error")
+            return {}, pd.DataFrame(), pd.DataFrame(), payload.get("message", "Fyers API error"), {}
 
         for item in payload.get("d", ()):
             idx_name = fyers_to_name.get(item.get("n", ""))
@@ -261,39 +255,15 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
                     "chp": float(v.get("chp", 0)),
                 }
     except Exception as e:
-        return {}, pd.DataFrame(), pd.DataFrame(), str(e)
+        return {}, pd.DataFrame(), pd.DataFrame(), str(e), {}
 
     if not spot_quotes:
-        return {}, pd.DataFrame(), pd.DataFrame(), "Market Closed / Pre-Open"
+        return {}, pd.DataFrame(), pd.DataFrame(), "Market Closed / Pre-Open", {}
 
-    # 2. Build List of All ±N ATM CE & PE Option Symbols Across Selected Indices
-    all_opt_syms = []
-    opt_meta = {}
-    for idx_name, sq in spot_quotes.items():
-        cfg = INDEX_CONFIG[idx_name]
-        csv_sym = cfg["csv_sym"]
-        step = cfg["step"]
-        atm = round(sq["ltp"] / step) * step
-        contracts = nearest_opts.get(csv_sym, {})
+    opt_meta, expiry_dates = get_index_option_chains_v3(auth_token, tuple(active_indices), depth)
+    unique_opt_syms = sorted(opt_meta.keys())
 
-        for offset in range(-depth, depth + 1):
-            st_val = round(atm + (offset * step), 2)
-            for opt_type in ("CE", "PE"):
-                o_sym = contracts.get((st_val, opt_type))
-                if o_sym:
-                    all_opt_syms.append(o_sym)
-                    opt_meta[o_sym] = {
-                        "idx_name": idx_name,
-                        "csv_sym": csv_sym,
-                        "strike": int(st_val),
-                        "opt_type": opt_type,
-                        "offset": offset,
-                        "expiry": expiry_dates.get(csv_sym, "")
-                    }
-
-    # 3. Fetch Live Quotes for All Index Option Strikes in 50-symbol Batches
     opt_quotes = {}
-    unique_opt_syms = sorted(set(all_opt_syms))
     for i in range(0, len(unique_opt_syms), 50):
         batch = unique_opt_syms[i:i + 50]
         try:
@@ -313,14 +283,12 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
         except Exception:
             continue
 
-    # Map strike-level OHOL states so we can detect Dual-Strike Locks (e.g. 80500 CE O=L + 80500 PE O=H)
     strike_states = {}
     for o_sym, oq in opt_quotes.items():
         meta = opt_meta[o_sym]
         oh, ol = is_exact_ohol(oq["open"], oq["high"], oq["low"])
         strike_states[(meta["idx_name"], meta["strike"], meta["opt_type"])] = (oh, ol)
 
-    # 4. Build Table A: Spot Index Exact OHOL Rows
     spot_rows = []
     for idx_name, sq in spot_quotes.items():
         is_oh, is_ol = is_exact_ohol(sq["open"], sq["high"], sq["low"])
@@ -367,7 +335,6 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
     if not df_spot.empty:
         df_spot = df_spot.sort_values(by=["_orb_ok"], ascending=[False]).drop(columns=["_orb_ok"])
 
-    # 5. Build Table B: Direct Index Option (CE/PE) Exact OHOL Rows
     opt_rows = []
     for o_sym, oq in opt_quotes.items():
         oh, ol = is_exact_ohol(oq["open"], oq["high"], oq["low"])
@@ -385,7 +352,6 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
         opp_type = "PE" if opt_type == "CE" else "CE"
         opp_oh, opp_ol = strike_states.get((idx_name, st_val, opp_type), (False, False))
 
-        # Check Dual-Strike Lock (e.g. CE Open=Low while same-strike PE is Open=High)
         if ol and opp_oh:
             lock_badge = f"🔥 DUAL LOCKED ({st_val} {opp_type} is O=H)"
             rank = 3
@@ -448,12 +414,12 @@ def scan_indices_and_options(auth_token, active_indices, depth, orb_mins, idx_lo
     if not df_opts.empty:
         df_opts = df_opts.sort_values(by=["_rank", "_orb_ok", "_abs_off"], ascending=[False, False, True]).drop(columns=["_rank", "_orb_ok", "_abs_off"])
 
-    return spot_quotes, df_spot, df_opts, f"100% Fyers Live Feed ({len(unique_opt_syms)} Option Strikes Scanned)"
+    return spot_quotes, df_spot, df_opts, f"100% Fyers Live Feed ({len(unique_opt_syms)} Option Strikes Scanned)", expiry_dates
 
 # --- Main App UI ---
 st.subheader("🏛️ Fyers Exclusive NSE Indices & BSE SENSEX Spot + Option OHOL Scanner")
 
-idx_lots, nearest_opts, expiry_dates = get_index_option_masters()
+idx_lots = {k: v["lot"] for k, v in INDEX_CONFIG.items()}
 
 col_btn, col_info = st.columns((1, 5))
 with col_btn:
@@ -463,8 +429,8 @@ with col_btn:
 
 orb_mins_live = 5 if "5-Min" in orb_timeframe else 15
 with st.spinner("Scanning NSE Indices, BSE SENSEX & ±N Option Chains..."):
-    spot_quotes, df_spot, df_opts, status_note = scan_indices_and_options(
-        FYERS_TOKEN, selected_indices, strike_range, orb_mins_live, idx_lots, nearest_opts, expiry_dates
+    spot_quotes, df_spot, df_opts, status_note, expiry_dates = scan_indices_and_options(
+        FYERS_TOKEN, selected_indices, strike_range, orb_mins_live, idx_lots
     )
 
 with col_info:
