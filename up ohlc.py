@@ -244,19 +244,23 @@ def fetch_fyers_daily_stats(sym, auth_token):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_fyers_orb(sym, target_date, orb_minutes, auth_token):
-    """Fetches real-time 5-minute intraday candles from Fyers History API v3."""
+    """Fetches real-time 5-minute intraday candles from Fyers History API v3 for 5m/15m ORB."""
     url = "https://" + "api-t1." + "fyers.in" + "/data/history"
     headers = {
         "Authorization": auth_token,
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0"
     }
+    dt_obj = datetime.strptime(target_date, "%Y-%m-%d")
+    start_epoch = int(dt_obj.timestamp()) - 86400
+    end_epoch = int(dt_obj.timestamp()) + 86400
+
     params = {
         "symbol": f"NSE:{sym}-EQ",
         "resolution": "5",
-        "date_format": "1",
-        "range_from": target_date,
-        "range_to": target_date,
+        "date_format": "0",
+        "range_from": str(start_epoch),
+        "range_to": str(end_epoch),
         "cont_flag": "1"
     }
     candles_needed = 1 if orb_minutes == 5 else 3
@@ -265,12 +269,18 @@ def fetch_fyers_orb(sym, target_date, orb_minutes, auth_token):
         payload = res.json()
         candles = payload.get("candles", [])
         if payload.get("s") == "ok" and len(candles) >= candles_needed:
-            orb_slice = candles[:candles_needed]
-            return {
-                "orb_high": max(float(c) for c in orb_slice),
-                "orb_low": min(float(c) for c in orb_slice),
-                "latest_close": float(candles[-1]),
-            }
+            df = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
+            df["date_str"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d")
+            latest_day = df["date_str"].iloc[-1]
+            day_df = df[df["date_str"] == latest_day]
+
+            if len(day_df) >= candles_needed:
+                orb_slice = day_df.head(candles_needed)
+                return {
+                    "orb_high": float(orb_slice["high"].max()),
+                    "orb_low": float(orb_slice["low"].min()),
+                    "latest_close": float(day_df["close"].iloc[-1]),
+                }
     except Exception:
         pass
     return None
