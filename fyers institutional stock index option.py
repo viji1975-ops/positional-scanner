@@ -863,10 +863,17 @@ def check_historical_option_alignment(matched_records, replay_date_str, auth_tok
 
     return results
 
-def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_lots, idx_lots, nearest_opts):
+def run_date_replay(items_list, replay_date_str, orb_minutes, replay_cutoff, auth_token, stock_lots, idx_lots, nearest_opts):
+    """
+    replay_cutoff: '09:20 AM (1st 5m Candle)', '09:30 AM (First 3 Candles)', or '03:30 PM (Full EOD)'
+    Reconstructs the exact dashboard visible at that morning timestamp without survivorship bias.
+    """
     candles_for_orb = 1 if orb_minutes == 5 else 3
+    cutoff_bars = 1 if "09:20" in replay_cutoff else (3 if "09:30" in replay_cutoff else 75)
+    is_morning_sim = cutoff_bars < 75
+
     matched_raw = []
-    progress = st.progress(0, text=f"Replaying {replay_date_str}...")
+    progress = st.progress(0, text=f"Replaying {replay_date_str} as of {replay_cutoff}...")
 
     for idx, label in enumerate(items_list):
         progress.progress((idx + 1) / len(items_list), text=f"Scanning {label} ({idx+1}/{len(items_list)})...")
@@ -895,14 +902,7 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
             if len(df_d) < 15 or df_d["date_str"].iloc[-1] != replay_date_str:
                 continue
 
-            last_r, prev_r = df_d.iloc[-1], df_d.iloc[-2]
-            open_p, high_p, low_p, close_p = float(last_r["open"]), float(last_r["high"]), float(last_r["low"]), float(last_r["close"])
-            curr_vol = float(last_r["volume"])
-
-            is_oh, is_ol = is_exact_ohol(open_p, high_p, low_p)
-            if not (is_oh or is_ol):
-                continue
-
+            prev_r = df_d.iloc[-2]
             hist_prior = df_d.iloc[:-1].copy()
             hist_prior["prev_close"] = hist_prior["close"].shift(1)
             hist_prior["tr"] = hist_prior[["high", "prev_close"]].max(axis=1) - hist_prior[["low", "prev_close"]].min(axis=1)
@@ -911,40 +911,81 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
             pdh, pdl = float(prev_r["high"]), float(prev_r["low"])
 
             day_5m = fetch_fyers_5m_day(fyers_sym, replay_date_str, auth_token)
-            orb_ok = False
-            orb_text = "⏳ Pending ORB"
-            outcome = "Closed In-Range"
+            if day_5m is None or len(day_5m) < cutoff_bars:
+                continue
+
+            # Slice intraday candles ONLY up to the chosen morning snapshot time
+            morning_slice = day_5m.iloc[:cutoff_bars]
+            after_slice = day_5m.iloc[cutoff_bars:]
+
+            open_p = float(morning_slice["open"].iloc.__getitem__(0))
+            snap_high = float(morning_slice["high"].max())
+            snap_low = float(morning_slice["low"].min())
+            snap_ltp = float(morning_slice["close"].iloc[-1])
+            snap_vol = float(morning_slice["volume"].sum())
+
+            is_oh, is_ol = is_exact_ohol(open_p, snap_high, snap_low)
+            if not (is_oh or is_ol):
+                continue
 
             risk_unit = atr_14 * 0.5
             t1 = round(open_p - risk_unit, 1) if is_oh else round(open_p + risk_unit, 1)
             t2 = round(open_p - risk_unit * 2, 1) if is_oh else round(open_p + risk_unit * 2, 1)
 
-            if day_5m is not None and len(day_5m) >= candles_for_orb:
-                orb_slice = day_5m.iloc[:candles_for_orb]
-                orb_h, orb_l = float(orb_slice["high"].max()), float(orb_slice["low"].min())
-                after_orb = day_5m.iloc[candles_for_orb:]
-
+            # Evaluate ORB status AS OF the chosen snapshot time
+            orb_ok = False
+            if len(morning_slice) >= candles_for_orb:
+                orb_bars = morning_slice.iloc[:candles_for_orb]
+                orb_h, orb_l = float(orb_bars["high"].max()), float(orb_bars["low"].min())
                 if is_oh:
-                    orb_ok = bool((after_orb["low"] < orb_l).any()) if not after_orb.empty else False
+                    orb_ok = snap_ltp < orb_l
                     orb_text = f"✅ {orb_minutes}m Broken (<{orb_l:.1f})" if orb_ok else f"⏳ Inside (>{orb_l:.1f})"
-                    outcome = "🎯 1:2 Target Hit" if low_p <= t2 else ("✅ 1:1 Target Hit" if low_p <= t1 else ("🟢 Closed in Profit" if close_p < open_p else "🔴 Closed at Open"))
                 else:
-                    orb_ok = bool((after_orb["high"] > orb_h).any()) if not after_orb.empty else False
+                    orb_ok = snap_ltp > orb_h
                     orb_text = f"✅ {orb_minutes}m Breakout (>{orb_h:.1f})" if orb_ok else f"⏳ Inside (<{orb_h:.1f})"
-                    outcome = "🎯 1:2 Target Hit" if high_p >= t2 else ("✅ 1:1 Target Hit" if high_p >= t1 else ("🟢 Closed in Profit" if close_p > open_p else "🔴 Closed at Open"))
+            else:
+                orb_text = f"⏳ Wait {orb_minutes}m Candle"
+
+            # Evaluate what happened AFTER the morning snapshot through 3:30 PM
+            if after_slice.empty:
+                full_high, full_low, final_close = snap_high, snap_low, snap_ltp
+            else:
+                full_high = max(snap_high, float(after_slice["high"].max()))
+                full_low = min(snap_low, float(after_slice["low"].min()))
+                final_close = float(after_slice["close"].iloc[-1])
+
+            if is_oh:
+                if full_high > open_p:
+                    outcome = "❌ Reversed / SL Hit"
+                elif full_low <= t2:
+                    outcome = "🎯 1:2 Target Hit"
+                elif full_low <= t1:
+                    outcome = "✅ 1:1 Target Hit"
+                else:
+                    outcome = "🟢 Held Below Open" if final_close < open_p else "⏱️ Flat at Open"
+            else:
+                if full_low < open_p:
+                    outcome = "❌ Reversed / SL Hit"
+                elif full_high >= t2:
+                    outcome = "🎯 1:2 Target Hit"
+                elif full_high >= t1:
+                    outcome = "✅ 1:1 Target Hit"
+                else:
+                    outcome = "🟢 Held Above Open" if final_close > open_p else "⏱️ Flat at Open"
 
             if is_index:
                 vol_txt, power, p_rank, vol_ratio = "Index", "🏛️ Index", 4, 999.0
-                opt_str, atm_strike = get_index_option_strikes(label, open_p, is_oh)
+                opt_str, atm_strike = get_index_option_strikes(label, snap_ltp, is_oh)
                 lot_val = idx_lots.get(label, INDEX_CONFIG[label]["lot"])
             else:
-                vol_ratio = round(curr_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 0
+                # Annualize/scale morning volume or show exact morning volume ratio
+                vol_ratio = round(snap_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 0
                 vol_txt = f"{vol_ratio}x"
-                power, p_rank = ("🔥 Ultra", 3) if vol_ratio >= 4.0 else (("⚡ Strong", 2) if vol_ratio >= 2.0 else ("Normal", 1))
-                opt_str, atm_strike = get_option_strikes(open_p, is_oh)
+                power, p_rank = ("🔥 Ultra", 3) if vol_ratio >= 0.40 and is_morning_sim else (("⚡ Strong", 2) if vol_ratio >= 0.20 and is_morning_sim else ("Normal", 1))
+                opt_str, atm_strike = get_option_strikes(snap_ltp, is_oh)
                 lot_val = stock_lots.get(label) or DEFAULT_LOT_SIZES.get(label, 0)
 
-            lvl_tag = "Above PDH 🟢" if close_p > pdh else ("Below PDL 🔴" if close_p < pdl else "Inside Prev Day")
+            lvl_tag = "Above PDH 🟢" if snap_ltp > pdh else ("Below PDL 🔴" if snap_ltp < pdl else "Inside Prev Day")
 
             matched_raw.append({
                 "key_id": label,
@@ -953,7 +994,7 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
                 "is_oh": is_oh,
                 "display_sym": display_sym,
                 "open_p": open_p,
-                "close_p": close_p,
+                "snap_ltp": snap_ltp,
                 "orb_text": orb_text,
                 "orb_ok": orb_ok,
                 "outcome": outcome,
@@ -990,14 +1031,14 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
             "Symbol": m["display_sym"],
             "Pattern": f"Open=High ({m['open_p']:.2f})" if m["is_oh"] else f"Open=Low ({m['open_p']:.2f})",
             "Option O=L/O=H Align": align_info["badge"],
-            "ORB Confirm": m["orb_text"],
-            "Day Outcome": m["outcome"],
-            "Close (₹)": f"{m['close_p']:.2f}",
+            f"ORB @ {replay_cutoff[:8]}": m["orb_text"],
+            "Later Day Outcome": m["outcome"],
+            f"Price @ {replay_cutoff[:8]}": f"{m['snap_ltp']:.2f}",
             "ATM | 1-ITM Option": m["opt_str"],
             "Lot Size": m["lot_val"],
             "Normal Tgt (1:1|1:2)": f"{m['t1']} | {m['t2']}",
             "PDH/PDL": m["lvl_tag"],
-            "Volume": m["vol_txt"],
+            "Vol Ratio": m["vol_txt"],
             "Power": m["power"],
             "_align_rank": align_info["rank"],
             "_orb_ok": m["orb_ok"],
@@ -1414,56 +1455,62 @@ with tab_live:
         st.info("No F&O stocks matched your current filters right now.")
 
 with tab_bt:
-    st.markdown("Select any past NSE/BSE trading date to replay exact **0.00% Open=High / Open=Low + ORB** across **Indices (Nifty, Sensex...)** and **F&O Stocks**.")
-    b1, b2, b3 = st.columns(3)
+    st.markdown("Replay any past date as of **9:20 AM**, **9:30 AM**, or **Full EOD** to see the exact morning dashboard and subsequent outcome.")
+    b1, b2, b3, b4 = st.columns(4)
     with b1:
-        selected_date = st.date_input("Select Historical Trading Date", value=datetime.now().date() - timedelta(days=1), max_value=datetime.now().date())
+        selected_date = st.date_input("Select Historical Date", value=datetime.now().date() - timedelta(days=1), max_value=datetime.now().date())
     with b2:
-        bt_universe = st.selectbox("Scan Universe", ("All 148 F&O Stocks + 6 Indices (~16s)", "Indices Only (Nifty, Sensex, BankNifty, FinNifty, Midcap, Bankex — ~1s)", "Top 40 Liquid F&O + 6 Indices (~6s)"))
+        replay_cutoff = st.selectbox(
+            "Snapshot Time (IST)",
+            ("09:30 AM (First 3 Candles)", "09:20 AM (1st 5m Candle)", "03:30 PM (Full EOD)")
+        )
     with b3:
+        bt_universe = st.selectbox("Scan Universe", ("All 148 F&O Stocks + 6 Indices (~16s)", "Indices Only (Nifty, Sensex, BankNifty, FinNifty, Midcap, Bankex — ~1s)", "Top 40 Liquid F&O + 6 Indices (~6s)"))
+    with b4:
         bt_orb = st.selectbox("ORB Confirmation", (5, 15), format_func=lambda m: f"{m}-Min ORB")
 
-    if st.button("▶️ Replay Selected Date", type="primary"):
+    if st.button("▶️ Replay Morning / Date Snapshot", type="primary"):
         if not FYERS_TOKEN:
             st.warning("⚠️ Please log in to Fyers in the left sidebar first.")
         else:
             date_str = selected_date.strftime("%Y-%m-%d")
             idx_list = list(INDEX_CONFIG.keys())
             test_items = idx_list if "Indices Only" in bt_universe else (idx_list + sorted(set(FNO_SYMBOLS))[:40] if "Top 40" in bt_universe else idx_list + sorted(set(FNO_SYMBOLS)))
-            df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN, stock_lots, idx_lots, nearest_opts)
+            df_replay = run_date_replay(test_items, date_str, bt_orb, replay_cutoff, FYERS_TOKEN, stock_lots, idx_lots, nearest_opts)
 
             if df_replay.empty:
-                st.info(f"No exact 0.00% Open=High or Open=Low matches found on **{date_str}**.")
+                st.info(f"No exact 0.00% Open=High or Open=Low matches found on **{date_str}** at **{replay_cutoff}**.")
             else:
+                orb_col = f"ORB @ {replay_cutoff[:8]}"
                 bull_c = df_replay["Pattern"].str.contains("Open=Low").sum()
                 bear_c = df_replay["Pattern"].str.contains("Open=High").sum()
-                triple_c = df_replay["Option O=L/O=H Align"].str.contains("🔥").sum()
-                tgt_c = df_replay["Day Outcome"].str.contains("Target Hit").sum()
+                tgt_c = df_replay["Later Day Outcome"].str.contains("Target Hit").sum()
+                sl_c = df_replay["Later Day Outcome"].str.contains("Reversed / SL Hit").sum()
 
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Total Exact Matches", len(df_replay))
-                k2.metric("🔥 Option-Aligned (±5)", int(triple_c))
-                k3.metric("🟢 O=L | 🔴 O=H", f"{int(bull_c)} | {int(bear_c)}")
-                k4.metric("🎯 ATR Targets Hit", int(tgt_c))
+                k1.metric(f"Matches @ {replay_cutoff[:8]}", len(df_replay))
+                k2.metric("🟢 O=L | 🔴 O=H", f"{int(bull_c)} | {int(bear_c)}")
+                k3.metric("🎯 Later Target Hit", int(tgt_c))
+                k4.metric("❌ Later SL / Reversed", int(sl_c))
 
                 styled_replay = (
                     df_replay.style
                     .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
                     .map(style_align_badge, subset=["Option O=L/O=H Align"])
-                    .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
-                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Profit" in str(v) else "color: #ff5252;", subset=["Day Outcome"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=[orb_col])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Held" in str(v) else "color: #ff5252; font-weight: bold;", subset=["Later Day Outcome"])
                     .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
                     .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
                     .map(lambda v: "background-color: #6a1b9a; color: white; font-weight: bold;" if "Index" in str(v) else ("background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else "")), subset=["Power"])
                 )
-
                 st.dataframe(styled_replay, use_container_width=True, hide_index=True, height=560)
                 st.download_button(
-                    f"📥 Download {date_str} Backtest (CSV)",
+                    f"📥 Download {date_str} ({replay_cutoff[:8]}) Replay.csv",
                     data=df_replay.to_csv(index=False).encode("utf-8"),
-                    file_name=f"fyers_ohol_replay_{date_str}.csv",
+                    file_name=f"fyers_morning_replay_{date_str}_{replay_cutoff[:5].replace(':', '')}.csv",
                     mime="text/csv"
                 )
+
 with tab_inst:
     st.markdown("Upload **20–25 days of NSE & BSE F&O UDiFF Bhavcopy files (`.csv` or `.zip`)** to detect mid-cycle **Silent Institutional Accumulation**, **Long/Short Buildups**, and **Option Writing Walls**.")
 
