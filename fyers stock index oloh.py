@@ -1093,7 +1093,7 @@ with tab_bt:
             date_str = selected_date.strftime("%Y-%m-%d")
             idx_list = list(INDEX_CONFIG.keys())
             test_items = idx_list if "Indices Only" in bt_universe else (idx_list + sorted(set(FNO_SYMBOLS))[:40] if "Top 40" in bt_universe else idx_list + sorted(set(FNO_SYMBOLS)))
-                        df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN, stock_lots, idx_lots, nearest_opts)
+            df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN, stock_lots, idx_lots, nearest_opts)
 
             if df_replay.empty:
                 st.info(f"No exact 0.00% Open=High or Open=Low matches found on **{date_str}**.")
