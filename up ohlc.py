@@ -45,7 +45,7 @@ if redirected_input and FYERS_APP_ID and FYERS_SECRET_ID:
     auth_code = redirected_input
     if "auth_code=" in redirected_input:
         parsed = parse_qs(urlparse(redirected_input).query)
-        auth_code = parsed.get("auth_code", [""])
+        auth_code = parsed.get("auth_code", [""])[0]
 
     if auth_code and st.session_state.get("last_used_auth_code") != auth_code:
         app_id_hash = hashlib.sha256(f"{FYERS_APP_ID}:{FYERS_SECRET_ID}".encode()).hexdigest()
