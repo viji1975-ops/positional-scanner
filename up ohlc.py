@@ -246,23 +246,26 @@ def scan_all_fno():
         st.error(err)
         return pd.DataFrame(), "", total_fno
 
-    results = []
-    source_note = "Live Session Quote"
-
-    # Check if live quotes actually have non-zero Open prices (False on NSE holidays / pre-open)
-    has_live_open = False
+    # Map quotes by 'instrument_token' (e.g. 'NSE_EQ|INE002A01018') because Upstox keys dict by symbol
+    quotes_by_token = {}
     if quotes:
-        for data in quotes.values():
-            if data.get("ohlc", {}).get("open", 0) > 0:
-                has_live_open = True
-                break
+        for q_data in quotes.values():
+            inst_token = q_data.get("instrument_token")
+            if inst_token:
+                quotes_by_token[inst_token] = q_data
 
-    # Primary Path: Live Market Hours (when Open > 0)
+    has_live_open = any(
+        q.get("ohlc", {}).get("open", 0) > 0 for q in quotes_by_token.values()
+    )
+
+    results = []
+    source_note = "Live / Last Session Quote"
+
+    # Primary Path: Fast Batch Quotes (works on holidays/after-hours too when Upstox holds last session OHLC)
     if has_live_open:
         candidates = []
         for key, symbol in fno_dict.items():
-            resp_key = key.replace("|", ":")
-            data = quotes.get(resp_key, {})
+            data = quotes_by_token.get(key, {})
             ohlc = data.get("ohlc", {})
 
             open_p = ohlc.get("open", 0)
@@ -298,7 +301,7 @@ def scan_all_fno():
         with ThreadPoolExecutor(max_workers=6) as executor:
             results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
 
-    # Holiday / After-Hours Fallback Path: Uses Last Completed Trading Day's Daily Candle
+    # Fallback Path: If Quotes had open == 0 (e.g., 9:00–9:15 AM pre-open reset)
     else:
         session_dates = []
         def scan_via_candle(kv):
@@ -337,7 +340,7 @@ def scan_all_fno():
             results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
 
         last_date = max(session_dates) if session_dates else "Last Trading Day"
-        source_note = f"Last Trading Session ({last_date} — NSE Closed/Holiday)"
+        source_note = f"Last Trading Session ({last_date})"
 
     df_out = pd.DataFrame(results)
     if not df_out.empty:
@@ -345,75 +348,6 @@ def scan_all_fno():
         df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
 
     return df_out, source_note, total_fno
-
-    # Fallback Path: If Quote API returned empty/non-JSON or open==0 (pre-open/weekend)
-    if not results and (err is not None or not quotes):
-        source_note = "Last Completed Session (Historical Daily Candle)"
-        def scan_via_candle(kv):
-            key, symbol = kv
-            stats = get_historical_stats(key, ACCESS_TOKEN)
-            if not stats:
-                return None
-            lc = stats["last_candle"]
-            open_p = lc["open"]
-            high_p = lc["high"]
-            low_p = lc["low"]
-            ltp = lc["close"]
-            curr_vol = lc["volume"]
-
-            if open_p == 0:
-                return None
-
-            tolerance = open_p * tol_multiplier
-            is_open_high = abs(open_p - high_p) <= tolerance
-            is_open_low = abs(open_p - low_p) <= tolerance
-
-            if is_open_high and is_open_low:
-                return None
-            if is_open_high and "Open=Low Only" in pattern_filter:
-                return None
-            if is_open_low and "Open=High Only" in pattern_filter:
-                return None
-
-            if is_open_high or is_open_low:
-                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
-            return None
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
-
-    df_out = pd.DataFrame(results)
-    if not df_out.empty:
-        df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
-        df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
-
-    return df_out, source_note, total_fno
-
-def style_scanner_table(df):
-    def highlight_pattern(val):
-        if "Open=High" in str(val):
-            return "color: #ff5252; font-weight: bold;"
-        elif "Open=Low" in str(val):
-            return "color: #4caf50; font-weight: bold;"
-        return ""
-
-    def highlight_status(val):
-        return "color: #4caf50; font-weight: bold;" if val == "Active" else "color: #ff9800; font-weight: bold;"
-
-    def highlight_power(val):
-        if "Ultra" in str(val):
-            return "background-color: #9c27b0; color: white; font-weight: bold;"
-        elif "Strong" in str(val):
-            return "background-color: #2196f3; color: white; font-weight: bold;"
-        return ""
-
-    return (
-        df.style
-        .map(highlight_pattern, subset=["Pattern"])
-        .map(highlight_status, subset=["Status"])
-        .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
-        .map(highlight_power, subset=["Power"])
-    )
 
 # --- Main App UI ---
 st.title("📊 NSE F&O Open=High / Open=Low Scanner")
