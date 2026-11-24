@@ -35,9 +35,12 @@ st.sidebar.header("⚙️ Scanner Filters")
 pattern_filter = st.sidebar.selectbox("Show Patterns", ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"])
 tolerance_pct = st.sidebar.slider("Open=High/Low Tolerance (%)", min_value=0.00, max_value=0.15, value=0.02, step=0.01, help="0.00% = exact match; 0.02% allows minor 1-tick noise.")
 
+import time  # Add this import at the top with your other imports
+
 HEADERS = {
     "Accept": "application/json",
-    "Authorization": f"Bearer {ACCESS_TOKEN}"
+    "Authorization": f"Bearer {ACCESS_TOKEN}",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 @st.cache_data(ttl=43200)
@@ -94,10 +97,10 @@ def get_historical_stats(instrument_key, token):
     return atr_14, avg_vol_20, last_candle
 
 def fetch_batched_quotes(instrument_keys):
-    """Fetches live/last-session quotes for all F&O stocks in batches of 100."""
+    """Fetches live/last-session quotes in batches of 50 with CloudFront-safe headers."""
     url = "https://upstox.com"
     all_quotes = {}
-    batch_size = 100
+    batch_size = 50
 
     for i in range(0, len(instrument_keys), batch_size):
         batch = instrument_keys[i:i + batch_size]
@@ -106,6 +109,8 @@ def fetch_batched_quotes(instrument_keys):
         
         if res.status_code == 401:
             return None, "🔒 Token Expired or Invalid (HTTP 401). Please generate a fresh Upstox token and paste it in the sidebar."
+        elif res.status_code == 403:
+            return None, "🛡️ Blocked by Upstox Firewall (HTTP 403). Try refreshing in 10 seconds or check your token."
         elif res.status_code != 200 or not res.text.strip():
             return None, f"Upstox API Error (HTTP {res.status_code}): {res.text[:250]}"
             
@@ -114,6 +119,7 @@ def fetch_batched_quotes(instrument_keys):
             return None, f"Upstox API Error: {data}"
             
         all_quotes.update(data.get("data", {}))
+        time.sleep(0.15)
         
     return all_quotes, None
 
