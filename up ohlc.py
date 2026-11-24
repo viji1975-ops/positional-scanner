@@ -166,11 +166,11 @@ def get_all_fno_stocks():
     return dict(sorted(FALLBACK_FNO_STOCKS.items(), key=lambda x: x))
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _fetch_candle_cached(encoded_key, to_date, from_date, token):
-    url = f"https://upstox.com{encoded_key}/day/{to_date}/{from_date}"
+def _fetch_candle_v3(encoded_key, to_date, from_date, token):
+    """Fetches daily candles using Upstox V3 Historical Candle API."""
+    url = f"https://upstox.com{encoded_key}/days/1/{to_date}/{from_date}"
     headers = {
         "Accept": "application/json",
-        "Api-Version": "2.0",
         "Authorization": f"Bearer {token}"
     }
     res = requests.get(url, headers=headers, timeout=10)
@@ -179,22 +179,17 @@ def _fetch_candle_cached(encoded_key, to_date, from_date, token):
     return res.json()
 
 def get_historical_stats(instrument_key, token):
-    """Fetches daily candles with URL-encoded instrument_key and skips caching on errors."""
+    """Computes 14-day ATR, 20-day Avg Vol, PDH/PDL, and latest candle from Upstox V3."""
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
     encoded_key = quote(instrument_key.strip(), safe="")
 
     try:
-        payload = _fetch_candle_cached(encoded_key, to_date, from_date, token)
-    except Exception as e:
-        st.session_state["last_api_error"] = str(e)
+        payload = _fetch_candle_v3(encoded_key, to_date, from_date, token)
+    except Exception:
         return None
 
     if not payload or "_error" in payload:
-        if payload and "_error" in payload:
-            st.session_state["last_api_error"] = payload["_error"]
-        # Clear cache entry so failed calls aren't stuck for 15 mins
-        _fetch_candle_cached.clear()
         return None
 
     candles = payload.get("data", {}).get("candles", [])
@@ -202,7 +197,7 @@ def get_historical_stats(instrument_key, token):
         return None
 
     df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "volume", "oi"])
-    df = df.iloc[::-1].reset_index(drop=True)
+    df = df.iloc[::-1].reset_index(drop=True)  # Oldest to newest
 
     df["prev_close"] = df["close"].shift(1)
     df["tr"] = df[["high", "prev_close"]].max(axis=1) - df[["low", "prev_close"]].min(axis=1)
@@ -405,7 +400,7 @@ def scan_all_fno():
             results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
 
     else:
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             candle_outputs = list(executor.map(scan_via_candle, list(fno_dict.items())))
 
         session_dates = [d for _, d in candle_outputs if d is not None]
