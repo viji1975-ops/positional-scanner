@@ -604,3 +604,227 @@ def fetch_fyers_5m_day(fyers_symbol, target_date_str, auth_token):
             df["date_str"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d")
             day_df = df[df["date_str"] == target_date_str].reset_index(drop=True)
             if not day_df.empty:
+                return day_df
+    except Exception:
+        pass
+    return None
+
+def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token):
+    stock_lots = get_fyers_lot_sizes()
+    idx_lots = get_index_lot_sizes()
+    candles_for_orb = 1 if orb_minutes == 5 else 3
+    rows = []
+    progress = st.progress(0, text=f"Replaying {replay_date_str}...")
+
+    for idx, label in enumerate(items_list):
+        progress.progress((idx + 1) / len(items_list), text=f"Scanning {label} ({idx+1}/{len(items_list)})...")
+        time.sleep(0.08)
+
+        is_index = label in INDEX_CONFIG
+        fyers_sym = INDEX_CONFIG[label]["fyers"] if is_index else f"NSE:{label}-EQ"
+        display_sym = f"🏛️ {label}" if is_index else f"NSE:{label}"
+
+        url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+        headers = {"Authorization": auth_token, "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+        end_dt = datetime.strptime(replay_date_str, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=45)
+        params = {"symbol": fyers_sym, "resolution": "D", "date_format": "1", "range_from": start_dt.strftime("%Y-%m-%d"), "range_to": replay_date_str, "cont_flag": "1"}
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            payload = res.json()
+            candles = payload.get("candles", ())
+            if payload.get("s") != "ok" or len(candles) < 15:
+                continue
+
+            df_d = pd.DataFrame(candles, columns=("epoch", "open", "high", "low", "close", "volume"))
+            df_d["date_str"] = pd.to_datetime(df_d["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d")
+            df_d = df_d[df_d["date_str"] <= replay_date_str].reset_index(drop=True)
+            if len(df_d) < 15 or df_d["date_str"].iloc[-1] != replay_date_str:
+                continue
+
+            last_r, prev_r = df_d.iloc[-1], df_d.iloc[-2]
+            open_p, high_p, low_p, close_p = float(last_r["open"]), float(last_r["high"]), float(last_r["low"]), float(last_r["close"])
+            curr_vol = float(last_r["volume"])
+
+            is_oh, is_ol = is_exact_ohol(open_p, high_p, low_p)
+            if not (is_oh or is_ol):
+                continue
+
+            hist_prior = df_d.iloc[:-1].copy()
+            hist_prior["prev_close"] = hist_prior["close"].shift(1)
+            hist_prior["tr"] = hist_prior[["high", "prev_close"]].max(axis=1) - hist_prior[["low", "prev_close"]].min(axis=1)
+            atr_14 = round(float(hist_prior["tr"].tail(14).mean()), 2)
+            avg_vol_20 = float(hist_prior["volume"].tail(20).mean())
+            pdh, pdl = float(prev_r["high"]), float(prev_r["low"])
+
+            day_5m = fetch_fyers_5m_day(fyers_sym, replay_date_str, auth_token)
+            orb_ok = False
+            orb_text = "⏳ Pending ORB"
+            outcome = "Closed In-Range"
+
+            risk_unit = atr_14 * 0.5
+            t1 = round(open_p - risk_unit, 1) if is_oh else round(open_p + risk_unit, 1)
+            t2 = round(open_p - risk_unit * 2, 1) if is_oh else round(open_p + risk_unit * 2, 1)
+
+            if day_5m is not None and len(day_5m) >= candles_for_orb:
+                orb_slice = day_5m.iloc[:candles_for_orb]
+                orb_h, orb_l = float(orb_slice["high"].max()), float(orb_slice["low"].min())
+                after_orb = day_5m.iloc[candles_for_orb:]
+
+                if is_oh:
+                    orb_ok = bool((after_orb["low"] < orb_l).any()) if not after_orb.empty else False
+                    orb_text = f"✅ {orb_minutes}m Broken (<{orb_l:.1f})" if orb_ok else f"⏳ Inside (>{orb_l:.1f})"
+                    outcome = "🎯 1:2 Target Hit" if low_p <= t2 else ("✅ 1:1 Target Hit" if low_p <= t1 else ("🟢 Closed in Profit" if close_p < open_p else "🔴 Closed at Open"))
+                else:
+                    orb_ok = bool((after_orb["high"] > orb_h).any()) if not after_orb.empty else False
+                    orb_text = f"✅ {orb_minutes}m Breakout (>{orb_h:.1f})" if orb_ok else f"⏳ Inside (<{orb_h:.1f})"
+                    outcome = "🎯 1:2 Target Hit" if high_p >= t2 else ("✅ 1:1 Target Hit" if high_p >= t1 else ("🟢 Closed in Profit" if close_p > open_p else "🔴 Closed at Open"))
+
+            if is_index:
+                vol_txt, power, p_rank, vol_ratio = "Index", "🏛️ Index", 4, 999.0
+                opt_str = get_index_option_strikes(label, open_p, is_oh)
+                lot_val = idx_lots.get(label, INDEX_CONFIG[label]["lot"])
+            else:
+                vol_ratio = round(curr_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 0
+                vol_txt = f"{vol_ratio}x"
+                power, p_rank = ("🔥 Ultra", 3) if vol_ratio >= 4.0 else (("⚡ Strong", 2) if vol_ratio >= 2.0 else ("Normal", 1))
+                opt_str = get_option_strikes(open_p, is_oh)
+                lot_val = stock_lots.get(label) or DEFAULT_LOT_SIZES.get(label, 0)
+
+            lvl_tag = "Above PDH 🟢" if close_p > pdh else ("Below PDL 🔴" if close_p < pdl else "Inside Prev Day")
+
+            rows.append({
+                "Symbol": display_sym,
+                "Pattern": f"Open=High ({open_p:.2f})" if is_oh else f"Open=Low ({open_p:.2f})",
+                "ORB Confirm": orb_text,
+                "Day Outcome": outcome,
+                "Close (₹)": f"{close_p:.2f}",
+                "ATM | 1-ITM Option": opt_str,
+                "Lot Size": lot_val,
+                "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
+                "PDH/PDL": lvl_tag,
+                "Volume": vol_txt,
+                "Power": power,
+                "_orb_ok": orb_ok,
+                "_vol_ratio": vol_ratio,
+                "_power_rank": p_rank
+            })
+        except Exception:
+            continue
+
+    progress.empty()
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_power_rank", "_orb_ok", "_vol_ratio"], ascending=[False, False, False])
+        df_out = df_out.drop(columns=["_orb_ok", "_vol_ratio", "_power_rank"])
+    return df_out
+
+def style_scanner_table(df):
+    return (
+        df.style
+        .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+        .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
+        .map(lambda v: "color: #4caf50; font-weight: bold;" if v == "Active" else "color: #ff9800; font-weight: bold;", subset=["Status"])
+        .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+        .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+        .map(lambda v: "background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else ""), subset=["Power"])
+    )
+
+# --- Main App UI ---
+st.subheader("📊 Fyers Pure NSE/BSE Indices & F&O Exact Open=High / Open=Low + ORB Scanner")
+tab_live, tab_bt = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester"))
+
+with tab_live:
+    col_btn, col_info = st.columns((1, 5))
+    with col_btn:
+        if st.button("🔄 Refresh"):
+            st.cache_data.clear()
+            st.rerun()
+
+    orb_mins_live = 5 if "5-Min" in orb_timeframe else 15
+    with st.spinner("Scanning Indices & 148 F&O Stocks..."):
+        df_idx, idx_summary = scan_live_indices(FYERS_TOKEN, orb_mins_live)
+        df_results, source_note, total_fno = run_pure_fyers_scanner()
+
+    with col_info:
+        st.caption(f"Scanned **6 Indices + {total_fno} F&O Stocks** | Mode: **{source_note}**")
+
+    if idx_summary:
+        n50, snx, bnk = idx_summary.get("NIFTY 50", {}), idx_summary.get("SENSEX", {}), idx_summary.get("BANK NIFTY", {})
+        i1, i2, i3 = st.columns(3)
+        if n50: i1.metric("NIFTY 50", f"{n50['ltp']:.2f}", f"{n50['chp']:.2f}% (Open: {n50['open']:.2f})")
+        if snx: i2.metric("BSE SENSEX", f"{snx['ltp']:.2f}", f"{snx['chp']:.2f}% (Open: {snx['open']:.2f})")
+        if bnk: i3.metric("BANK NIFTY", f"{bnk['ltp']:.2f}", f"{bnk['chp']:.2f}% (Open: {bnk['open']:.2f})")
+
+    if not df_idx.empty:
+        st.markdown("#### 🏛️ Indices Exact (0.00%) Open=High / Open=Low Matches")
+        styled_idx = (
+            df_idx.style
+            .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+            .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
+            .map(lambda v: "color: #4caf50; font-weight: bold;" if v == "Active" else "color: #ff9800; font-weight: bold;", subset=["Status"])
+            .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+            .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+        )
+        st.dataframe(styled_idx, use_container_width=True, hide_index=True)
+    elif FYERS_TOKEN:
+        st.info("🏛️ Indices Check: None of the 6 indices currently hold an exact 0.00% Open=High or Open=Low.")
+
+    st.markdown("#### 📈 NSE F&O Stocks Exact (0.00%) Open=High / Open=Low Matches")
+    if not df_results.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Exact Stock Matches", len(df_results))
+        m2.metric("🟢 Open=Low (Bullish)", int(df_results["Pattern"].str.contains("Open=Low").sum()))
+        m3.metric("🔴 Open=High (Bearish)", int(df_results["Pattern"].str.contains("Open=High").sum()))
+        m4.metric("✅ ORB Confirmed", int(df_results["ORB Confirm"].str.contains("✅").sum()))
+        st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=520)
+    elif FYERS_TOKEN:
+        st.info("No F&O stocks matched your current filters right now.")
+
+with tab_bt:
+    st.markdown("Select any past trading date to replay exact **0.00% Open=High / Open=Low + ORB** across **Indices (Nifty, Sensex...)** and **F&O Stocks**.")
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        selected_date = st.date_input("Select Historical Trading Date", value=datetime.now().date() - timedelta(days=1), max_value=datetime.now().date())
+    with b2:
+        bt_universe = st.selectbox("Scan Universe", ("All 148 F&O Stocks + 6 Indices (~16s)", "Indices Only (Nifty, Sensex, BankNifty, FinNifty, Midcap, Bankex — ~1s)", "Top 40 Liquid F&O + 6 Indices (~6s)"))
+    with b3:
+        bt_orb = st.selectbox("ORB Confirmation", (5, 15), format_func=lambda m: f"{m}-Min ORB")
+
+    if st.button("▶️ Replay Selected Date", type="primary"):
+        if not FYERS_TOKEN:
+            st.warning("⚠️ Please log in to Fyers in the left sidebar first.")
+        else:
+            date_str = selected_date.strftime("%Y-%m-%d")
+            idx_list = list(INDEX_CONFIG.keys())
+            test_items = idx_list if "Indices Only" in bt_universe else (idx_list + sorted(set(FNO_SYMBOLS))[:40] if "Top 40" in bt_universe else idx_list + sorted(set(FNO_SYMBOLS)))
+            df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN)
+
+            if df_replay.empty:
+                st.info(f"No exact 0.00% Open=High or Open=Low matches found on **{date_str}**.")
+            else:
+                bull_c = df_replay["Pattern"].str.contains("Open=Low").sum()
+                bear_c = df_replay["Pattern"].str.contains("Open=High").sum()
+                orb_c = df_replay["ORB Confirm"].str.contains("✅").sum()
+                tgt_c = df_replay["Day Outcome"].str.contains("Target Hit").sum()
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Total Exact Matches", len(df_replay))
+                k2.metric("🟢 Open=Low | 🔴 Open=High", f"{int(bull_c)} | {int(bear_c)}")
+                k3.metric("✅ ORB Confirmed", int(orb_c))
+                k4.metric("🎯 ATR Targets Hit", int(tgt_c))
+
+                styled_replay = (
+                    df_replay.style
+                    .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Profit" in str(v) else "color: #ff5252;", subset=["Day Outcome"])
+                    .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+                    .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+                    .map(lambda v: "background-color: #6a1b9a; color: white; font-weight: bold;" if "Index" in str(v) else ("background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else "")), subset=["Power"])
+                )
+                st.dataframe(styled_replay, use_container_width=True, hide_index=True, height=560)
+
+if auto_refresh and FYERS_TOKEN:
+    time.sleep(60)
+    st.rerun()
