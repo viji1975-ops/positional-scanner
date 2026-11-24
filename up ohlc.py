@@ -8,7 +8,7 @@ import streamlit as st
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="Upstox F&O OHOL Scanner", layout="wide")
+st.set_page_config(page_title="Upstox Exact OHOL Scanner", layout="wide")
 
 # --- Sidebar: Token & Scanner Controls ---
 st.sidebar.header("🔑 Upstox API Settings")
@@ -34,16 +34,8 @@ else:
 st.sidebar.divider()
 st.sidebar.header("⚙️ Scanner Filters")
 pattern_filter = st.sidebar.selectbox(
-    "Show Patterns",
+    "Show Exact Patterns",
     ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
-)
-tolerance_pct = st.sidebar.slider(
-    "Open=High/Low Tolerance (%)",
-    min_value=0.00,
-    max_value=0.20,
-    value=0.05,
-    step=0.01,
-    help="0.00% = exact match; 0.05% allows minor opening tick noise."
 )
 auto_refresh = st.sidebar.checkbox("🔄 Auto-Refresh Every 60s", value=False)
 
@@ -55,10 +47,10 @@ HEADERS = {
 
 @st.cache_data(ttl=43200)
 def get_all_fno_stocks():
-    """Downloads Upstox NSE instrument master with CDN-safe headers and JSON fallback."""
+    """Downloads Upstox NSE instrument master and extracts all unique F&O equity underlyings."""
     urls = [
-        "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
-        "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz",
+        "https://upstox.com",
+        "https://upstox.com",
     ]
     cdn_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -71,7 +63,6 @@ def get_all_fno_stocks():
             res = requests.get(url, headers=cdn_headers, timeout=25)
             if res.status_code != 200:
                 continue
-            # Check gzip magic bytes (\x1f\x8b); requests may already auto-decompress
             if res.content[:2] == b"\x1f\x8b":
                 raw_data = gzip.decompress(res.content).decode("utf-8")
             else:
@@ -142,7 +133,7 @@ def get_historical_stats(instrument_key, token):
 
 def fetch_batched_quotes(instrument_keys):
     """Fetches quotes in batches of 50 with safe JSON parsing."""
-    url = "https://api.upstox.com/v2/market-quote/quotes"
+    url = "https://upstox.com"
     all_quotes = {}
     batch_size = 50
 
@@ -162,7 +153,6 @@ def fetch_batched_quotes(instrument_keys):
         try:
             data = res.json()
         except Exception:
-            # Non-JSON response (e.g., CloudFront HTML page) -> trigger historical fallback
             return None, "NON_JSON"
 
         if data.get("status") != "success":
@@ -227,6 +217,15 @@ def build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats):
         "_power_rank": power_rank
     }
 
+def is_exact_ohol(open_p, high_p, low_p):
+    """Checks for exact Open=High or Open=Low to 2 decimal places (NSE paise precision)."""
+    o = round(float(open_p), 2)
+    h = round(float(high_p), 2)
+    l = round(float(low_p), 2)
+    if o <= 0 or h == l:
+        return False, False
+    return (o == h), (o == l)
+
 def scan_all_fno():
     if not ACCESS_TOKEN:
         st.warning("👈 Please paste your daily Upstox Access Token in the left sidebar to start scanning.")
@@ -239,14 +238,13 @@ def scan_all_fno():
         return pd.DataFrame(), "", 0
 
     total_fno = len(fno_dict)
-    tol_multiplier = tolerance_pct / 100.0
     quotes, err = fetch_batched_quotes(list(fno_dict.keys()))
 
     if err and "401" in err:
         st.error(err)
         return pd.DataFrame(), "", total_fno
 
-    # Map quotes by 'instrument_token' (e.g. 'NSE_EQ|INE002A01018') because Upstox keys dict by symbol
+    # Map quotes by instrument_token ('NSE_EQ|INE...')
     quotes_by_token = {}
     if quotes:
         for q_data in quotes.values():
@@ -259,9 +257,9 @@ def scan_all_fno():
     )
 
     results = []
-    source_note = "Live / Last Session Quote"
+    source_note = "Live / Last Session Quote (Exact Match)"
 
-    # Primary Path: Fast Batch Quotes (works on holidays/after-hours too when Upstox holds last session OHLC)
+    # Primary Path: Batch Quotes API
     if has_live_open:
         candidates = []
         for key, symbol in fno_dict.items():
@@ -274,15 +272,8 @@ def scan_all_fno():
             ltp = data.get("last_price", 0)
             curr_vol = data.get("volume", 0)
 
-            if open_p == 0:
-                continue
+            is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
 
-            tolerance = open_p * tol_multiplier
-            is_open_high = abs(open_p - high_p) <= tolerance
-            is_open_low = abs(open_p - low_p) <= tolerance
-
-            if is_open_high and is_open_low:
-                continue
             if is_open_high and "Open=Low Only" in pattern_filter:
                 continue
             if is_open_low and "Open=High Only" in pattern_filter:
@@ -299,73 +290,3 @@ def scan_all_fno():
             return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
-
-    # Fallback Path: If Quotes had open == 0 (e.g., 9:00–9:15 AM pre-open reset)
-    else:
-        session_dates = []
-        def scan_via_candle(kv):
-            key, symbol = kv
-            stats = get_historical_stats(key, ACCESS_TOKEN)
-            if not stats:
-                return None
-            lc = stats["last_candle"]
-            session_dates.append(str(lc["time"])[:10])
-
-            open_p = lc["open"]
-            high_p = lc["high"]
-            low_p = lc["low"]
-            ltp = lc["close"]
-            curr_vol = lc["volume"]
-
-            if open_p == 0:
-                return None
-
-            tolerance = open_p * tol_multiplier
-            is_open_high = abs(open_p - high_p) <= tolerance
-            is_open_low = abs(open_p - low_p) <= tolerance
-
-            if is_open_high and is_open_low:
-                return None
-            if is_open_high and "Open=Low Only" in pattern_filter:
-                return None
-            if is_open_low and "Open=High Only" in pattern_filter:
-                return None
-
-            if is_open_high or is_open_low:
-                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
-            return None
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
-
-        last_date = max(session_dates) if session_dates else "Last Trading Day"
-        source_note = f"Last Trading Session ({last_date})"
-
-    df_out = pd.DataFrame(results)
-    if not df_out.empty:
-        df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
-        df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
-
-    return df_out, source_note, total_fno
-
-# --- Main App UI ---
-st.title("📊 NSE F&O Open=High / Open=Low Scanner")
-
-if st.button("🔄 Refresh Scanner"):
-    st.rerun()
-
-with st.spinner("Scanning all NSE F&O stocks..."):
-    df_results, source_note, total_fno = scan_all_fno()
-
-if total_fno > 0:
-    st.caption(f"Scanned **{total_fno} NSE F&O Stocks** | Matches Found: **{len(df_results)}** | Mode: **{source_note}**")
-
-if not df_results.empty:
-    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
-elif ACCESS_TOKEN:
-    st.info("No F&O stocks matched Open=High or Open=Low with the current tolerance. Try increasing the Tolerance slider in the sidebar.")
-
-if auto_refresh and ACCESS_TOKEN:
-    time.sleep(60)
-    st.rerun()
