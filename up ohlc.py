@@ -242,6 +242,11 @@ def fetch_fyers_live(symbols, fyers_auth_token):
     if not fyers_auth_token:
         return None, "No Fyers token entered"
 
+    # Check if user accidentally pasted Client ID / Secret instead of JWT Access Token
+    token_part = fyers_auth_token.split(":", 1)[-1]
+    if len(token_part) < 50:
+        return None, "Invalid token length (paste full Fyers JWT Access Token, not Client ID)"
+
     url = "https://fyers.in"
     headers = {"Authorization": fyers_auth_token}
     quotes_by_sym = {}
@@ -251,15 +256,16 @@ def fetch_fyers_live(symbols, fyers_auth_token):
         fyers_syms = ",".join(f"NSE:{s}-EQ" for s in batch)
         try:
             res = requests.get(url, headers=headers, params={"symbols": fyers_syms}, timeout=12)
-            if res.status_code != 200:
-                return None, f"HTTP {res.status_code}"
+            if res.status_code in (401, 403):
+                return None, f"Token expired or invalid (HTTP {res.status_code})"
+            if res.status_code != 200 or not res.text.strip():
+                return None, f"Fyers unavailable / Market closed (HTTP {res.status_code})"
             payload = res.json()
             if payload.get("s") != "ok":
                 return None, payload.get("message", "Fyers API error")
 
             for item in payload.get("d", []):
                 v = item.get("v", {})
-                # Convert 'NSE:RELIANCE-EQ' -> 'RELIANCE'
                 clean_sym = item.get("n", "").replace("NSE:", "").replace("-EQ", "")
                 if clean_sym and v.get("open_price", 0) > 0:
                     quotes_by_sym[clean_sym] = {
@@ -270,7 +276,7 @@ def fetch_fyers_live(symbols, fyers_auth_token):
                         "vol": float(v.get("volume", 0)),
                     }
         except Exception as e:
-            return None, str(e)
+            return None, f"Fyers offline: {e}"
         time.sleep(0.1)
 
     if not quotes_by_sym:
@@ -391,14 +397,33 @@ def style_scanner_table(df):
     )
 
 # --- Main App UI ---
-st.title("📊 NSE F&O Exact Open=High / Open=Low Scanner")
+st.subheader("📊 NSE F&O Exact Open=High / Open=Low Scanner")
 
-if st.button("🔄 Refresh Scanner"):
-    st.cache_data.clear()
-    st.rerun()
+col_btn, col_info = st.columns([1, 5])
+with col_btn:
+    if st.button("🔄 Refresh"):
+        st.cache_data.clear()
+        st.rerun()
 
-with st.spinner("Scanning all NSE F&O stocks for exact Open=High / Open=Low..."):
+with st.spinner("Scanning all NSE F&O stocks..."):
     df_results, source_note, total_fno = run_scanner()
 
-st.caption(f"Scanned **{total_fno} NSE F&O Stocks** | Exact Matches Found: **{len(df_results)}** | Mode: **{source_note}**")
+with col_info:
+    st.caption(f"Scanned **{total_fno} F&O Stocks** | Mode: **{source_note}**")
 
+if not df_results.empty:
+    bull_count = df_results["Pattern"].str.contains("Open=Low").sum()
+    bear_count = df_results["Pattern"].str.contains("Open=High").sum()
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Exact Matches", len(df_results))
+    m2.metric("🟢 Open=Low (Bullish)", int(bull_count))
+    m3.metric("🔴 Open=High (Bearish)", int(bear_count))
+
+    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=550)
+else:
+    st.info("No F&O stocks had an exact Open=High or Open=Low in this session.")
+
+if auto_refresh:
+    time.sleep(60)
+    st.rerun()
