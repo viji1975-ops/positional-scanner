@@ -4,32 +4,60 @@ import requests
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-from urllib.parse import quote
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
-st.set_page_config(page_title="NSE F&O Exact OHOL Scanner", layout="wide")
+st.set_page_config(page_title="NSE F&O Exact OHOL Scanner (Fyers / Upstox)", layout="wide")
 
-# --- Sidebar: Token & Scanner Controls ---
-st.sidebar.header("🔑 Upstox API Settings")
-default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
+# --- Sidebar: Broker API Settings & Filters ---
+st.sidebar.header("🔑 Broker API Settings")
+broker_choice = st.sidebar.radio("Live Data Source", ["Fyers API v3 (Recommended)", "Upstox API v2"])
 
-user_token = st.sidebar.text_input(
-    "Paste Daily Access Token",
-    value="",
-    type="password",
-    placeholder="Paste today's Upstox token here...",
-    help="Used for live tick-by-tick Upstox quotes during market hours (9:15 AM - 3:30 PM IST)."
-)
+FYERS_APP_ID = ""
+FYERS_TOKEN = ""
+UPSTOX_TOKEN = ""
 
-ACCESS_TOKEN = user_token.strip() if user_token.strip() else default_token
+if "Fyers" in broker_choice:
+    default_fyers_id = st.secrets.get("FYERS_APP_ID", os.getenv("FYERS_APP_ID", "")).strip()
+    default_fyers_tok = st.secrets.get("FYERS_ACCESS_TOKEN", os.getenv("FYERS_ACCESS_TOKEN", "")).strip()
 
-if user_token.strip():
-    st.sidebar.success("✅ Using token pasted in sidebar")
-elif default_token:
-    st.sidebar.info("ℹ️ Using token from Streamlit Secrets")
+    FYERS_APP_ID = st.sidebar.text_input(
+        "Fyers App ID (e.g. XXXXX-100)",
+        value=default_fyers_id,
+        placeholder="Leave blank if pasting AppID:Token below"
+    ).strip()
+
+    fyers_input = st.sidebar.text_input(
+        "Paste Daily Fyers Access Token",
+        value="",
+        type="password",
+        placeholder="Paste Access Token or AppID:Token..."
+    ).strip()
+
+    raw_fyers = fyers_input if fyers_input else default_fyers_tok
+    if raw_fyers:
+        if ":" in raw_fyers:
+            FYERS_TOKEN = raw_fyers
+            st.sidebar.success("✅ Fyers AppID:Token ready")
+        elif FYERS_APP_ID:
+            FYERS_TOKEN = f"{FYERS_APP_ID}:{raw_fyers}"
+            st.sidebar.success("✅ Fyers Token combined with App ID")
+        else:
+            st.sidebar.warning("⚠️ Enter your Fyers App ID above (e.g. XXXXX-100)")
+    else:
+        st.sidebar.info("ℹ️ Paste Fyers token for live market ticks (shows last session when closed)")
 else:
-    st.sidebar.info("ℹ️ No Upstox token entered (will use NSE Daily Backup)")
+    default_upstox = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
+    upstox_input = st.sidebar.text_input(
+        "Paste Daily Upstox Access Token",
+        value="",
+        type="password",
+        placeholder="Paste today's Upstox token..."
+    ).strip()
+    UPSTOX_TOKEN = upstox_input if upstox_input else default_upstox
+    if UPSTOX_TOKEN:
+        st.sidebar.success("✅ Upstox Token ready")
+    else:
+        st.sidebar.info("ℹ️ Paste Upstox token for live quotes")
 
 st.sidebar.divider()
 st.sidebar.header("⚙️ Scanner Filters")
@@ -115,9 +143,7 @@ FNO_STOCKS = {
     "NSE_EQ|INE067A01029": "CGPOWER", "NSE_EQ|INE257A01026": "BHEL",
     "NSE_EQ|INE177H01021": "GODREJIND", "NSE_EQ|INE463V01026": "ANANDRATHI",
 }
-
 def is_exact_ohol(open_p, high_p, low_p):
-    """Checks exact Open=High or Open=Low to 2 decimal places (NSE paise precision)."""
     o = round(float(open_p), 2)
     h = round(float(high_p), 2)
     l = round(float(low_p), 2)
@@ -130,14 +156,11 @@ def build_row(symbol, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pd
     vol_ratio = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 0
 
     if vol_ratio >= 4.0:
-        power = "🔥 Ultra"
-        power_rank = 3
+        power, power_rank = "🔥 Ultra", 3
     elif vol_ratio >= 2.0:
-        power = "⚡ Strong"
-        power_rank = 2
+        power, power_rank = "⚡ Strong", 2
     else:
-        power = "Normal"
-        power_rank = 1
+        power, power_rank = "Normal", 1
 
     if ltp > pdh:
         level_tag = "Above PDH 🟢"
@@ -174,67 +197,95 @@ def build_row(symbol, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pd
     }
 
 @st.cache_data(ttl=600, show_spinner=False)
-def scan_via_yfinance(symbols_tuple):
-    """Batch-downloads 35 days of NSE daily OHLCV for all F&O stocks in ~2 seconds."""
+def get_baseline_stats(symbols_tuple):
+    """Fetches 35-day daily OHLCV for ATR-14, 20d Avg Volume, PDH/PDL, and last session fallback."""
     tickers = [f"{s}.NS" for s in symbols_tuple]
     raw = yf.download(tickers, period="35d", interval="1d", group_by="ticker", progress=False, threads=True)
     if raw.empty:
-        return [], "No Data"
+        return {}, "No Data"
 
-    results = []
+    stats_map = {}
     last_date = ""
 
     for sym in symbols_tuple:
-        ticker = f"{sym}.NS"
         try:
-            df = raw[ticker].dropna()
+            df = raw[f"{sym}.NS"].dropna().copy()
             if len(df) < 15:
                 continue
-
             if not last_date:
                 last_date = str(df.index[-1])[:10]
 
-            df = df.copy()
             df["prev_close"] = df["Close"].shift(1)
             df["tr"] = df[["High", "prev_close"]].max(axis=1) - df[["Low", "prev_close"]].min(axis=1)
             atr_14 = round(float(df["tr"].tail(14).mean()), 2)
             avg_vol_20 = float(df["Volume"].tail(20).mean())
 
-            last_row = df.iloc[-1]
-            prev_row = df.iloc[-2]
-
-            open_p = float(last_row["Open"])
-            high_p = float(last_row["High"])
-            low_p = float(last_row["Low"])
-            ltp = float(last_row["Close"])
-            curr_vol = float(last_row["Volume"])
-
-            is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
-            if is_open_high or is_open_low:
-                results.append({
-                    "sym": sym,
-                    "open": open_p,
-                    "ltp": ltp,
-                    "vol": curr_vol,
-                    "is_open_high": is_open_high,
-                    "atr": atr_14,
-                    "avg_vol": avg_vol_20,
-                    "pdh": float(prev_row["High"]),
-                    "pdl": float(prev_row["Low"]),
-                })
+            last_row, prev_row = df.iloc[-1], df.iloc[-2]
+            stats_map[sym] = {
+                "open": float(last_row["Open"]),
+                "high": float(last_row["High"]),
+                "low": float(last_row["Low"]),
+                "ltp": float(last_row["Close"]),
+                "vol": float(last_row["Volume"]),
+                "atr": atr_14,
+                "avg_vol": avg_vol_20,
+                "pdh": float(prev_row["High"]),
+                "pdl": float(prev_row["Low"]),
+            }
         except Exception:
             continue
 
-    return results, last_date
+    return stats_map, last_date
 
-def try_upstox_live(fno_dict, token):
-    """Attempts Upstox live quotes API; returns (quotes_dict, error_string)."""
-    if not token:
-        return None, "No token"
+def fetch_fyers_live(symbols, fyers_auth_token):
+    """Fetches live quotes from Fyers Data API v3 in batches of 50 symbols."""
+    if not fyers_auth_token:
+        return None, "No Fyers token entered"
+
+    url = "https://fyers.in"
+    headers = {"Authorization": fyers_auth_token}
+    quotes_by_sym = {}
+
+    for i in range(0, len(symbols), 50):
+        batch = symbols[i:i + 50]
+        fyers_syms = ",".join(f"NSE:{s}-EQ" for s in batch)
+        try:
+            res = requests.get(url, headers=headers, params={"symbols": fyers_syms}, timeout=12)
+            if res.status_code != 200:
+                return None, f"HTTP {res.status_code}"
+            payload = res.json()
+            if payload.get("s") != "ok":
+                return None, payload.get("message", "Fyers API error")
+
+            for item in payload.get("d", []):
+                v = item.get("v", {})
+                # Convert 'NSE:RELIANCE-EQ' -> 'RELIANCE'
+                clean_sym = item.get("n", "").replace("NSE:", "").replace("-EQ", "")
+                if clean_sym and v.get("open_price", 0) > 0:
+                    quotes_by_sym[clean_sym] = {
+                        "open": float(v.get("open_price", 0)),
+                        "high": float(v.get("high_price", 0)),
+                        "low": float(v.get("low_price", 0)),
+                        "ltp": float(v.get("lp", 0)),
+                        "vol": float(v.get("volume", 0)),
+                    }
+        except Exception as e:
+            return None, str(e)
+        time.sleep(0.1)
+
+    if not quotes_by_sym:
+        return None, "Market closed / open=0"
+    return quotes_by_sym, None
+
+def fetch_upstox_live(fno_dict, upstox_token):
+    """Fetches live quotes from Upstox v2 API."""
+    if not upstox_token:
+        return None, "No Upstox token entered"
+
     url = "https://upstox.com"
-    headers = {"Accept": "application/json", "Api-Version": "2.0", "Authorization": f"Bearer {token}"}
+    headers = {"Accept": "application/json", "Api-Version": "2.0", "Authorization": f"Bearer {upstox_token}"}
     keys = list(fno_dict.keys())
-    quotes_by_token = {}
+    quotes_by_sym = {}
 
     for i in range(0, len(keys), 50):
         batch = keys[i:i + 50]
@@ -246,55 +297,57 @@ def try_upstox_live(fno_dict, token):
             if payload.get("status") != "success":
                 return None, "API error"
             for q_data in payload.get("data", {}).values():
-                inst = q_data.get("instrument_token")
-                if inst:
-                    quotes_by_token[inst] = q_data
+                sym = fno_dict.get(q_data.get("instrument_token", ""))
+                ohlc = q_data.get("ohlc", {})
+                if sym and ohlc.get("open", 0) > 0:
+                    quotes_by_sym[sym] = {
+                        "open": float(ohlc.get("open", 0)),
+                        "high": float(ohlc.get("high", 0)),
+                        "low": float(ohlc.get("low", 0)),
+                        "ltp": float(q_data.get("last_price", 0)),
+                        "vol": float(q_data.get("volume", 0)),
+                    }
         except Exception as e:
             return None, str(e)
 
-    has_open = any(q.get("ohlc", {}).get("open", 0) > 0 for q in quotes_by_token.values())
-    if not has_open:
-        return None, "Holiday / Pre-open (open=0)"
-    return quotes_by_token, None
+    if not quotes_by_sym:
+        return None, "Market closed / open=0"
+    return quotes_by_sym, None
 
 def run_scanner():
     symbols = tuple(sorted(FNO_STOCKS.values()))
     total_fno = len(symbols)
+    stats_map, last_date = get_baseline_stats(symbols)
 
-    yf_matches, last_date = scan_via_yfinance(symbols)
-    live_quotes, upstox_note = try_upstox_live(FNO_STOCKS, ACCESS_TOKEN)
+    if "Fyers" in broker_choice:
+        live_quotes, api_note = fetch_fyers_live(symbols, FYERS_TOKEN)
+        broker_label = "Fyers API v3"
+    else:
+        live_quotes, api_note = fetch_upstox_live(FNO_STOCKS, UPSTOX_TOKEN)
+        broker_label = "Upstox API v2"
 
     raw_rows = []
     if live_quotes:
-        source_note = "Upstox Live Market Feed (Exact Match)"
-        tickers = [f"{s}.NS" for s in symbols]
-        hist_df = yf.download(tickers, period="35d", interval="1d", group_by="ticker", progress=False, threads=True)
-        for key, sym in FNO_STOCKS.items():
-            q = live_quotes.get(key, {})
-            ohlc = q.get("ohlc", {})
-            open_p, high_p, low_p = ohlc.get("open", 0), ohlc.get("high", 0), ohlc.get("low", 0)
-            ltp, curr_vol = q.get("last_price", 0), q.get("volume", 0)
-            is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
-            if not (is_open_high or is_open_low):
+        source_note = f"{broker_label} Live Feed (Exact Match)"
+        for sym, q in live_quotes.items():
+            st_info = stats_map.get(sym)
+            if not st_info:
                 continue
-            try:
-                df = hist_df[f"{sym}.NS"].dropna().copy()
-                df["prev_close"] = df["Close"].shift(1)
-                df["tr"] = df[["High", "prev_close"]].max(axis=1) - df[["Low", "prev_close"]].min(axis=1)
-                atr = round(float(df["tr"].tail(14).mean()), 2)
-                avg_vol = float(df["Volume"].tail(20).mean())
-                pdh, pdl = float(df.iloc[-2]["High"]), float(df.iloc[-2]["Low"])
-                raw_rows.append(build_row(sym, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pdl))
-            except Exception:
-                continue
+            is_open_high, is_open_low = is_exact_ohol(q["open"], q["high"], q["low"])
+            if is_open_high or is_open_low:
+                raw_rows.append(build_row(
+                    sym, q["open"], q["ltp"], q["vol"], is_open_high,
+                    st_info["atr"], st_info["avg_vol"], st_info["pdh"], st_info["pdl"]
+                ))
     else:
-        reason = upstox_note if upstox_note else "NSE Closed"
-        source_note = f"Last Trading Session ({last_date} — Exact Match | Upstox: {reason})"
-        for m in yf_matches:
-            raw_rows.append(build_row(
-                m["sym"], m["open"], m["ltp"], m["vol"], m["is_open_high"],
-                m["atr"], m["avg_vol"], m["pdh"], m["pdl"]
-            ))
+        source_note = f"Last Trading Session ({last_date} — Exact Match | {broker_label}: {api_note})"
+        for sym, st_info in stats_map.items():
+            is_open_high, is_open_low = is_exact_ohol(st_info["open"], st_info["high"], st_info["low"])
+            if is_open_high or is_open_low:
+                raw_rows.append(build_row(
+                    sym, st_info["open"], st_info["ltp"], st_info["vol"], is_open_high,
+                    st_info["atr"], st_info["avg_vol"], st_info["pdh"], st_info["pdl"]
+                ))
 
     filtered = []
     for r in raw_rows:
@@ -349,11 +402,3 @@ with st.spinner("Scanning all NSE F&O stocks for exact Open=High / Open=Low...")
 
 st.caption(f"Scanned **{total_fno} NSE F&O Stocks** | Exact Matches Found: **{len(df_results)}** | Mode: **{source_note}**")
 
-if not df_results.empty:
-    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
-else:
-    st.info("No F&O stocks had an exact Open=High or Open=Low in this session.")
-
-if auto_refresh:
-    time.sleep(60)
-    st.rerun()
