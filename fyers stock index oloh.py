@@ -246,35 +246,59 @@ def is_exact_ohol(open_p, high_p, low_p):
     return (o == h), (o == l)
 
 def check_option_alignment(matched_records, auth_token, nearest_opts):
-    """Checks ATM CE and ATM PE Open=Low / Open=High alignment for matched stocks and indices."""
+    """
+    Scans ATM -5 to ATM +5 strikes (11 strikes x CE/PE) for matched stocks and indices.
+    Returns dict: key_id -> {'badge': str, 'rank': int}
+    """
     if not matched_records or not auth_token:
         return {}
 
-    sym_pairs = {}
+    sym_strike_map = {}
     all_opt_syms = []
 
     for rec in matched_records:
         key_id = rec["key_id"]
         csv_sym = rec["csv_sym"]
         atm = round(float(rec["atm_strike"]), 2)
+        step = INDEX_CONFIG[key_id]["step"] if key_id in INDEX_CONFIG else get_stock_strike_step(atm)
         contracts = nearest_opts.get(csv_sym, {})
-        ce_sym = contracts.get((atm, "CE"))
-        pe_sym = contracts.get((atm, "PE"))
-        if ce_sym and pe_sym:
-            sym_pairs[key_id] = (ce_sym, pe_sym, rec["is_oh"])
-            all_opt_syms.extend((ce_sym, pe_sym))
+
+        strike_pairs = []
+        for offset in range(-5, 6):
+            st_val = round(atm + (offset * step), 2)
+            ce_sym = contracts.get((st_val, "CE"))
+            pe_sym = contracts.get((st_val, "PE"))
+            if ce_sym or pe_sym:
+                strike_pairs.append((offset, st_val, ce_sym, pe_sym))
+                if ce_sym:
+                    all_opt_syms.append(ce_sym)
+                if pe_sym:
+                    all_opt_syms.append(pe_sym)
+
+        if strike_pairs:
+            sym_strike_map[key_id] = (strike_pairs, rec["is_oh"])
 
     if not all_opt_syms:
         return {}
 
-    headers = {"Authorization": auth_token, "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    headers = {
+        "Authorization": auth_token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
     opt_quotes = {}
     unique_syms = sorted(set(all_opt_syms))
 
     for i in range(0, len(unique_syms), 50):
         batch = unique_syms[i:i + 50]
         try:
-            res = requests.get("https://" + "api-t1." + "fyers.in" + "/data/quotes", headers=headers, params={"symbols": ",".join(batch)}, timeout=10)
+            res = requests.get(
+                "https://" + "api-t1." + "fyers.in" + "/data/quotes",
+                headers=headers,
+                params={"symbols": ",".join(batch)},
+                timeout=10
+            )
             payload = res.json()
             if payload.get("s") == "ok":
                 for item in payload.get("d", ()):
@@ -288,35 +312,50 @@ def check_option_alignment(matched_records, auth_token, nearest_opts):
         except Exception:
             continue
 
+    fmt_st = lambda x: f"{int(x)}" if x == int(x) else f"{x:.1f}"
     results = {}
-    for key_id, (ce_sym, pe_sym, is_oh) in sym_pairs.items():
-        ce_ohl = opt_quotes.get(ce_sym)
-        pe_ohl = opt_quotes.get(pe_sym)
-        if not ce_ohl or not pe_ohl:
-            results[key_id] = {"badge": "Spot Only", "rank": 1}
-            continue
 
-        ce_oh, ce_ol = is_exact_ohol(ce_ohl.__getitem__(0), ce_ohl.__getitem__(1), ce_ohl.__getitem__(2))
-        pe_oh, pe_ol = is_exact_ohol(pe_ohl.__getitem__(0), pe_ohl.__getitem__(1), pe_ohl.__getitem__(2))
+    for key_id, (strike_pairs, is_oh) in sym_strike_map.items():
+        # Sort by closest strike to ATM first (offset 0, then +/-1, +/-2...)
+        strike_pairs.sort(key=lambda x: abs(x.__getitem__(0)))
 
-        if not is_oh:
-            if ce_ol and pe_oh:
-                results[key_id] = {"badge": "🔥 TRIPLE (CE O=L + PE O=H)", "rank": 3}
-            elif ce_ol:
-                results[key_id] = {"badge": "⚡ CE Open=Low", "rank": 2}
-            elif pe_oh:
-                results[key_id] = {"badge": "⚡ PE Open=High", "rank": 2}
+        triple_strikes = []
+        primary_ol_strikes = []
+        opposite_oh_strikes = []
+
+        for offset, st_val, ce_sym, pe_sym in strike_pairs:
+            ce_ohl = opt_quotes.get(ce_sym)
+            pe_ohl = opt_quotes.get(pe_sym)
+            ce_oh, ce_ol = is_exact_ohol(ce_ohl.__getitem__(0), ce_ohl.__getitem__(1), ce_ohl.__getitem__(2)) if ce_ohl else (False, False)
+            pe_oh, pe_ol = is_exact_ohol(pe_ohl.__getitem__(0), pe_ohl.__getitem__(1), pe_ohl.__getitem__(2)) if pe_ohl else (False, False)
+
+            if not is_oh:
+                # Bullish Spot (Open=Low): want CE Open=Low and PE Open=High
+                if ce_ol and pe_oh:
+                    triple_strikes.append(fmt_st(st_val))
+                if ce_ol:
+                    primary_ol_strikes.append(f"{fmt_st(st_val)} CE")
+                if pe_oh:
+                    opposite_oh_strikes.append(f"{fmt_st(st_val)} PE")
             else:
-                results[key_id] = {"badge": "Spot Only", "rank": 1}
+                # Bearish Spot (Open=High): want PE Open=Low and CE Open=High
+                if pe_ol and ce_oh:
+                    triple_strikes.append(fmt_st(st_val))
+                if pe_ol:
+                    primary_ol_strikes.append(f"{fmt_st(st_val)} PE")
+                if ce_oh:
+                    opposite_oh_strikes.append(f"{fmt_st(st_val)} CE")
+
+        if triple_strikes:
+            results[key_id] = {"badge": f"🔥 TRIPLE @ {triple_strikes.__getitem__(0)}", "rank": 3}
+        elif primary_ol_strikes and opposite_oh_strikes:
+            results[key_id] = {"badge": f"🔥 SPLIT ({primary_ol_strikes.__getitem__(0)} O=L | {opposite_oh_strikes.__getitem__(0)} O=H)", "rank": 3}
+        elif primary_ol_strikes:
+            results[key_id] = {"badge": f"⚡ {primary_ol_strikes.__getitem__(0)} Open=Low", "rank": 2}
+        elif opposite_oh_strikes:
+            results[key_id] = {"badge": f"⚡ {opposite_oh_strikes.__getitem__(0)} Open=High", "rank": 2}
         else:
-            if pe_ol and ce_oh:
-                results[key_id] = {"badge": "🔥 TRIPLE (PE O=L + CE O=H)", "rank": 3}
-            elif pe_ol:
-                results[key_id] = {"badge": "⚡ PE Open=Low", "rank": 2}
-            elif ce_oh:
-                results[key_id] = {"badge": "⚡ CE Open=High", "rank": 2}
-            else:
-                results[key_id] = {"badge": "Spot Only", "rank": 1}
+            results[key_id] = {"badge": "Spot Only", "rank": 1}
 
     return results
 
