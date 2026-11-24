@@ -263,9 +263,15 @@ def fetch_fyers_orb(sym, target_date, orb_minutes, auth_token):
 
 def fetch_fyers_live_quotes(symbols, auth_token):
     """Fetches real-time batch quotes from Fyers Data API v3."""
-    url = "https://fyers.in"
-    headers = {"Authorization": auth_token}
+    url = "https://" + "api-t1." + "fyers.in" + "/data/quotes"
+    headers = {
+        "Authorization": auth_token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
     quotes_by_sym = {}
+    last_err = None
 
     for i in range(0, len(symbols), 50):
         batch = symbols[i:i + 50]
@@ -275,10 +281,12 @@ def fetch_fyers_live_quotes(symbols, auth_token):
             if res.status_code in (401, 403):
                 return None, f"Token expired or invalid (HTTP {res.status_code})"
             if res.status_code != 200 or not res.text.strip():
-                return None, f"HTTP {res.status_code}"
+                last_err = f"HTTP {res.status_code} (empty body)"
+                continue
             payload = res.json()
             if payload.get("s") != "ok":
-                return None, payload.get("message", "Fyers API error")
+                last_err = payload.get("message", "Fyers API error")
+                continue
 
             for item in payload.get("d", []):
                 v = item.get("v", {})
@@ -292,11 +300,11 @@ def fetch_fyers_live_quotes(symbols, auth_token):
                         "vol": float(v.get("volume", 0)),
                     }
         except Exception as e:
-            return None, str(e)
-        time.sleep(0.1)
+            last_err = str(e)
+        time.sleep(0.15)
 
     if not quotes_by_sym:
-        return None, "Market closed / open=0"
+        return None, last_err or "No open prices returned"
     return quotes_by_sym, None
 
 def run_pure_fyers_scanner():
