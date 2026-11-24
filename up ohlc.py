@@ -266,5 +266,17 @@ def style_scanner_table(df):
 # --- Main App UI ---
 st.title("📊 NSE F&O Open=High / Open=Low Scanner")
 
-col1, col2 = st.columns([1, 4])
-with col1:
+if st.button("🔄 Refresh Scanner"):
+    st.rerun()
+
+with st.spinner("Scanning all NSE F&O stocks..."):
+    df_results, source_note, total_fno = scan_all_fno()
+
+if total_fno > 0:
+    st.caption(f"Scanned **{total_fno} NSE F&O Stocks** | Matches Found: **{len(df_results)}** | Mode: **{source_note}**")
+
+if not df_results.empty:
+    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
+elif ACCESS_TOKEN:
+    st.info("No F&O stocks matched Open=High or Open=Low right now (if it is 9:00–9:15 AM IST pre-open, check again at 9:16 AM IST).")
+
