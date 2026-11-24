@@ -6,8 +6,27 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Upstox OHOL Scanner", layout="wide")
 
-# Safely load token from Streamlit Secrets or Environment Variables
-ACCESS_TOKEN = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
+# --- Sidebar: Daily Upstox Token Input ---
+st.sidebar.header("🔑 Upstox API Settings")
+default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
+
+user_token = st.sidebar.text_input(
+    "Paste Daily Access Token",
+    value="",
+    type="password",
+    placeholder="Paste today's Upstox token here...",
+    help="Upstox tokens expire daily at 3:30 AM IST. Paste your fresh morning token here."
+)
+
+# Use the sidebar token if provided; otherwise fall back to Streamlit Secrets
+ACCESS_TOKEN = user_token.strip() if user_token.strip() else default_token
+
+if user_token.strip():
+    st.sidebar.success("✅ Using token pasted in sidebar")
+elif default_token:
+    st.sidebar.info("ℹ️ Using token from Streamlit Secrets")
+else:
+    st.sidebar.warning("⚠️ No token found. Paste your token above.")
 
 HEADERS = {
     "Accept": "application/json",
@@ -24,17 +43,23 @@ INSTRUMENTS = {
 }
 
 @st.cache_data(ttl=3600)
-def get_historical_stats(instrument_key):
+def get_historical_stats(instrument_key, token):
     """Fetches daily candles to compute 14-day ATR and 20-day Avg Volume."""
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=35)).strftime("%Y-%m-%d")
     
-    # Safe URL construction without spaces
     clean_key = instrument_key.strip()
     url = f"https://upstox.com{clean_key}/day/{to_date}/{from_date}"
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     
-    resp = requests.get(url, headers=HEADERS, timeout=10).json()
-    candles = resp.get("data", {}).get("candles", [])
+    res = requests.get(url, headers=headers, timeout=10)
+    if res.status_code != 200 or not res.text.strip():
+        return None, None
+
+    try:
+        candles = res.json().get("data", {}).get("candles", [])
+    except Exception:
+        return None, None
     
     if len(candles) < 15:
         return None, None
@@ -51,29 +76,31 @@ def get_historical_stats(instrument_key):
 
 def scan_ohol():
     if not ACCESS_TOKEN:
-        st.error("Missing UPSTOX_ACCESS_TOKEN. Please add it in Streamlit App Settings -> Secrets.")
+        st.warning("👈 Please paste your daily Upstox Access Token in the left sidebar to start scanning.")
         return pd.DataFrame()
 
     url = "https://upstox.com"
     params = {"instrument_key": ",".join(k.strip() for k in INSTRUMENTS.keys())}
     
-    res = requests.get(url, headers=HEADERS, params=params, timeout=10)
-    
-    # Prevent JSONDecodeError if Upstox returns an HTML error or 401 Unauthorized
-    if res.status_code != 200:
-        st.error(f"Upstox API Error (HTTP {res.status_code}): {res.text}")
+    try:
+        res = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    except requests.RequestException as e:
+        st.error(f"Network error connecting to Upstox: {e}")
         return pd.DataFrame()
 
-    response = res.json()
-    if response.get("status") != "success":
-        st.error(f"Upstox API Error: {response}")
+    if res.status_code == 401:
+        st.error("🔒 Token Expired or Invalid (HTTP 401). Please generate a fresh Upstox token for today and paste it in the left sidebar.")
+        return pd.DataFrame()
+    elif res.status_code != 200 or not res.text.strip():
+        st.error(f"Upstox API Error (HTTP {res.status_code}): {res.text or 'Empty response'}")
         return pd.DataFrame()
 
-    # Passing params as a dict prevents LocationParseError completely
-    url = "https://upstox.com"
-    params = {"instrument_key": ",".join(k.strip() for k in INSTRUMENTS.keys())}
-    
-    response = requests.get(url, headers=HEADERS, params=params, timeout=10).json()
+    try:
+        response = res.json()
+    except Exception:
+        st.error(f"Invalid response from Upstox: {res.text[:200]}")
+        return pd.DataFrame()
+
     if response.get("status") != "success":
         st.error(f"Upstox API Error: {response}")
         return pd.DataFrame()
@@ -104,7 +131,7 @@ def scan_ohol():
         if not (is_open_high or is_open_low):
             continue
 
-        atr, avg_vol = get_historical_stats(key)
+        atr, avg_vol = get_historical_stats(key, ACCESS_TOKEN)
         if not atr or not avg_vol:
             continue
 
@@ -144,7 +171,34 @@ def scan_ohol():
 
     return pd.DataFrame(results)
 
-# --- Streamlit UI ---
+def style_scanner_table(df):
+    """Applies color styling matching your screenshot."""
+    def highlight_pattern(val):
+        if "Open=High" in str(val):
+            return "color: #ff5252; font-weight: bold;"
+        elif "Open=Low" in str(val):
+            return "color: #4caf50; font-weight: bold;"
+        return ""
+
+    def highlight_status(val):
+        return "color: #4caf50; font-weight: bold;" if val == "Active" else "color: #ff9800; font-weight: bold;"
+
+    def highlight_power(val):
+        if "Ultra" in str(val):
+            return "background-color: #9c27b0; color: white; font-weight: bold;"
+        elif "Strong" in str(val):
+            return "background-color: #2196f3; color: white; font-weight: bold;"
+        return ""
+
+    return (
+        df.style
+        .map(highlight_pattern, subset=["Pattern"])
+        .map(highlight_status, subset=["Status"])
+        .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+        .map(highlight_power, subset=["Power"])
+    )
+
+# --- Main App UI ---
 st.title("📊 Intraday Open=High / Open=Low Scanner")
 
 if st.button("🔄 Refresh Live Data"):
@@ -152,7 +206,7 @@ if st.button("🔄 Refresh Live Data"):
 
 df_results = scan_ohol()
 
-if df_results.empty:
-    st.info("No Open=High or Open=Low setups detected right now (or market is closed).")
-else:
-    st.dataframe(df_results, use_container_width=True, hide_index=True)
+if not df_results.empty:
+    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
+elif ACCESS_TOKEN:
+    st.info("No Open=High or Open=Low setups detected right now (check again after 9:15 AM IST market open).")
