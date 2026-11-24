@@ -1157,7 +1157,7 @@ def analyze_institutional_activity(df_bhav):
 st.subheader("📊 Fyers NSE/BSE Indices & F&O Triple-Aligned Open=High / Open=Low Scanner")
 
 stock_lots, idx_lots, nearest_opts = get_fyers_masters()
-tab_live, tab_bt = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester", "🏦 Institutional Bhavcopy Radar"))
+tab_live, tab_bt, tab_inst = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester", "🏦 Institutional Bhavcopy Radar"))
 
 with tab_live:
     col_btn, col_info = st.columns((1, 5))
