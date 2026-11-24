@@ -363,6 +363,7 @@ def run_pure_fyers_scanner():
                 ohol_live.append((sym, q["open"], q["ltp"], q["vol"], is_oh))
 
         def enrich_live(item):
+            time.sleep(0.2)
             sym, open_p, ltp, vol, is_oh = item
             stats = fetch_fyers_daily_stats(sym, FYERS_TOKEN)
             if not stats:
