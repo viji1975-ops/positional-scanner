@@ -523,6 +523,7 @@ def scan_live_indices(auth_token, orb_mins, idx_lots, nearest_opts):
         return pd.DataFrame(), live_summary
 
     opt_align_map = check_option_alignment(matched_idx, auth_token, nearest_opts)
+    bhav_map = st.session_state.get("bhav_footprints", {})
     rows = []
 
     for m in matched_idx:
@@ -546,6 +547,10 @@ def scan_live_indices(auth_token, orb_mins, idx_lots, nearest_opts):
             orb_text = "⏳ Pending ORB"
 
         align_info = opt_align_map.get(idx_name, {"badge": "Spot Only", "rank": 1})
+        bhav_info = bhav_map.get(m["csv_sym"], {})
+        bhav_badge = bhav_info.get("badge", "—")
+        bhav_rank = 2 if bhav_info.get("is_high_prob") else (1 if bhav_badge != "—" else 0)
+
         if only_orb_confirmed and not orb_ok:
             continue
         if only_option_aligned and align_info["rank"] < 2:
@@ -568,6 +573,7 @@ def scan_live_indices(auth_token, orb_mins, idx_lots, nearest_opts):
             "Index": idx_name,
             "Pattern": pat,
             "Option O=L/O=H Align": align_info["badge"],
+            "🏦 Bhavcopy Signal": bhav_badge,
             "ORB Confirm": orb_text,
             "Status": status,
             "Price": f"{m['ltp']:.2f}",
@@ -576,14 +582,16 @@ def scan_live_indices(auth_token, orb_mins, idx_lots, nearest_opts):
             "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
             "Rev Target": rev_tgt,
             "PDH/PDL": lvl_tag,
+            "_bhav_rank": bhav_rank,
             "_align_rank": align_info["rank"],
             "_orb_ok": orb_ok
         })
 
     df_out = pd.DataFrame(rows)
     if not df_out.empty:
-        df_out = df_out.sort_values(by=["_align_rank", "_orb_ok"], ascending=[False, False]).drop(columns=["_align_rank", "_orb_ok"])
+        df_out = df_out.sort_values(by=["_bhav_rank", "_align_rank", "_orb_ok"], ascending=[False, False, False]).drop(columns=["_bhav_rank", "_align_rank", "_orb_ok"])
     return df_out, live_summary
+
 def run_pure_fyers_scanner(stock_lots, nearest_opts):
     symbols = sorted(set(FNO_SYMBOLS))
     total_fno = len(symbols)
@@ -650,6 +658,7 @@ def run_pure_fyers_scanner(stock_lots, nearest_opts):
         opt_check_records.append({"key_id": sym, "csv_sym": sym, "atm_strike": atm_strike, "is_oh": is_oh})
 
     opt_align_map = check_option_alignment(opt_check_records, FYERS_TOKEN, nearest_opts) if is_live_mode else {}
+    bhav_map = st.session_state.get("bhav_footprints", {})
 
     rows = []
     for sym, open_p, ltp, curr_vol, atp, is_oh, stats, orb in matched_items:
@@ -673,6 +682,10 @@ def run_pure_fyers_scanner(stock_lots, nearest_opts):
             orb_text = "⏳ Pending ORB"
 
         align_info = opt_align_map.get(sym, {"badge": "Spot Only" if is_live_mode else "Live Only", "rank": 1})
+        bhav_info = bhav_map.get(sym, {})
+        bhav_badge = bhav_info.get("badge", "—")
+        bhav_rank = 2 if bhav_info.get("is_high_prob") else (1 if bhav_badge != "—" else 0)
+
         if only_orb_confirmed and not orb_ok:
             continue
         if only_option_aligned and align_info["rank"] < 2:
@@ -705,6 +718,7 @@ def run_pure_fyers_scanner(stock_lots, nearest_opts):
             "Symbol": f"NSE:{sym}",
             "Pattern": pat,
             "Option O=L/O=H Align": align_info["badge"],
+            "🏦 Bhavcopy Signal": bhav_badge,
             "ORB Confirm": orb_text,
             "VWAP Align": vwap_txt,
             "Status": status,
@@ -715,6 +729,7 @@ def run_pure_fyers_scanner(stock_lots, nearest_opts):
             "PDH/PDL": lvl_tag,
             "Volume": f"{vol_ratio}x",
             "Power": power,
+            "_bhav_rank": bhav_rank,
             "_align_rank": align_info["rank"],
             "_orb_ok": orb_ok,
             "_vol_ratio": vol_ratio,
@@ -723,10 +738,11 @@ def run_pure_fyers_scanner(stock_lots, nearest_opts):
 
     df_out = pd.DataFrame(rows)
     if not df_out.empty:
-        df_out = df_out.sort_values(by=["_align_rank", "_orb_ok", "_power_rank", "_vol_ratio"], ascending=[False, False, False, False])
-        df_out = df_out.drop(columns=["_align_rank", "_orb_ok", "_vol_ratio", "_power_rank"])
+        df_out = df_out.sort_values(by=["_bhav_rank", "_align_rank", "_orb_ok", "_power_rank", "_vol_ratio"], ascending=[False, False, False, False, False])
+        df_out = df_out.drop(columns=["_bhav_rank", "_align_rank", "_orb_ok", "_vol_ratio", "_power_rank"])
 
     return df_out, source_note, total_fno
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_fyers_5m_day(fyers_symbol, target_date_str, auth_token):
     url = "https://" + "api-t1." + "fyers.in" + "/data/history"
@@ -955,8 +971,15 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
             continue
 
     if matched_raw:
-        progress.progress(1.0, text="Checking ±5 option strikes (CE/PE) for matched setups...")
+        progress.progress(1.0, text="Checking ±5 option strikes (CE/PE) & matching historical expiry...")
         opt_align_map = check_historical_option_alignment(matched_raw, replay_date_str, auth_token, nearest_opts)
+        for rec in matched_raw:
+            if opt_align_map.get(rec["key_id"], {}).get("badge") == "Expired Contract":
+                bhav_res = check_bhavcopy_option_alignment(rec, replay_date_str)
+                if bhav_res:
+                    opt_align_map[rec["key_id"]] = bhav_res
+                else:
+                    opt_align_map[rec["key_id"]] = {"badge": "Upload Bhavcopy for Expiry", "rank": 1}
     else:
         opt_align_map = {}
 
@@ -1049,9 +1072,9 @@ def parse_udiff_bhavcopies(uploaded_files, filter_sensex_only=False):
     return pd.concat(frames, ignore_index=True)
 
 def analyze_institutional_activity(df_bhav):
-    """Detects abnormal Futures OI buildup, Long/Short positioning, and Option Writing Walls on the latest Bhavcopy date."""
+    """Detects abnormal Futures OI buildup, Long/Short positioning, and Option Writing Walls."""
     if df_bhav.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), "", 0
 
     num_cols = ("OpnPric", "HghPric", "LwPric", "ClsPric", "OpnIntrst", "ChngInOpnIntrst", "TtlTradgVol", "StrkPric")
     for col in num_cols:
@@ -1062,6 +1085,177 @@ def analyze_institutional_activity(df_bhav):
     df_bhav["XpryDt"] = pd.to_datetime(df_bhav["XpryDt"]).dt.strftime("%Y-%m-%d")
     all_dates = sorted(df_bhav["TradDt"].unique())
     latest_dt = all_dates[-1]
+
+    # Save full normalized Bhavcopy DataFrame for historical backtest option-chain lookup
+    st.session_state["bhav_df"] = df_bhav
+
+    fut_df = df_bhav[df_bhav["FinInstrmTp"].isin(("IDF", "STF"))].copy()
+    fut_df = fut_df.sort_values("XpryDt").groupby(["TradDt", "TckrSymb"], as_index=False).first()
+
+    opt_latest = df_bhav[(df_bhav["TradDt"] == latest_dt) & (df_bhav["FinInstrmTp"].isin(("IDO", "STO")))].copy()
+    nearest_exp_map = opt_latest.groupby("TckrSymb")["XpryDt"].min().to_dict()
+    opt_latest = opt_latest[opt_latest["XpryDt"] == opt_latest["TckrSymb"].map(nearest_exp_map)]
+
+    results = []
+    footprint_lookup = {}
+
+    for sym, grp in fut_df.groupby("TckrSymb"):
+        grp = grp.sort_values("TradDt").reset_index(drop=True)
+        if grp["TradDt"].iloc[-1] != latest_dt or len(grp) < 3:
+            continue
+
+        last_r = grp.iloc[-1]
+        prev_r = grp.iloc[-2]
+        price_chg_pct = round(((last_r["ClsPric"] - prev_r["ClsPric"]) / prev_r["ClsPric"]) * 100, 2) if prev_r["ClsPric"] > 0 else 0.0
+        oi_chg = float(last_r["ChngInOpnIntrst"])
+        oi_chg_pct = round((oi_chg / prev_r["OpnIntrst"]) * 100, 2) if prev_r["OpnIntrst"] > 0 else 0.0
+
+        prior_grp = grp.iloc[:-1]
+        avg_abs_oi_chg = prior_grp["ChngInOpnIntrst"].abs().mean()
+        avg_vol = prior_grp["TtlTradgVol"].mean()
+
+        oi_spike_ratio = round(abs(oi_chg) / avg_abs_oi_chg, 2) if avg_abs_oi_chg > 0 else 0.0
+        vol_spike_ratio = round(last_r["TtlTradgVol"] / avg_vol, 2) if avg_vol > 0 else 0.0
+
+        f_oh, f_ol = is_exact_ohol(last_r["OpnPric"], last_r["HghPric"], last_r["LwPric"])
+        fut_ohol = "Fut Open=Low 🟢" if f_ol else ("Fut Open=High 🔴" if f_oh else "—")
+
+        is_high_prob = False
+        if abs(price_chg_pct) <= 0.6 and oi_chg > 0 and oi_spike_ratio >= 2.0:
+            footprint = "🕵️ Silent Accumulation (Flat Price + Huge OI)"
+            score = 5
+            is_high_prob = True
+        elif price_chg_pct > 0.5 and oi_chg > 0 and (oi_spike_ratio >= 1.8 or vol_spike_ratio >= 1.8):
+            footprint = "🟢 Institutional Long Buildup"
+            score = 4
+            is_high_prob = True
+        elif price_chg_pct < -0.5 and oi_chg > 0 and (oi_spike_ratio >= 1.8 or vol_spike_ratio >= 1.8):
+            footprint = "🔴 Institutional Short Buildup"
+            score = 4
+            is_high_prob = True
+        elif (f_ol or f_oh) and oi_spike_ratio >= 2.0:
+            footprint = f"🎯 Fut OHOL + {oi_spike_ratio}x OI Spike"
+            score = 4
+            is_high_prob = True
+        elif price_chg_pct > 0.8 and oi_chg < 0 and oi_spike_ratio >= 1.8:
+            footprint = "⚡ Aggressive Short Covering"
+            score = 2
+        elif price_chg_pct < -0.8 and oi_chg < 0 and oi_spike_ratio >= 1.8:
+            footprint = "⚠️ Long Unwinding"
+            score = 2
+        else:
+            footprint = "Normal Flow"
+            score = 1
+
+        if footprint != "Normal Flow":
+            footprint_lookup[sym] = {"badge": f"{footprint} ({oi_spike_ratio}x OI)", "is_high_prob": is_high_prob, "date": latest_dt}
+
+        sym_opts = opt_latest[opt_latest["TckrSymb"] == sym]
+        ce_opts = sym_opts[sym_opts["OptnTp"] == "CE"]
+        pe_opts = sym_opts[sym_opts["OptnTp"] == "PE"]
+
+        call_wall, put_wall = "—", "—"
+        if not ce_opts.empty:
+            top_ce = ce_opts.loc[ce_opts["ChngInOpnIntrst"].idxmax()]
+            if top_ce["ChngInOpnIntrst"] > 0:
+                call_wall = f"{int(top_ce['StrkPric'])} CE (+{int(top_ce['ChngInOpnIntrst']):,})"
+        if not pe_opts.empty:
+            top_pe = pe_opts.loc[pe_opts["ChngInOpnIntrst"].idxmax()]
+            if top_pe["ChngInOpnIntrst"] > 0:
+                put_wall = f"{int(top_pe['StrkPric'])} PE (+{int(top_pe['ChngInOpnIntrst']):,})"
+
+        results.append({
+            "Symbol": sym,
+            "Institutional Footprint": footprint,
+            "High Prob": is_high_prob,
+            "Fut Close": f"{last_r['ClsPric']:.2f}",
+            "Price Chg (%)": f"{price_chg_pct:+.2f}%",
+            "OI Chg (%)": f"{oi_chg_pct:+.2f}%",
+            "OI Spike": f"{oi_spike_ratio}x",
+            "Vol Spike": f"{vol_spike_ratio}x",
+            "Fut OHOL": fut_ohol,
+            "Max Call Wall (+OI)": call_wall,
+            "Max Put Wall (+OI)": put_wall,
+            "_score": score,
+            "_oi_spike": oi_spike_ratio
+        })
+
+    # Save cross-tagging lookup into session_state so Live Scanner displays it automatically
+    st.session_state["bhav_footprints"] = footprint_lookup
+
+    df_out = pd.DataFrame(results)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_score", "_oi_spike"], ascending=[False, False]).drop(columns=["_score", "_oi_spike"])
+    return df_out, latest_dt, len(all_dates)
+
+def check_bhavcopy_option_alignment(rec, replay_date_str):
+    """Fallback for expired backtest dates: checks ±5 strike CE/PE O=L/O=H from uploaded Bhavcopies."""
+    df_bhav = st.session_state.get("bhav_df")
+    if df_bhav is None or df_bhav.empty:
+        return None
+
+    csv_sym = rec["csv_sym"]
+    day_opts = df_bhav[
+        (df_bhav["TradDt"] == replay_date_str)
+        & (df_bhav["TckrSymb"] == csv_sym)
+        & (df_bhav["FinInstrmTp"].isin(("IDO", "STO")))
+        & (df_bhav["XpryDt"] >= replay_date_str)
+    ]
+    if day_opts.empty:
+        return None
+
+    # Select the corresponding nearest expiry date active on replay_date_str
+    nearest_exp = day_opts["XpryDt"].min()
+    exp_opts = day_opts[day_opts["XpryDt"] == nearest_exp]
+
+    key_id = rec["key_id"]
+    atm = round(float(rec["atm_strike"]), 2)
+    step = INDEX_CONFIG[key_id]["step"] if key_id in INDEX_CONFIG else get_stock_strike_step(atm)
+    fmt_st = lambda x: f"{int(x)}" if x == int(x) else f"{x:.1f}"
+
+    triple_strikes, primary_ol, opposite_oh = [], [], []
+    offsets = sorted(range(-5, 6), key=lambda o: abs(o))
+
+    for offset in offsets:
+        st_val = round(atm + (offset * step), 2)
+        ce_rows = exp_opts[(exp_opts["StrkPric"].round(2) == st_val) & (exp_opts["OptnTp"] == "CE")]
+        pe_rows = exp_opts[(exp_opts["StrkPric"].round(2) == st_val) & (exp_opts["OptnTp"] == "PE")]
+        if ce_rows.empty or pe_rows.empty:
+            continue
+
+        ce_r, pe_r = ce_rows.iloc[0], pe_rows.iloc[0]
+        ce_oh, ce_ol = is_exact_ohol(ce_r["OpnPric"], ce_r["HghPric"], ce_r["LwPric"])
+        pe_oh, pe_ol = is_exact_ohol(pe_r["OpnPric"], pe_r["HghPric"], pe_r["LwPric"])
+
+        if not rec["is_oh"]:
+            if ce_ol and pe_oh:
+                triple_strikes.append(fmt_st(st_val))
+            if ce_ol:
+                primary_ol.append(f"{fmt_st(st_val)} CE")
+            if pe_oh:
+                opposite_oh.append(f"{fmt_st(st_val)} PE")
+        else:
+            if pe_ol and ce_oh:
+                triple_strikes.append(fmt_st(st_val))
+            if pe_ol:
+                primary_ol.append(f"{fmt_st(st_val)} PE")
+            if ce_oh:
+                opposite_oh.append(f"{fmt_st(st_val)} CE")
+
+        if triple_strikes:
+            break
+
+    exp_tag = f"[Exp: {nearest_exp}]"
+    if triple_strikes:
+        return {"badge": f"🔥 TRIPLE @ {triple_strikes.__getitem__(0)} {exp_tag}", "rank": 3}
+    elif primary_ol and opposite_oh:
+        return {"badge": f"🔥 SPLIT ({primary_ol.__getitem__(0)} O=L | {opposite_oh.__getitem__(0)} O=H) {exp_tag}", "rank": 3}
+    elif primary_ol:
+        return {"badge": f"⚡ {primary_ol.__getitem__(0)} O=L {exp_tag}", "rank": 2}
+    elif opposite_oh:
+        return {"badge": f"⚡ {opposite_oh.__getitem__(0)} O=H {exp_tag}", "rank": 2}
+    return {"badge": f"Spot Only {exp_tag}", "rank": 1}
+
 
     # 1. Futures Institutional Activity (Nearest Expiry per Symbol per Date)
     fut_df = df_bhav[df_bhav["FinInstrmTp"].isin(("IDF", "STF"))].copy()
@@ -1314,19 +1508,22 @@ with tab_inst:
             st.caption(f"Analyzed **{days_loaded} Trading Days** | Latest Bhavcopy Date: **{latest_bhav_dt}** | Unusual Setups Found: **{len(df_inst)}**")
 
             if not df_inst.empty:
-                silent_c = df_inst["Institutional Footprint"].str.contains("Silent Accumulation").sum()
-                long_c = df_inst["Institutional Footprint"].str.contains("Long Buildup|Short Covering").sum()
-                short_c = df_inst["Institutional Footprint"].str.contains("Short Buildup|Long Unwinding").sum()
+                df_high_prob = df_inst[df_inst["High Prob"] == True].drop(columns=["High Prob"])
+                df_display_all = df_inst.drop(columns=["High Prob"])
+
+                silent_c = df_display_all["Institutional Footprint"].str.contains("Silent Accumulation").sum()
+                long_c = df_display_all["Institutional Footprint"].str.contains("Long Buildup|Short Covering").sum()
+                short_c = df_display_all["Institutional Footprint"].str.contains("Short Buildup|Long Unwinding").sum()
 
                 ic1, ic2, ic3, ic4 = st.columns(4)
-                ic1.metric("Total Institutional Alerts", len(df_inst))
-                ic2.metric("🕵️ Silent Accumulation", int(silent_c))
+                ic1.metric("Total Institutional Alerts", len(df_display_all))
+                ic2.metric("🎯 Tier-1 High-Prob Setups", len(df_high_prob))
                 ic3.metric("🟢 Bullish Buildup", int(long_c))
                 ic4.metric("🔴 Bearish Buildup", int(short_c))
 
                 def style_inst(val):
                     s = str(val)
-                    if "Silent Accumulation" in s:
+                    if "Silent Accumulation" in s or "Fut OHOL" in s:
                         return "background-color: #d500f9; color: white; font-weight: bold;"
                     elif "Long Buildup" in s or "Short Covering" in s:
                         return "color: #00e676; font-weight: bold;"
@@ -1334,18 +1531,30 @@ with tab_inst:
                         return "color: #ff5252; font-weight: bold;"
                     return ""
 
+                if not df_high_prob.empty:
+                    st.markdown(f"#### 🎯 High-Probability Institutional Footprints ({len(df_high_prob)} Tier-1 Setups — Auto-Cross-Tagged to Live Scanner)")
+                    styled_hp = (
+                        df_high_prob.style
+                        .map(style_inst, subset=["Institutional Footprint"])
+                        .map(lambda v: "color: #00e676; font-weight: bold;" if "Open=Low" in str(v) else ("color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else ""), subset=["Fut OHOL"])
+                    )
+                    st.dataframe(styled_hp, use_container_width=True, hide_index=True)
+                    st.divider()
+
+                st.markdown("#### 📋 All Unusual Institutional Activity")
                 styled_inst = (
-                    df_inst.style
+                    df_display_all.style
                     .map(style_inst, subset=["Institutional Footprint"])
                     .map(lambda v: "color: #00e676; font-weight: bold;" if "Open=Low" in str(v) else ("color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else ""), subset=["Fut OHOL"])
                 )
-                st.dataframe(styled_inst, use_container_width=True, hide_index=True, height=560)
+                st.dataframe(styled_inst, use_container_width=True, hide_index=True, height=520)
                 st.download_button(
                     f"📥 Download Institutional Activity ({latest_bhav_dt}).csv",
-                    data=df_inst.to_csv(index=False).encode("utf-8"),
+                    data=df_display_all.to_csv(index=False).encode("utf-8"),
                     file_name=f"institutional_bhavcopy_{latest_bhav_dt}.csv",
                     mime="text/csv"
                 )
+
             else:
                 st.info("No unusual institutional OI/Volume spikes found on the latest uploaded date (try unchecking 'Show Only Unusual Institutional Activity' to inspect all symbols).")
     else:
