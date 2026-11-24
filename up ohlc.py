@@ -400,7 +400,7 @@ def style_scanner_table(df):
 # --- Main App UI ---
 st.subheader("📊 Fyers Pure NSE F&O Exact Open=High / Open=Low + ORB Scanner")
 
-col_btn, col_info = st.columns()
+col_btn, col_info = st.columns([1, 5])
 with col_btn:
     if st.button("🔄 Refresh"):
         st.cache_data.clear()
