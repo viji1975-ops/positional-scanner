@@ -25,8 +25,9 @@ if "fyers_jwt_token" not in st.session_state:
 
 # Step 1: Generate Login Link
 if FYERS_APP_ID:
+    fyers_host = "https://" + "api-t1." + "fyers.in" + "/api/v3/generate-authcode"
     login_url = (
-        f"https://fyers.in"
+        f"{fyers_host}"
         f"?client_id={quote(FYERS_APP_ID)}"
         f"&redirect_uri={quote(redirect_uri, safe='')}"
         f"&response_type=code&state=scanner"
