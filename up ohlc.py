@@ -173,6 +173,7 @@ DEFAULT_LOT_SIZES = {
     "CONCOR": 1000, "SHREECEM": 25, "AMBUJACEM": 1050, "ACC": 300, "DALBHARAT": 275,
     "TATAPOWER": 1350, "ADANIPOWER": 1000, "ADANIGREEN": 600, "ADANIENSOL": 675, "ATGL": 800,
     "AUROPHARMA": 550, "LUPIN": 425, "IRFC": 4250, "RVNL": 1375, "INDHOTEL": 1000,
+}
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_live_lot_sizes():
     """Fetches current NSE F&O lot sizes from Fyers public symbol master, falling back to DEFAULT_LOT_SIZES."""
