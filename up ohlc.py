@@ -176,9 +176,9 @@ def get_fyers_lot_sizes():
         if res.status_code == 200 and "OPTSTK" in res.text:
             for line in res.text.splitlines():
                 cols = line.split(",")
-                if len(cols) > 13 and cols.strip():
-                    u_sym = cols.strip()
-                    lot_val = int(float(cols.strip()))
+                if len(cols) > 13 and cols[13].strip():
+                    u_sym = cols[13].strip()
+                    lot_val = int(float(cols[3].strip()))
                     if u_sym in lot_map and lot_val > 0:
                         lot_map[u_sym] = lot_val
     except Exception:
@@ -197,9 +197,9 @@ def get_index_lot_sizes():
                     if "OPTIDX" not in line:
                         continue
                     cols = line.split(",")
-                    if len(cols) > 13 and cols.strip():
-                        u_sym = cols.strip()
-                        lot_val = int(float(cols.strip()))
+                    if len(cols) > 13 and cols[13].strip():
+                        u_sym = cols[13].strip()
+                        lot_val = int(float(cols[3].strip()))
                         if u_sym in csv_to_name and lot_val > 0:
                             lots[csv_to_name[u_sym]] = lot_val
         except Exception:
