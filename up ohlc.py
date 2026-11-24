@@ -1,51 +1,77 @@
 import os
 import time
+import hashlib
 import requests
 import pandas as pd
 import streamlit as st
+from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Fyers NSE F&O Exact OHOL + ORB Scanner", layout="wide")
 
-# --- Sidebar: Fyers API v3 Settings & Filters ---
-st.sidebar.header("🔑 Fyers API v3 Settings")
-default_fyers_id = st.secrets.get("FYERS_APP_ID", os.getenv("FYERS_APP_ID", "")).strip()
-default_fyers_tok = st.secrets.get("FYERS_ACCESS_TOKEN", os.getenv("FYERS_ACCESS_TOKEN", "")).strip()
+# --- Sidebar: Built-in Fyers v3 Login & Token Generator ---
+st.sidebar.header("🔑 Fyers API v3 Login")
 
-FYERS_APP_ID = st.sidebar.text_input(
-    "Fyers App ID (e.g. XXXXX-100)",
-    value=default_fyers_id,
-    placeholder="Leave blank if pasting AppID:Token below"
-).strip()
+default_fyers_id = st.secrets.get("FYERS_APP_ID", os.getenv("FYERS_APP_ID", "D2B1MP5NVR-100")).strip()
+default_secret = st.secrets.get("FYERS_SECRET_ID", os.getenv("FYERS_SECRET_ID", "")).strip()
+redirect_uri = "https://127.0.0.1"
 
-fyers_input = st.sidebar.text_input(
-    "Paste Daily Fyers JWT Access Token",
+FYERS_APP_ID = st.sidebar.text_input("Fyers App ID", value=default_fyers_id).strip()
+FYERS_SECRET_ID = st.sidebar.text_input("Fyers Secret ID", value=default_secret, type="password", placeholder="Paste Secret ID from Fyers dashboard").strip()
+
+if "fyers_jwt_token" not in st.session_state:
+    st.session_state["fyers_jwt_token"] = st.secrets.get("FYERS_ACCESS_TOKEN", os.getenv("FYERS_ACCESS_TOKEN", "")).strip()
+
+# Step 1: Generate Login Link
+if FYERS_APP_ID:
+    login_url = (
+        f"https://fyers.in"
+        f"?client_id={quote(FYERS_APP_ID)}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
+        f"&response_type=code&state=scanner"
+    )
+    st.sidebar.markdown(f"**Step 1:** [👉 Click Here to Login to Fyers]({login_url})")
+
+# Step 2: Paste the redirected URL (https://127.0.0...)
+redirected_input = st.sidebar.text_input(
+    "Step 2: Paste Redirected URL (or auth_code)",
     value="",
-    type="password",
-    placeholder="Paste full JWT Access Token (eyJ...)..."
+    placeholder="Paste full https://127.0.0?... URL here"
 ).strip()
 
-FYERS_TOKEN = ""
-raw_fyers = fyers_input if fyers_input else default_fyers_tok
-if raw_fyers:
-    if ":" in raw_fyers:
-        FYERS_TOKEN = raw_fyers
-        st.sidebar.success("✅ Fyers AppID:Token ready")
-    elif FYERS_APP_ID:
-        FYERS_TOKEN = f"{FYERS_APP_ID}:{raw_fyers}"
-        st.sidebar.success("✅ Fyers Token combined with App ID")
-    else:
-        st.sidebar.warning("⚠️ Enter your Fyers App ID above (e.g. XXXXX-100)")
-else:
-    st.sidebar.warning("⚠️ Paste your daily Fyers JWT token above to scan")
+if redirected_input and FYERS_APP_ID and FYERS_SECRET_ID:
+    auth_code = redirected_input
+    if "auth_code=" in redirected_input:
+        parsed = parse_qs(urlparse(redirected_input).query)
+        auth_code = parsed.get("auth_code", [""])[0]
 
-st.sidebar.divider()
-st.sidebar.header("⚙️ Scanner & ORB Filters")
-pattern_filter = st.sidebar.selectbox(
-    "Show Exact Patterns",
-    ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
-)
+    if auth_code and st.session_state.get("last_used_auth_code") != auth_code:
+        app_id_hash = hashlib.sha256(f"{FYERS_APP_ID}:{FYERS_SECRET_ID}".encode()).hexdigest()
+        res = requests.post(
+            "https://fyers.in",
+            json={"grant_type": "authorization_code", "appIdHash": app_id_hash, "code": auth_code},
+            timeout=10
+        ).json()
+        if res.get("s") == "ok" and res.get("access_token"):
+            st.session_state["fyers_jwt_token"] = res["access_token"]
+            st.session_state["last_used_auth_code"] = auth_code
+            st.sidebar.success("✅ Daily Fyers JWT Token Generated!")
+        else:
+            st.sidebar.error(f"Token Error: {res.get('message', res)}")
+
+# Optional manual paste box if you already have the eyJ... token
+manual_jwt = st.sidebar.text_input("Or Paste JWT Token Directly (eyJ...)", value="", type="password").strip()
+if manual_jwt:
+    st.session_state["fyers_jwt_token"] = manual_jwt
+
+FYERS_TOKEN = f"{FYERS_APP_ID}:{st.session_state['fyers_jwt_token']}" if (FYERS_APP_ID and st.session_state["fyers_jwt_token"]) else ""
+
+if FYERS_TOKEN:
+    st.sidebar.success("🟢 Fyers Connected & Ready")
+else:
+    st.sidebar.warning("⚠️ Enter Secret ID & complete Step 1 + Step 2 above")
+
 orb_timeframe = st.sidebar.radio(
     "ORB Confirmation Window",
     ["15-Min ORB (9:15–9:30 AM)", "5-Min ORB (9:15–9:20 AM)"]
