@@ -88,6 +88,10 @@ else:
     st.sidebar.warning("⚠️ Enter Secret ID & complete Step 1 + Step 2 above")
 
 orb_timeframe = st.sidebar.radio(
+    pattern_filter = st.sidebar.selectbox(
+    "Show Exact Patterns",
+    ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
+)
     "ORB Confirmation Window",
     ["15-Min ORB (9:15–9:30 AM)", "5-Min ORB (9:15–9:20 AM)"]
 )
