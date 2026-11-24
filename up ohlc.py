@@ -471,6 +471,146 @@ def style_scanner_table(df):
         .map(lambda v: "background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else ""), subset=["Power"])
     )
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_fyers_5m_range(sym, days_back, auth_token):
+    """Fetches up to 60 days of 5-minute intraday candles from Fyers API v3."""
+    url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+    headers = {
+        "Authorization": auth_token,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    to_dt = datetime.now()
+    from_dt = to_dt - timedelta(days=days_back)
+    params = {
+        "symbol": f"NSE:{sym}-EQ",
+        "resolution": "5",
+        "date_format": "0",
+        "range_from": str(int(from_dt.timestamp())),
+        "range_to": str(int(to_dt.timestamp())),
+        "cont_flag": "1"
+    }
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=12)
+        payload = res.json()
+        candles = payload.get("candles", [])
+        if payload.get("s") == "ok" and len(candles) > 50:
+            df = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
+            df["dt"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
+            df["date"] = df["dt"].dt.strftime("%Y-%m-%d")
+            return df
+    except Exception:
+        pass
+    return None
+
+def run_ohol_backtest(symbols_list, days_back, orb_minutes, target_rr, auth_token):
+    """Simulates Open=High/Low + ORB intraday trades across historical 5m candles."""
+    trades = []
+    candles_for_orb = 1 if orb_minutes == 5 else 3
+    progress_bar = st.progress(0, text="Running Fyers historical backtest...")
+
+    for idx, sym in enumerate(symbols_list):
+        progress_bar.progress((idx + 1) / len(symbols_list), text=f"Backtesting {sym} ({idx+1}/{len(symbols_list)})...")
+        time.sleep(0.12)  # Stay safely within Fyers API rate limits
+        df = fetch_fyers_5m_range(sym, days_back, auth_token)
+        if df is None or df.empty:
+            continue
+
+        # Build daily ATR-14 from grouped 5m bars
+        daily = df.groupby("date").agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last")).reset_index()
+        daily["prev_close"] = daily["close"].shift(1)
+        daily["tr"] = daily[["high", "prev_close"]].max(axis=1) - daily[["low", "prev_close"]].min(axis=1)
+        daily["atr14"] = daily["tr"].rolling(14).mean().shift(1)  # Prior day's ATR-14 (no lookahead bias)
+        atr_lookup = dict(zip(daily["date"], daily["atr14"]))
+
+        for dt_str, day_df in df.groupby("date"):
+            atr = atr_lookup.get(dt_str)
+            if pd.isna(atr) or len(day_df) <= candles_for_orb + 2:
+                continue
+
+            day_df = day_df.reset_index(drop=True)
+            first_bar = day_df.iloc[0]
+            open_p = round(float(first_bar["open"]), 2)
+            first_h = round(float(first_bar["high"]), 2)
+            first_l = round(float(first_bar["low"]), 2)
+
+            # Check exact Open=High or Open=Low on opening bar
+            is_oh = (open_p == first_h) and (first_h != first_l)
+            is_ol = (open_p == first_l) and (first_h != first_l)
+            if not (is_oh or is_ol):
+                continue
+
+            orb_slice = day_df.iloc[:candles_for_orb]
+            orb_high = float(orb_slice["high"].max())
+            orb_low = float(orb_slice["low"].min())
+            risk_unit = (atr * 0.5) * target_rr
+
+            entry_price = None
+            entry_time = None
+            outcome = None
+            exit_price = None
+
+            # Replay remaining intraday candles up to 3:15 PM (bar index 71)
+            trade_bars = day_df.iloc[candles_for_orb:72]
+            for _, bar in trade_bars.iterrows():
+                b_high = float(bar["high"])
+                b_low = float(bar["low"])
+                b_close = float(bar["close"])
+                b_time = bar["dt"].strftime("%H:%M")
+
+                if is_oh:
+                    if entry_price is None:
+                        if b_high > open_p:
+                            break  # Invalidated before ORB trigger
+                        if b_low < orb_low:
+                            entry_price = round(orb_low, 2)
+                            entry_time = b_time
+                            sl_price = round(open_p * 1.0005, 2)
+                            tgt_price = round(entry_price - risk_unit, 2)
+                    else:
+                        if b_high >= sl_price:
+                            outcome, exit_price = "SL Hit ❌", sl_price
+                            break
+                        if b_low <= tgt_price:
+                            outcome, exit_price = "Target Hit ✅", tgt_price
+                            break
+                else:
+                    if entry_price is None:
+                        if b_low < open_p:
+                            break  # Invalidated before ORB trigger
+                        if b_high > orb_high:
+                            entry_price = round(orb_high, 2)
+                            entry_time = b_time
+                            sl_price = round(open_p * 0.9995, 2)
+                            tgt_price = round(entry_price + risk_unit, 2)
+                    else:
+                        if b_low <= sl_price:
+                            outcome, exit_price = "SL Hit ❌", sl_price
+                            break
+                        if b_high >= tgt_price:
+                            outcome, exit_price = "Target Hit ✅", tgt_price
+                            break
+
+            if entry_price is not None:
+                if outcome is None:
+                    outcome = "3:15 PM Exit ⏱️"
+                    exit_price = round(float(trade_bars.iloc[-1]["close"]), 2)
+
+                pnl_pct = ((entry_price - exit_price) / entry_price * 100) if is_oh else ((exit_price - entry_price) / entry_price * 100)
+                trades.append({
+                    "Date": dt_str,
+                    "Symbol": f"NSE:{sym}",
+                    "Setup": "Open=High (Short)" if is_oh else "Open=Low (Long)",
+                    "Entry Time": entry_time,
+                    "Entry (₹)": entry_price,
+                    "Exit (₹)": exit_price,
+                    "Result": outcome,
+                    "Return (%)": round(pnl_pct, 2)
+                })
+
+    progress_bar.empty()
+    return pd.DataFrame(trades)
+
 # --- Main App UI ---
 st.subheader("📊 Fyers Pure NSE F&O Exact Open=High / Open=Low + ORB Scanner")
 
