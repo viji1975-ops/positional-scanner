@@ -55,13 +55,35 @@ HEADERS = {
 
 @st.cache_data(ttl=43200)
 def get_all_fno_stocks():
-    """Downloads Upstox NSE instrument master and extracts all unique F&O equity underlyings."""
-    url = "https://upstox.com"
-    res = requests.get(url, timeout=20)
-    res.raise_for_status()
+    """Downloads Upstox NSE instrument master with CDN-safe headers and JSON fallback."""
+    urls = [
+        "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
+        "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz",
+    ]
+    cdn_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept-Encoding": "gzip, deflate",
+    }
 
-    raw_data = gzip.decompress(res.content).decode("utf-8")
-    instruments = json.loads(raw_data)
+    instruments = None
+    for url in urls:
+        try:
+            res = requests.get(url, headers=cdn_headers, timeout=25)
+            if res.status_code != 200:
+                continue
+            # Check gzip magic bytes (\x1f\x8b); requests may already auto-decompress
+            if res.content[:2] == b"\x1f\x8b":
+                raw_data = gzip.decompress(res.content).decode("utf-8")
+            else:
+                raw_data = res.text
+            if raw_data.lstrip().startswith("["):
+                instruments = json.loads(raw_data)
+                break
+        except Exception:
+            continue
+
+    if not instruments:
+        raise RuntimeError("Upstox CDN temporarily blocked the master file download. Click 'Refresh Scanner' in a few seconds.")
 
     fno_equities = {}
     for item in instruments:
@@ -72,7 +94,7 @@ def get_all_fno_stocks():
             if u_key.startswith("NSE_EQ|") and u_type == "EQUITY" and u_sym:
                 fno_equities[u_key] = f"NSE:{u_sym}"
 
-    return dict(sorted(fno_equities.items(), key=lambda x: x[1]))
+    return dict(sorted(fno_equities.items(), key=lambda x: x))
 
 @st.cache_data(ttl=900)
 def get_historical_stats(instrument_key, token):
