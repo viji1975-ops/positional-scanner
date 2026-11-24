@@ -938,10 +938,10 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, replay_cutoff, aut
                 orb_bars = morning_slice.iloc[:candles_for_orb]
                 orb_h, orb_l = float(orb_bars["high"].max()), float(orb_bars["low"].min())
                 if is_oh:
-                    orb_ok = snap_ltp < orb_l
+                    orb_ok = snap_low < orb_l
                     orb_text = f"✅ {orb_minutes}m Broken (<{orb_l:.1f})" if orb_ok else f"⏳ Inside (>{orb_l:.1f})"
                 else:
-                    orb_ok = snap_ltp > orb_h
+                    orb_ok = snap_high > orb_h
                     orb_text = f"✅ {orb_minutes}m Breakout (>{orb_h:.1f})" if orb_ok else f"⏳ Inside (<{orb_h:.1f})"
             else:
                 orb_text = f"⏳ Wait {orb_minutes}m Candle"
