@@ -753,10 +753,103 @@ def fetch_fyers_5m_day(fyers_symbol, target_date_str, auth_token):
     except Exception:
         pass
     return None
+def check_historical_option_alignment(matched_records, replay_date_str, auth_token, nearest_opts):
+    """Checks ±5 strike CE/PE Open=Low / Open=High on replay_date_str for active-expiry contracts."""
+    if not matched_records or not auth_token:
+        return {}
 
-def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_lots, idx_lots):
+    headers = {"Authorization": auth_token, "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+    url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+    from_dt = (datetime.strptime(replay_date_str, "%Y-%m-%d") - timedelta(days=5)).strftime("%Y-%m-%d")
+    fmt_st = lambda x: f"{int(x)}" if x == int(x) else f"{x:.1f}"
+    results = {}
+
+    for rec in matched_records:
+        key_id = rec["key_id"]
+        csv_sym = rec["csv_sym"]
+        atm = round(float(rec["atm_strike"]), 2)
+        step = INDEX_CONFIG[key_id]["step"] if key_id in INDEX_CONFIG else get_stock_strike_step(atm)
+        contracts = nearest_opts.get(csv_sym, {})
+
+        if not contracts:
+            results[key_id] = {"badge": "Expired Contract", "rank": 1}
+            continue
+
+        triple_strikes = []
+        primary_ol_strikes = []
+        opposite_oh_strikes = []
+        found_any_candle = False
+
+        # Check closest strikes first (0, +/-1, +/-2, +/-3, +/-4, +/-5)
+        offsets = sorted(range(-5, 6), key=lambda o: abs(o))
+        for offset in offsets:
+            st_val = round(atm + (offset * step), 2)
+            ce_sym = contracts.get((st_val, "CE"))
+            pe_sym = contracts.get((st_val, "PE"))
+            if not (ce_sym and pe_sym):
+                continue
+
+            ce_oh, ce_ol, pe_oh, pe_ol = False, False, False, False
+            for opt_s, side in ((ce_sym, "CE"), (pe_sym, "PE")):
+                try:
+                    time.sleep(0.06)
+                    res = requests.get(
+                        url,
+                        headers=headers,
+                        params={"symbol": opt_s, "resolution": "D", "date_format": "1", "range_from": from_dt, "range_to": replay_date_str, "cont_flag": "1"},
+                        timeout=8
+                    ).json()
+                    candles = res.get("candles", ())
+                    if res.get("s") == "ok" and candles:
+                        last_c = candles[-1]
+                        c_date = datetime.fromtimestamp(int(last_c.__getitem__(0))).strftime("%Y-%m-%d")
+                        if c_date == replay_date_str:
+                            found_any_candle = True
+                            oh_f, ol_f = is_exact_ohol(last_c.__getitem__(1), last_c.__getitem__(2), last_c.__getitem__(3))
+                            if side == "CE":
+                                ce_oh, ce_ol = oh_f, ol_f
+                            else:
+                                pe_oh, pe_ol = oh_f, ol_f
+                except Exception:
+                    continue
+
+            if not rec["is_oh"]:
+                if ce_ol and pe_oh:
+                    triple_strikes.append(fmt_st(st_val))
+                if ce_ol:
+                    primary_ol_strikes.append(f"{fmt_st(st_val)} CE")
+                if pe_oh:
+                    opposite_oh_strikes.append(f"{fmt_st(st_val)} PE")
+            else:
+                if pe_ol and ce_oh:
+                    triple_strikes.append(fmt_st(st_val))
+                if pe_ol:
+                    primary_ol_strikes.append(f"{fmt_st(st_val)} PE")
+                if ce_oh:
+                    opposite_oh_strikes.append(f"{fmt_st(st_val)} CE")
+
+            # Stop early once a clean Triple match is found closest to ATM
+            if triple_strikes:
+                break
+
+        if not found_any_candle:
+            results[key_id] = {"badge": "Expired Contract", "rank": 1}
+        elif triple_strikes:
+            results[key_id] = {"badge": f"🔥 TRIPLE @ {triple_strikes.__getitem__(0)}", "rank": 3}
+        elif primary_ol_strikes and opposite_oh_strikes:
+            results[key_id] = {"badge": f"🔥 SPLIT ({primary_ol_strikes.__getitem__(0)} O=L | {opposite_oh_strikes.__getitem__(0)} O=H)", "rank": 3}
+        elif primary_ol_strikes:
+            results[key_id] = {"badge": f"⚡ {primary_ol_strikes.__getitem__(0)} Open=Low", "rank": 2}
+        elif opposite_oh_strikes:
+            results[key_id] = {"badge": f"⚡ {opposite_oh_strikes.__getitem__(0)} Open=High", "rank": 2}
+        else:
+            results[key_id] = {"badge": "Spot Only", "rank": 1}
+
+    return results
+
+def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_lots, idx_lots, nearest_opts):
     candles_for_orb = 1 if orb_minutes == 5 else 3
-    rows = []
+    matched_raw = []
     progress = st.progress(0, text=f"Replaying {replay_date_str}...")
 
     for idx, label in enumerate(items_list):
@@ -765,6 +858,7 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
 
         is_index = label in INDEX_CONFIG
         fyers_sym = INDEX_CONFIG[label]["fyers"] if is_index else f"NSE:{label}-EQ"
+        csv_sym = INDEX_CONFIG[label]["csv_sym"] if is_index else label
         display_sym = f"🏛️ {label}" if is_index else f"NSE:{label}"
 
         url = "https://" + "api-t1." + "fyers.in" + "/data/history"
@@ -825,41 +919,74 @@ def run_date_replay(items_list, replay_date_str, orb_minutes, auth_token, stock_
 
             if is_index:
                 vol_txt, power, p_rank, vol_ratio = "Index", "🏛️ Index", 4, 999.0
-                opt_str, _ = get_index_option_strikes(label, open_p, is_oh)
+                opt_str, atm_strike = get_index_option_strikes(label, open_p, is_oh)
                 lot_val = idx_lots.get(label, INDEX_CONFIG[label]["lot"])
             else:
                 vol_ratio = round(curr_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 0
                 vol_txt = f"{vol_ratio}x"
                 power, p_rank = ("🔥 Ultra", 3) if vol_ratio >= 4.0 else (("⚡ Strong", 2) if vol_ratio >= 2.0 else ("Normal", 1))
-                opt_str, _ = get_option_strikes(open_p, is_oh)
+                opt_str, atm_strike = get_option_strikes(open_p, is_oh)
                 lot_val = stock_lots.get(label) or DEFAULT_LOT_SIZES.get(label, 0)
 
             lvl_tag = "Above PDH 🟢" if close_p > pdh else ("Below PDL 🔴" if close_p < pdl else "Inside Prev Day")
 
-            rows.append({
-                "Symbol": display_sym,
-                "Pattern": f"Open=High ({open_p:.2f})" if is_oh else f"Open=Low ({open_p:.2f})",
-                "ORB Confirm": orb_text,
-                "Day Outcome": outcome,
-                "Close (₹)": f"{close_p:.2f}",
-                "ATM | 1-ITM Option": opt_str,
-                "Lot Size": lot_val,
-                "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
-                "PDH/PDL": lvl_tag,
-                "Volume": vol_txt,
-                "Power": power,
-                "_orb_ok": orb_ok,
-                "_vol_ratio": vol_ratio,
-                "_power_rank": p_rank
+            matched_raw.append({
+                "key_id": label,
+                "csv_sym": csv_sym,
+                "atm_strike": atm_strike,
+                "is_oh": is_oh,
+                "display_sym": display_sym,
+                "open_p": open_p,
+                "close_p": close_p,
+                "orb_text": orb_text,
+                "orb_ok": orb_ok,
+                "outcome": outcome,
+                "opt_str": opt_str,
+                "lot_val": lot_val,
+                "t1": t1,
+                "t2": t2,
+                "lvl_tag": lvl_tag,
+                "vol_txt": vol_txt,
+                "vol_ratio": vol_ratio,
+                "power": power,
+                "p_rank": p_rank
             })
         except Exception:
             continue
 
+    if matched_raw:
+        progress.progress(1.0, text="Checking ±5 option strikes (CE/PE) for matched setups...")
+        opt_align_map = check_historical_option_alignment(matched_raw, replay_date_str, auth_token, nearest_opts)
+    else:
+        opt_align_map = {}
+
+    rows = []
+    for m in matched_raw:
+        align_info = opt_align_map.get(m["key_id"], {"badge": "Spot Only", "rank": 1})
+        rows.append({
+            "Symbol": m["display_sym"],
+            "Pattern": f"Open=High ({m['open_p']:.2f})" if m["is_oh"] else f"Open=Low ({m['open_p']:.2f})",
+            "Option O=L/O=H Align": align_info["badge"],
+            "ORB Confirm": m["orb_text"],
+            "Day Outcome": m["outcome"],
+            "Close (₹)": f"{m['close_p']:.2f}",
+            "ATM | 1-ITM Option": m["opt_str"],
+            "Lot Size": m["lot_val"],
+            "Normal Tgt (1:1|1:2)": f"{m['t1']} | {m['t2']}",
+            "PDH/PDL": m["lvl_tag"],
+            "Volume": m["vol_txt"],
+            "Power": m["power"],
+            "_align_rank": align_info["rank"],
+            "_orb_ok": m["orb_ok"],
+            "_vol_ratio": m["vol_ratio"],
+            "_power_rank": m["p_rank"]
+        })
+
     progress.empty()
     df_out = pd.DataFrame(rows)
     if not df_out.empty:
-        df_out = df_out.sort_values(by=["_power_rank", "_orb_ok", "_vol_ratio"], ascending=[False, False, False])
-        df_out = df_out.drop(columns=["_orb_ok", "_vol_ratio", "_power_rank"])
+        df_out = df_out.sort_values(by=["_power_rank", "_align_rank", "_orb_ok", "_vol_ratio"], ascending=[False, False, False, False])
+        df_out = df_out.drop(columns=["_align_rank", "_orb_ok", "_vol_ratio", "_power_rank"])
     return df_out
 
 def style_align_badge(val):
@@ -966,31 +1093,33 @@ with tab_bt:
             date_str = selected_date.strftime("%Y-%m-%d")
             idx_list = list(INDEX_CONFIG.keys())
             test_items = idx_list if "Indices Only" in bt_universe else (idx_list + sorted(set(FNO_SYMBOLS))[:40] if "Top 40" in bt_universe else idx_list + sorted(set(FNO_SYMBOLS)))
-            df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN, stock_lots, idx_lots)
+                        df_replay = run_date_replay(test_items, date_str, bt_orb, FYERS_TOKEN, stock_lots, idx_lots, nearest_opts)
 
             if df_replay.empty:
                 st.info(f"No exact 0.00% Open=High or Open=Low matches found on **{date_str}**.")
             else:
                 bull_c = df_replay["Pattern"].str.contains("Open=Low").sum()
                 bear_c = df_replay["Pattern"].str.contains("Open=High").sum()
-                orb_c = df_replay["ORB Confirm"].str.contains("✅").sum()
+                triple_c = df_replay["Option O=L/O=H Align"].str.contains("🔥").sum()
                 tgt_c = df_replay["Day Outcome"].str.contains("Target Hit").sum()
 
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Total Exact Matches", len(df_replay))
-                k2.metric("🟢 Open=Low | 🔴 Open=High", f"{int(bull_c)} | {int(bear_c)}")
-                k3.metric("✅ ORB Confirmed", int(orb_c))
+                k2.metric("🔥 Option-Aligned (±5)", int(triple_c))
+                k3.metric("🟢 O=L | 🔴 O=H", f"{int(bull_c)} | {int(bear_c)}")
                 k4.metric("🎯 ATR Targets Hit", int(tgt_c))
 
                 styled_replay = (
                     df_replay.style
                     .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+                    .map(style_align_badge, subset=["Option O=L/O=H Align"])
                     .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
                     .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Profit" in str(v) else "color: #ff5252;", subset=["Day Outcome"])
                     .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
                     .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
                     .map(lambda v: "background-color: #6a1b9a; color: white; font-weight: bold;" if "Index" in str(v) else ("background-color: #9c27b0; color: white; font-weight: bold;" if "Ultra" in str(v) else ("background-color: #2196f3; color: white; font-weight: bold;" if "Strong" in str(v) else "")), subset=["Power"])
                 )
+
                 st.dataframe(styled_replay, use_container_width=True, hide_index=True, height=560)
                 st.download_button(
                     f"📥 Download {date_str} Backtest (CSV)",
