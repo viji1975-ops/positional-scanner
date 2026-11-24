@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 st.set_page_config(page_title="Upstox Exact OHOL Scanner", layout="wide")
 
@@ -164,28 +165,39 @@ def get_all_fno_stocks():
 
     return dict(sorted(FALLBACK_FNO_STOCKS.items(), key=lambda x: x))
 
-@st.cache_data(ttl=900)
-def get_historical_stats(instrument_key, token):
-    """Fetches daily candles to compute 14-day ATR, 20-day Avg Vol, PDH/PDL, and latest candle."""
-    to_date = datetime.now().strftime("%Y-%m-%d")
-    from_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
-
-    url = f"https://upstox.com{instrument_key.strip()}/day/{to_date}/{from_date}"
+@st.cache_data(ttl=900, show_spinner=False)
+def _fetch_candle_cached(encoded_key, to_date, from_date, token):
+    url = f"https://upstox.com{encoded_key}/day/{to_date}/{from_date}"
     headers = {
         "Accept": "application/json",
         "Api-Version": "2.0",
         "Authorization": f"Bearer {token}"
     }
+    res = requests.get(url, headers=headers, timeout=10)
+    if res.status_code != 200:
+        return {"_error": f"HTTP {res.status_code}: {res.text[:150]}"}
+    return res.json()
+
+def get_historical_stats(instrument_key, token):
+    """Fetches daily candles with URL-encoded instrument_key and skips caching on errors."""
+    to_date = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+    encoded_key = quote(instrument_key.strip(), safe="")
 
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            return None
-        payload = res.json()
-        candles = payload.get("data", {}).get("candles", [])
-    except Exception:
+        payload = _fetch_candle_cached(encoded_key, to_date, from_date, token)
+    except Exception as e:
+        st.session_state["last_api_error"] = str(e)
         return None
 
+    if not payload or "_error" in payload:
+        if payload and "_error" in payload:
+            st.session_state["last_api_error"] = payload["_error"]
+        # Clear cache entry so failed calls aren't stuck for 15 mins
+        _fetch_candle_cached.clear()
+        return None
+
+    candles = payload.get("data", {}).get("candles", [])
     if len(candles) < 15:
         return None
 
