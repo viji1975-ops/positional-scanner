@@ -192,10 +192,15 @@ def is_exact_ohol(open_p, high_p, low_p):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_fyers_daily_stats(sym, auth_token):
-    """Fetches 35-day daily candles from Fyers History API v3 for ATR-14, AvgVol-20, PDH/PDL, and last session."""
+    """Fetches 45-day daily candles from Fyers History API v3."""
     to_date = datetime.now().strftime("%Y-%m-%d")
     from_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
-    url = "https://fyers.in"
+    url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+    headers = {
+        "Authorization": auth_token,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
     params = {
         "symbol": f"NSE:{sym}-EQ",
         "resolution": "D",
@@ -205,13 +210,12 @@ def fetch_fyers_daily_stats(sym, auth_token):
         "cont_flag": "1"
     }
     try:
-        res = requests.get(url, headers={"Authorization": auth_token}, params=params, timeout=10)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         payload = res.json()
         candles = payload.get("candles", [])
-        if payload.get("s") != "ok" or len(candles) < 15:
+        if payload.get("s") != "ok" or len(candles) < 5:
             return None
 
-        # Fyers candle: [epoch, open, high, low, close, volume]
         df = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
         df["prev_close"] = df["close"].shift(1)
         df["tr"] = df[["high", "prev_close"]].max(axis=1) - df[["low", "prev_close"]].min(axis=1)
@@ -235,8 +239,13 @@ def fetch_fyers_daily_stats(sym, auth_token):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_fyers_orb(sym, target_date, orb_minutes, auth_token):
-    """Fetches real-time 5-minute intraday candles from Fyers History API v3 for 5m/15m ORB."""
-    url = "https://fyers.in"
+    """Fetches real-time 5-minute intraday candles from Fyers History API v3."""
+    url = "https://" + "api-t1." + "fyers.in" + "/data/history"
+    headers = {
+        "Authorization": auth_token,
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
     params = {
         "symbol": f"NSE:{sym}-EQ",
         "resolution": "5",
@@ -247,15 +256,15 @@ def fetch_fyers_orb(sym, target_date, orb_minutes, auth_token):
     }
     candles_needed = 1 if orb_minutes == 5 else 3
     try:
-        res = requests.get(url, headers={"Authorization": auth_token}, params=params, timeout=8)
+        res = requests.get(url, headers=headers, params=params, timeout=8)
         payload = res.json()
         candles = payload.get("candles", [])
         if payload.get("s") == "ok" and len(candles) >= candles_needed:
             orb_slice = candles[:candles_needed]
             return {
-                "orb_high": max(float(c[2]) for c in orb_slice),
-                "orb_low": min(float(c[3]) for c in orb_slice),
-                "latest_close": float(candles[-1][4]),
+                "orb_high": max(float(c) for c in orb_slice),
+                "orb_low": min(float(c) for c in orb_slice),
+                "latest_close": float(candles[-1]),
             }
     except Exception:
         pass
