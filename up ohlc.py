@@ -289,4 +289,93 @@ def scan_all_fno():
                 return None
             return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
+                with ThreadPoolExecutor(max_workers=6) as executor:
+            results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
+
+    # Fallback Path: Historical Daily Candle (if pre-open reset has open == 0)
+    else:
+        session_dates = []
+        def scan_via_candle(kv):
+            key, symbol = kv
+            stats = get_historical_stats(key, ACCESS_TOKEN)
+            if not stats:
+                return None
+            lc = stats["last_candle"]
+            session_dates.append(str(lc["time"])[:10])
+
+            open_p = lc["open"]
+            high_p = lc["high"]
+            low_p = lc["low"]
+            ltp = lc["close"]
+            curr_vol = lc["volume"]
+
+            is_open_high, is_open_low = is_exact_ohol(open_p, high_p, low_p)
+
+            if is_open_high and "Open=Low Only" in pattern_filter:
+                return None
+            if is_open_low and "Open=High Only" in pattern_filter:
+                return None
+
+            if is_open_high or is_open_low:
+                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
+
+        last_date = max(session_dates) if session_dates else "Last Trading Day"
+        source_note = f"Last Trading Session ({last_date} — Exact Match)"
+
+    df_out = pd.DataFrame(results)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
+        df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
+
+    return df_out, source_note, total_fno
+
+def style_scanner_table(df):
+    def highlight_pattern(val):
+        if "Open=High" in str(val):
+            return "color: #ff5252; font-weight: bold;"
+        elif "Open=Low" in str(val):
+            return "color: #4caf50; font-weight: bold;"
+        return ""
+
+    def highlight_status(val):
+        return "color: #4caf50; font-weight: bold;" if val == "Active" else "color: #ff9800; font-weight: bold;"
+
+    def highlight_power(val):
+        if "Ultra" in str(val):
+            return "background-color: #9c27b0; color: white; font-weight: bold;"
+        elif "Strong" in str(val):
+            return "background-color: #2196f3; color: white; font-weight: bold;"
+        return ""
+
+    return (
+        df.style
+        .map(highlight_pattern, subset=["Pattern"])
+        .map(highlight_status, subset=["Status"])
+        .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
+        .map(highlight_power, subset=["Power"])
+    )
+
+# --- Main App UI ---
+st.title("📊 NSE F&O Exact Open=High / Open=Low Scanner")
+
+if st.button("🔄 Refresh Scanner"):
+    st.rerun()
+
+with st.spinner("Scanning all NSE F&O stocks for exact Open=High / Open=Low..."):
+    df_results, source_note, total_fno = scan_all_fno()
+
+if total_fno > 0:
+    st.caption(f"Scanned **{total_fno} NSE F&O Stocks** | Exact Matches Found: **{len(df_results)}** | Mode: **{source_note}**")
+
+if not df_results.empty:
+    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True)
+elif ACCESS_TOKEN:
+    st.info("No F&O stocks had an exact Open=High or Open=Low in this session.")
+
+if auto_refresh and ACCESS_TOKEN:
+    time.sleep(60)
+    st.rerun()
