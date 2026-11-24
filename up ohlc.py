@@ -40,10 +40,10 @@ pattern_filter = st.sidebar.selectbox(
 tolerance_pct = st.sidebar.slider(
     "Open=High/Low Tolerance (%)",
     min_value=0.00,
-    max_value=0.15,
-    value=0.02,
+    max_value=0.20,
+    value=0.05,
     step=0.01,
-    help="0.00% = exact match; 0.02% allows minor 1-tick opening noise."
+    help="0.00% = exact match; 0.05% allows minor opening tick noise."
 )
 auto_refresh = st.sidebar.checkbox("🔄 Auto-Refresh Every 60s", value=False)
 
@@ -247,10 +247,18 @@ def scan_all_fno():
         return pd.DataFrame(), "", total_fno
 
     results = []
-    source_note = "Live / Last Session Quote"
+    source_note = "Live Session Quote"
 
-    # Primary Path: Fast Live Quotes API
+    # Check if live quotes actually have non-zero Open prices (False on NSE holidays / pre-open)
+    has_live_open = False
     if quotes:
+        for data in quotes.values():
+            if data.get("ohlc", {}).get("open", 0) > 0:
+                has_live_open = True
+                break
+
+    # Primary Path: Live Market Hours (when Open > 0)
+    if has_live_open:
         candidates = []
         for key, symbol in fno_dict.items():
             resp_key = key.replace("|", ":")
@@ -289,6 +297,54 @@ def scan_all_fno():
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             results = [r for r in executor.map(enrich_from_quote, candidates) if r is not None]
+
+    # Holiday / After-Hours Fallback Path: Uses Last Completed Trading Day's Daily Candle
+    else:
+        session_dates = []
+        def scan_via_candle(kv):
+            key, symbol = kv
+            stats = get_historical_stats(key, ACCESS_TOKEN)
+            if not stats:
+                return None
+            lc = stats["last_candle"]
+            session_dates.append(str(lc["time"])[:10])
+
+            open_p = lc["open"]
+            high_p = lc["high"]
+            low_p = lc["low"]
+            ltp = lc["close"]
+            curr_vol = lc["volume"]
+
+            if open_p == 0:
+                return None
+
+            tolerance = open_p * tol_multiplier
+            is_open_high = abs(open_p - high_p) <= tolerance
+            is_open_low = abs(open_p - low_p) <= tolerance
+
+            if is_open_high and is_open_low:
+                return None
+            if is_open_high and "Open=Low Only" in pattern_filter:
+                return None
+            if is_open_low and "Open=High Only" in pattern_filter:
+                return None
+
+            if is_open_high or is_open_low:
+                return build_row(symbol, open_p, ltp, curr_vol, is_open_high, stats)
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = [r for r in executor.map(scan_via_candle, list(fno_dict.items())) if r is not None]
+
+        last_date = max(session_dates) if session_dates else "Last Trading Day"
+        source_note = f"Last Trading Session ({last_date} — NSE Closed/Holiday)"
+
+    df_out = pd.DataFrame(results)
+    if not df_out.empty:
+        df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
+        df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
+
+    return df_out, source_note, total_fno
 
     # Fallback Path: If Quote API returned empty/non-JSON or open==0 (pre-open/weekend)
     if not results and (err is not None or not quotes):
