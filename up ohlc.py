@@ -87,14 +87,15 @@ if FYERS_TOKEN:
 else:
     st.sidebar.warning("⚠️ Enter Secret ID & complete Step 1 + Step 2 above")
 
-orb_timeframe = st.sidebar.radio(
-    pattern_filter = st.sidebar.selectbox(
+pattern_filter = st.sidebar.selectbox(
     "Show Exact Patterns",
     ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
 )
+orb_timeframe = st.sidebar.radio(
     "ORB Confirmation Window",
     ["15-Min ORB (9:15–9:30 AM)", "5-Min ORB (9:15–9:20 AM)"]
 )
+
 only_orb_confirmed = st.sidebar.checkbox("Show Only ORB Confirmed Setups", value=False)
 auto_refresh = st.sidebar.checkbox("🔄 Auto-Refresh Every 60s", value=False)
 
