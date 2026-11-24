@@ -45,22 +45,102 @@ HEADERS = {
     "Authorization": f"Bearer {ACCESS_TOKEN}"
 }
 
+FALLBACK_FNO_STOCKS = {
+    "NSE_EQ|INE002A01018": "NSE:RELIANCE", "NSE_EQ|INE467B01029": "NSE:TCS",
+    "NSE_EQ|INE040A01034": "NSE:HDFCBANK", "NSE_EQ|INE090A01021": "NSE:ICICIBANK",
+    "NSE_EQ|INE397D01024": "NSE:BHARTIARTL", "NSE_EQ|INE062A01020": "NSE:SBIN",
+    "NSE_EQ|INE009A01021": "NSE:INFY", "NSE_EQ|INE154A01025": "NSE:ITC",
+    "NSE_EQ|INE018A01030": "NSE:LT", "NSE_EQ|INE030A01027": "NSE:HINDUNILVR",
+    "NSE_EQ|INE238A01034": "NSE:AXISBANK", "NSE_EQ|INE237A01028": "NSE:KOTAKBANK",
+    "NSE_EQ|INE296A01024": "NSE:BAJFINANCE", "NSE_EQ|INE585B01010": "NSE:MARUTI",
+    "NSE_EQ|INE044A01036": "NSE:SUNPHARMA", "NSE_EQ|INE280A01028": "NSE:TITAN",
+    "NSE_EQ|INE752E01010": "NSE:POWERGRID", "NSE_EQ|INE733E01010": "NSE:NTPC",
+    "NSE_EQ|INE481G01011": "NSE:ULTRACEMCO", "NSE_EQ|INE155A01022": "NSE:TATAMOTORS",
+    "NSE_EQ|INE081A01020": "NSE:TATASTEEL", "NSE_EQ|INE101A01026": "NSE:M&M",
+    "NSE_EQ|INE860A01027": "NSE:HCLTECH", "NSE_EQ|INE021A01026": "NSE:ASIANPAINT",
+    "NSE_EQ|INE918I01026": "NSE:BAJAJFINSV", "NSE_EQ|INE423A01024": "NSE:ADANIENT",
+    "NSE_EQ|INE742F01042": "NSE:ADANIPORTS", "NSE_EQ|INE522F01014": "NSE:COALINDIA",
+    "NSE_EQ|INE075A01022": "NSE:WIPRO", "NSE_EQ|INE019A01038": "NSE:JSWSTEEL",
+    "NSE_EQ|INE038A01020": "NSE:HINDALCO", "NSE_EQ|INE047A01021": "NSE:GRASIM",
+    "NSE_EQ|INE066A01021": "NSE:EICHERMOT", "NSE_EQ|INE917I01010": "NSE:BAJAJ-AUTO",
+    "NSE_EQ|INE121A01024": "NSE:CHOLAFIN", "NSE_EQ|INE361B01024": "NSE:DIVISLAB",
+    "NSE_EQ|INE089A01023": "NSE:DRREDDY", "NSE_EQ|INE059A01026": "NSE:CIPLA",
+    "NSE_EQ|INE669C01036": "NSE:TECHM", "NSE_EQ|INE216A01030": "NSE:BRITANNIA",
+    "NSE_EQ|INE028A01039": "NSE:BANKBARODA", "NSE_EQ|INE160A01022": "NSE:PNB",
+    "NSE_EQ|INE476A01022": "NSE:CANBK", "NSE_EQ|INE095A01012": "NSE:INDUSINDBK",
+    "NSE_EQ|INE263A01024": "NSE:BEL", "NSE_EQ|INE066F01020": "NSE:HAL",
+    "NSE_EQ|INE003A01024": "NSE:SIEMENS", "NSE_EQ|INE117A01022": "NSE:ABB",
+    "NSE_EQ|INE129A01019": "NSE:GAIL", "NSE_EQ|INE213A01029": "NSE:ONGC",
+    "NSE_EQ|INE242A01010": "NSE:IOC", "NSE_EQ|INE029A01011": "NSE:BPCL",
+    "NSE_EQ|INE094A01015": "NSE:HINDPETRO", "NSE_EQ|INE848E01016": "NSE:NHPC",
+    "NSE_EQ|INE134E01011": "NSE:PFC", "NSE_EQ|INE020B01018": "NSE:RECLTD",
+    "NSE_EQ|INE115A01026": "NSE:LICHSGFIN", "NSE_EQ|INE774D01024": "NSE:M&MFIN",
+    "NSE_EQ|INE721A01013": "NSE:SHRIRAMFIN", "NSE_EQ|INE498L01015": "NSE:LTF",
+    "NSE_EQ|INE148I01020": "NSE:SAMVARDHANA", "NSE_EQ|INE775A01035": "NSE:MOTHERSON",
+    "NSE_EQ|INE208A01029": "NSE:ASHOKLEY", "NSE_EQ|INE158A01026": "NSE:HEROMOTOCO",
+    "NSE_EQ|INE494B01023": "NSE:TVSMOTOR", "NSE_EQ|INE323A01026": "NSE:BOSCHLTD",
+    "NSE_EQ|INE298A01020": "NSE:CUMMINSIND", "NSE_EQ|INE465A01025": "NSE:BHARATFORG",
+    "NSE_EQ|INE646L01027": "NSE:INDIGO", "NSE_EQ|INE883A01011": "NSE:MRF",
+    "NSE_EQ|INE001A01036": "NSE:APOLLOTYRE", "NSE_EQ|INE765G01017": "NSE:ICICIGI",
+    "NSE_EQ|INE726G01019": "NSE:ICICIPRULI", "NSE_EQ|INE123W01016": "NSE:SBILIFE",
+    "NSE_EQ|INE795G01014": "NSE:HDFCLIFE", "NSE_EQ|INE127D01025": "NSE:HDFCAMC",
+    "NSE_EQ|INE572E01012": "NSE:PNBHOUSING", "NSE_EQ|INE414G01012": "NSE:MUTHOOTFIN",
+    "NSE_EQ|INE522D01027": "NSE:MANAPPURAM", "NSE_EQ|INE301A01014": "NSE:RAYMOND",
+    "NSE_EQ|INE849A01020": "NSE:TRENT", "NSE_EQ|INE192R01011": "NSE:DMART",
+    "NSE_EQ|INE271C01023": "NSE:DLF", "NSE_EQ|INE484J01027": "NSE:GODREJPROP",
+    "NSE_EQ|INE093I01010": "NSE:OBEROIRLTY", "NSE_EQ|INE811K01011": "NSE:PRESTIGE",
+    "NSE_EQ|INE669E01016": "NSE:IDEA", "NSE_EQ|INE121J01017": "NSE:INDUSTOWER",
+    "NSE_EQ|INE256A01028": "NSE:ZEEL", "NSE_EQ|INE424H01027": "NSE:SUNTV",
+    "NSE_EQ|INE335Y01020": "NSE:IRCTC", "NSE_EQ|INE111A01025": "NSE:CONCOR",
+    "NSE_EQ|INE070A01015": "NSE:SHREECEM", "NSE_EQ|INE079A01024": "NSE:AMBUJACEM",
+    "NSE_EQ|INE012A01025": "NSE:ACC", "NSE_EQ|INE439A01020": "NSE:DALBHARAT",
+    "NSE_EQ|INE245A01021": "NSE:TATAPOWER", "NSE_EQ|INE814H01011": "NSE:ADANIPOWER",
+    "NSE_EQ|INE364U01010": "NSE:ADANIGREEN", "NSE_EQ|INE931S01010": "NSE:ADANIENSOL",
+    "NSE_EQ|INE399L01023": "NSE:ATGL", "NSE_EQ|INE406A01037": "NSE:AUROPHARMA",
+    "NSE_EQ|INE326A01037": "NSE:LUPIN", "NSE_EQ|INE053F01010": "NSE:IRFC",
+    "NSE_EQ|INE415G01027": "NSE:RVNL", "NSE_EQ|INE053A01029": "NSE:INDHOTEL",
+    "NSE_EQ|INE437A01024": "NSE:APOLLOHOSP", "NSE_EQ|INE027H01010": "NSE:MAXHEALTH",
+    "NSE_EQ|INE685A01028": "NSE:TORNTPHARM", "NSE_EQ|INE010B01027": "NSE:ZYDUSLIFE",
+    "NSE_EQ|INE540L01014": "NSE:ALKEM", "NSE_EQ|INE376G01013": "NSE:BIOCON",
+    "NSE_EQ|INE935N01020": "NSE:DIXON", "NSE_EQ|INE176B01034": "NSE:HAVELLS",
+    "NSE_EQ|INE226A01021": "NSE:VOLTAS", "NSE_EQ|INE299U01018": "NSE:CROMPTON",
+    "NSE_EQ|INE455K01017": "NSE:POLYCAB", "NSE_EQ|INE545U01014": "NSE:BANDHANBNK",
+    "NSE_EQ|INE092T01019": "NSE:IDFCFIRSTB", "NSE_EQ|INE171A01029": "NSE:FEDERALBNK",
+    "NSE_EQ|INE949L01017": "NSE:AUBANK", "NSE_EQ|INE976G01028": "NSE:RBLBANK",
+    "NSE_EQ|INE016A01026": "NSE:DABUR", "NSE_EQ|INE196A01026": "NSE:MARICO",
+    "NSE_EQ|INE102D01028": "NSE:GODREJCP", "NSE_EQ|INE259A01022": "NSE:COLPAL",
+    "NSE_EQ|INE239A01016": "NSE:NESTLEIND", "NSE_EQ|INE192A01025": "NSE:TATACONSUM",
+    "NSE_EQ|INE686F01025": "NSE:UBL", "NSE_EQ|INE854D01024": "NSE:UNITDSPR",
+    "NSE_EQ|INE180A01020": "NSE:MFSL", "NSE_EQ|INE591G01017": "NSE:COFORGE",
+    "NSE_EQ|INE214T01019": "NSE:LTIM", "NSE_EQ|INE356A01018": "NSE:MPHASIS",
+    "NSE_EQ|INE262H01013": "NSE:PERSISTENT", "NSE_EQ|INE068V01023": "NSE:GLAND",
+    "NSE_EQ|INE758T01015": "NSE:ZOMATO", "NSE_EQ|INE749A01030": "NSE:JINDALSTEL",
+    "NSE_EQ|INE114A01011": "NSE:SAIL", "NSE_EQ|INE584A01023": "NSE:NMDC",
+    "NSE_EQ|INE205A01025": "NSE:VEDL", "NSE_EQ|INE120A01034": "NSE:CARBORUNIV",
+    "NSE_EQ|INE007A01025": "NSE:CRISIL", "NSE_EQ|INE306R01017": "NSE:INTELLECT",
+    "NSE_EQ|INE274J01014": "NSE:JSWENERGY", "NSE_EQ|INE881D01027": "NSE:OFSS",
+    "NSE_EQ|INE769A01020": "NSE:AARTIIND", "NSE_EQ|INE054A01027": "NSE:VIPIND",
+    "NSE_EQ|INE603J01030": "NSE:PIIND", "NSE_EQ|INE628A01036": "NSE:UPL",
+    "NSE_EQ|INE067A01029": "NSE:CGPOWER", "NSE_EQ|INE257A01026": "NSE:BHEL",
+    "NSE_EQ|INE177H01021": "NSE:GODREJIND", "NSE_EQ|INE463V01026": "NSE:ANANDRATHI",
+}
+
 @st.cache_data(ttl=43200)
 def get_all_fno_stocks():
-    """Downloads Upstox NSE instrument master and extracts all unique F&O equity underlyings."""
+    """Downloads Upstox NSE instrument master, falling back to built-in NSE F&O list if CDN blocks cloud IP."""
     urls = [
         "https://upstox.com",
         "https://upstox.com",
     ]
     cdn_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept": "*/*",
+        "Referer": "https://upstox.com/",
     }
 
-    instruments = None
     for url in urls:
         try:
-            res = requests.get(url, headers=cdn_headers, timeout=25)
+            res = requests.get(url, headers=cdn_headers, timeout=15)
             if res.status_code != 200:
                 continue
             if res.content[:2] == b"\x1f\x8b":
@@ -69,23 +149,20 @@ def get_all_fno_stocks():
                 raw_data = res.text
             if raw_data.lstrip().startswith("["):
                 instruments = json.loads(raw_data)
-                break
+                fno_equities = {}
+                for item in instruments:
+                    if item.get("segment") == "NSE_FO":
+                        u_key = item.get("underlying_key", "")
+                        u_sym = item.get("underlying_symbol", "")
+                        u_type = item.get("underlying_type", "")
+                        if u_key.startswith("NSE_EQ|") and u_type == "EQUITY" and u_sym:
+                            fno_equities[u_key] = f"NSE:{u_sym}"
+                if fno_equities:
+                    return dict(sorted(fno_equities.items(), key=lambda x: x))
         except Exception:
             continue
 
-    if not instruments:
-        raise RuntimeError("Upstox CDN temporarily blocked the master file download. Click 'Refresh Scanner' in a few seconds.")
-
-    fno_equities = {}
-    for item in instruments:
-        if item.get("segment") == "NSE_FO":
-            u_key = item.get("underlying_key", "")
-            u_sym = item.get("underlying_symbol", "")
-            u_type = item.get("underlying_type", "")
-            if u_key.startswith("NSE_EQ|") and u_type == "EQUITY" and u_sym:
-                fno_equities[u_key] = f"NSE:{u_sym}"
-
-    return dict(sorted(fno_equities.items(), key=lambda x: x))
+    return dict(sorted(FALLBACK_FNO_STOCKS.items(), key=lambda x: x))
 
 @st.cache_data(ttl=900)
 def get_historical_stats(instrument_key, token):
