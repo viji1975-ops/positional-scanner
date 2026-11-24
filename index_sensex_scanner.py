@@ -738,3 +738,173 @@ def run_index_morning_replay(active_indices, replay_date_str, orb_minutes, repla
 
     progress.empty()
     return pd.DataFrame(rows)
+# --- Main App UI ---
+st.subheader("🏛️ Fyers NSE Indices & BSE SENSEX Institutional + OHOL Scanner")
+
+idx_lots = {k: v["lot"] for k, v in INDEX_CONFIG.items()}
+tab_live, tab_bt, tab_inst = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester", "🏦 Institutional Bhavcopy Radar"))
+
+with tab_live:
+    col_btn, col_info = st.columns((1, 5))
+    with col_btn:
+        if st.button("🔄 Refresh Now"):
+            st.cache_data.clear()
+            st.rerun()
+
+    orb_mins_live = 5 if "5-Min" in orb_timeframe else 15
+    with st.spinner("Scanning NSE Indices, BSE SENSEX & ±N Option Chains..."):
+        spot_quotes, df_spot, df_opts, status_note, expiry_dates = scan_indices_and_options(
+            FYERS_TOKEN, selected_indices, strike_range, orb_mins_live, idx_lots
+        )
+
+    with col_info:
+        st.caption(f"Status: **{status_note}** | Active Expiries: `NIFTY: {expiry_dates.get('NIFTY', '—')}` | `SENSEX: {expiry_dates.get('SENSEX', '—')}` | `BANKNIFTY: {expiry_dates.get('BANKNIFTY', '—')}`")
+
+    if spot_quotes:
+        cols = st.columns(len(spot_quotes))
+        for col, (idx_name, sq) in zip(cols, spot_quotes.items()):
+            col.metric(idx_name, f"{sq['ltp']:.2f}", f"{sq['chp']:+.2f}% (O: {sq['open']:.1f})")
+
+    st.divider()
+    st.markdown("#### 1️⃣ Index Spot Exact (0.00%) Open=High / Open=Low Matches")
+    if not df_spot.empty:
+        styled_spot = (
+            df_spot.style
+            .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Spot Pattern"])
+            .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["ORB Confirm"])
+            .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+        )
+        st.dataframe(styled_spot, use_container_width=True, hide_index=True)
+    elif FYERS_TOKEN:
+        st.info("No Spot Index currently holds an exact 0.00% Open=High or Open=Low — check the **Direct Option Chain OHOL table** below for active CE/PE setups!")
+
+    st.divider()
+    st.markdown(f"#### 2️⃣ Index Options (±{strike_range} Strikes) Exact Open=Low / Open=High + ORB Breakout")
+    if not df_opts.empty:
+        dual_c = df_opts["Dual-Strike Confirmation"].str.contains("🔥 DUAL LOCKED").sum()
+        orb_c = df_opts["Option ORB Confirm"].str.contains("✅").sum()
+        ol_c = df_opts["Option Pattern"].str.contains("Open=Low").sum()
+        oh_c = df_opts["Option Pattern"].str.contains("Open=High").sum()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Active Option OHOL Strikes", len(df_opts))
+        m2.metric("🔥 Dual-Strike Locked", int(dual_c))
+        m3.metric("✅ Option ORB Confirmed", int(orb_c))
+        m4.metric("🟢 Opt O=L | 🔴 Opt O=H", f"{int(ol_c)} | {int(oh_c)}")
+
+        def style_dual(val):
+            return "background-color: #d500f9; color: white; font-weight: bold;" if "🔥 DUAL LOCKED" in str(val) else "color: #9e9e9e;"
+
+        styled_opts = (
+            df_opts.style
+            .map(lambda v: "color: #00e676; font-weight: bold;" if "Open=Low" in str(v) else "color: #ff5252; font-weight: bold;", subset=["Option Pattern"])
+            .map(style_dual, subset=["Dual-Strike Confirmation"])
+            .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=["Option ORB Confirm"])
+            .map(lambda v: "color: #00e676;" if "✅" in str(v) else ("color: #ff9800;" if "⚠️" in str(v) else ""), subset=["VWAP Align"])
+            .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Opt Tgt (1:1|1:2)"])
+        )
+        st.dataframe(styled_opts, use_container_width=True, hide_index=True, height=520)
+        st.download_button(
+            "📥 Download Index Option OHOL Watchlist (CSV)",
+            data=df_opts.to_csv(index=False).encode("utf-8"),
+            file_name=f"fyers_index_options_ohol_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+    elif FYERS_TOKEN:
+        st.info("No Index CE/PE strikes within ±N currently hold an exact Open=Low or Open=High.")
+
+with tab_bt:
+    st.markdown("Replay any past date as of **9:20 AM**, **9:30 AM**, or **Full EOD** across **NSE Indices & BSE SENSEX** (upload Bhavcopy in Tab 3 to verify historical option alignment).")
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        selected_date = st.date_input("Select Historical Date", value=datetime.now().date() - timedelta(days=1), max_value=datetime.now().date())
+    with b2:
+        replay_cutoff = st.selectbox("Snapshot Time (IST)", ("09:30 AM (First 3 Candles)", "09:20 AM (1st 5m Candle)", "03:30 PM (Full EOD)"))
+    with b3:
+        bt_orb = st.selectbox("ORB Confirmation", (5, 15), format_func=lambda m: f"{m}-Min ORB")
+
+    if st.button("▶️ Replay Morning / Date Snapshot", type="primary"):
+        if not FYERS_TOKEN:
+            st.warning("⚠️ Please log in to Fyers in the left sidebar first.")
+        else:
+            date_str = selected_date.strftime("%Y-%m-%d")
+            df_replay = run_index_morning_replay(selected_indices, date_str, bt_orb, replay_cutoff, FYERS_TOKEN, idx_lots)
+
+            if df_replay.empty:
+                st.info(f"No exact 0.00% Spot Index Open=High or Open=Low matches found on **{date_str}** at **{replay_cutoff}**.")
+            else:
+                orb_col = f"ORB @ {replay_cutoff[:8]}"
+                bull_c = df_replay["Pattern"].str.contains("Open=Low").sum()
+                bear_c = df_replay["Pattern"].str.contains("Open=High").sum()
+                tgt_c = df_replay["Later Day Outcome"].str.contains("Target Hit").sum()
+                sl_c = df_replay["Later Day Outcome"].str.contains("Reversed / SL Hit").sum()
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric(f"Matches @ {replay_cutoff[:8]}", len(df_replay))
+                k2.metric("🟢 O=L | 🔴 O=H", f"{int(bull_c)} | {int(bear_c)}")
+                k3.metric("🎯 Later Target Hit", int(tgt_c))
+                k4.metric("❌ Later SL / Reversed", int(sl_c))
+
+                def style_align(val):
+                    s = str(val)
+                    if "🔥" in s: return "background-color: #d500f9; color: white; font-weight: bold;"
+                    elif "⚡" in s: return "color: #ffd54f; font-weight: bold;"
+                    return "color: #9e9e9e;"
+
+                styled_replay = (
+                    df_replay.style
+                    .map(lambda v: "color: #ff5252; font-weight: bold;" if "Open=High" in str(v) else "color: #4caf50; font-weight: bold;", subset=["Pattern"])
+                    .map(style_align, subset=["Option O=L/O=H Align"])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "✅" in str(v) else "color: #ffb74d;", subset=[orb_col])
+                    .map(lambda v: "color: #00e676; font-weight: bold;" if "Target Hit" in str(v) or "Held" in str(v) else "color: #ff5252; font-weight: bold;", subset=["Later Day Outcome"])
+                    .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
+                )
+                st.dataframe(styled_replay, use_container_width=True, hide_index=True)
+
+with tab_inst:
+    st.markdown("Upload **20–25 days of NSE & BSE F&O UDiFF Bhavcopy files (`.csv` or `.zip`)** to detect mid-cycle **Index Institutional Accumulation**, **Option Writing Walls**, and **Auto-Cross-Tag** into Tab 1 & Tab 2.")
+    u1, u2 = st.columns(2)
+    with u1:
+        nse_files = st.file_uploader("📂 Upload NSE F&O Bhavcopies (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY)", type=("csv", "zip"), accept_multiple_files=True, key="nse_idx_bhav")
+    with u2:
+        bse_files = st.file_uploader("📂 Upload BSE F&O Bhavcopies (SENSEX, BANKEX)", type=("csv", "zip"), accept_multiple_files=True, key="bse_idx_bhav")
+
+    if nse_files or bse_files:
+        frames = []
+        if nse_files:
+            df_n = parse_index_bhavcopies(nse_files, {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"})
+            if not df_n.empty: frames.append(df_n)
+        if bse_files:
+            df_b = parse_index_bhavcopies(bse_files, {"SENSEX", "BANKEX"})
+            if not df_b.empty: frames.append(df_b)
+
+        if not frames:
+            st.warning("⚠️ No valid Index records found in uploaded files.")
+        else:
+            df_inst, latest_dt, days_cnt = analyze_index_institutional(pd.concat(frames, ignore_index=True))
+            st.caption(f"Analyzed **{days_cnt} Trading Days** | Latest Bhavcopy Date: **{latest_dt}**")
+
+            if not df_inst.empty:
+                df_hp = df_inst[df_inst["High Prob"] == True].drop(columns=["High Prob"])
+                df_all = df_inst.drop(columns=["High Prob"])
+
+                def style_inst(val):
+                    s = str(val)
+                    if "Silent Accumulation" in s or "Fut OHOL" in s: return "background-color: #d500f9; color: white; font-weight: bold;"
+                    elif "Long Buildup" in s or "Short Covering" in s: return "color: #00e676; font-weight: bold;"
+                    elif "Short Buildup" in s or "Long Unwinding" in s: return "color: #ff5252; font-weight: bold;"
+                    return ""
+
+                if not df_hp.empty:
+                    st.markdown(f"#### 🎯 High-Probability Index Institutional Footprints ({len(df_hp)} Tier-1 Setups)")
+                    st.dataframe(df_hp.style.map(style_inst, subset=["Institutional Footprint"]), use_container_width=True, hide_index=True)
+                    st.divider()
+
+                st.markdown("#### 📋 All Index Institutional Activity & Option Writing Walls")
+                st.dataframe(df_all.style.map(style_inst, subset=["Institutional Footprint"]), use_container_width=True, hide_index=True)
+    else:
+        st.info("Upload NSE and/or BSE F&O Bhavcopy `.csv` or `.zip` files above to inspect Index Institutional positioning and unlock historical Option Alignment in Tab 2.")
+
+if auto_refresh and FYERS_TOKEN:
+    time.sleep(30)
+    st.rerun()
