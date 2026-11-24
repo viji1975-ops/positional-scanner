@@ -1,4 +1,6 @@
 import os
+import gzip
+import json
 import time
 import requests
 import pandas as pd
@@ -6,7 +8,7 @@ import yfinance as yf
 import streamlit as st
 from datetime import datetime
 
-st.set_page_config(page_title="NSE F&O Exact OHOL Scanner (Fyers / Upstox)", layout="wide")
+st.set_page_config(page_title="NSE F&O Exact OHOL + ORB + Options Scanner", layout="wide")
 
 # --- Sidebar: Broker API Settings & Filters ---
 st.sidebar.header("🔑 Broker API Settings")
@@ -30,7 +32,7 @@ if "Fyers" in broker_choice:
         "Paste Daily Fyers Access Token",
         value="",
         type="password",
-        placeholder="Paste Access Token or AppID:Token..."
+        placeholder="Paste full JWT Access Token (eyJ...)..."
     ).strip()
 
     raw_fyers = fyers_input if fyers_input else default_fyers_tok
@@ -44,7 +46,7 @@ if "Fyers" in broker_choice:
         else:
             st.sidebar.warning("⚠️ Enter your Fyers App ID above (e.g. XXXXX-100)")
     else:
-        st.sidebar.info("ℹ️ Paste Fyers token for live market ticks (shows last session when closed)")
+        st.sidebar.info("ℹ️ Paste Fyers JWT token for live market ticks (shows last session when closed)")
 else:
     default_upstox = st.secrets.get("UPSTOX_ACCESS_TOKEN", os.getenv("UPSTOX_ACCESS_TOKEN", "")).strip()
     upstox_input = st.sidebar.text_input(
@@ -60,11 +62,16 @@ else:
         st.sidebar.info("ℹ️ Paste Upstox token for live quotes")
 
 st.sidebar.divider()
-st.sidebar.header("⚙️ Scanner Filters")
+st.sidebar.header("⚙️ Scanner & ORB Filters")
 pattern_filter = st.sidebar.selectbox(
     "Show Exact Patterns",
     ["All (Open=High & Open=Low)", "Open=High Only (Bearish)", "Open=Low Only (Bullish)"]
 )
+orb_timeframe = st.sidebar.radio(
+    "ORB Confirmation Window",
+    ["15-Min ORB (9:15–9:30 AM)", "5-Min ORB (9:15–9:20 AM)"]
+)
+only_orb_confirmed = st.sidebar.checkbox("Show Only ORB Confirmed Setups", value=False)
 auto_refresh = st.sidebar.checkbox("🔄 Auto-Refresh Every 60s", value=False)
 
 FNO_STOCKS = {
@@ -143,6 +150,77 @@ FNO_STOCKS = {
     "NSE_EQ|INE067A01029": "CGPOWER", "NSE_EQ|INE257A01026": "BHEL",
     "NSE_EQ|INE177H01021": "GODREJIND", "NSE_EQ|INE463V01026": "ANANDRATHI",
 }
+
+DEFAULT_LOT_SIZES = {
+    "RELIANCE": 500, "TCS": 175, "HDFCBANK": 550, "ICICIBANK": 700, "BHARTIARTL": 475,
+    "SBIN": 750, "INFY": 400, "ITC": 1600, "LT": 150, "HINDUNILVR": 300,
+    "AXISBANK": 625, "KOTAKBANK": 400, "BAJFINANCE": 750, "MARUTI": 50, "SUNPHARMA": 350,
+    "TITAN": 175, "POWERGRID": 1800, "NTPC": 1500, "ULTRACEMCO": 50, "TATAMOTORS": 550,
+    "TATASTEEL": 5500, "M&M": 350, "HCLTECH": 350, "ASIANPAINT": 250, "BAJAJFINSV": 500,
+    "ADANIENT": 300, "ADANIPORTS": 400, "COALINDIA": 1350, "WIPRO": 3000, "JSWSTEEL": 675,
+    "HINDALCO": 1400, "GRASIM": 250, "EICHERMOT": 175, "BAJAJ-AUTO": 75, "CHOLAFIN": 625,
+    "DIVISLAB": 100, "DRREDDY": 625, "CIPLA": 325, "TECHM": 600, "BRITANNIA": 100,
+    "BANKBARODA": 2925, "PNB": 8000, "CANBK": 6750, "INDUSINDBK": 500, "BEL": 2850,
+    "HAL": 150, "SIEMENS": 75, "ABB": 125, "GAIL": 3150, "ONGC": 2250,
+    "IOC": 4875, "BPCL": 1800, "HINDPETRO": 2025, "NHPC": 6400, "PFC": 1300,
+    "RECLTD": 1250, "LICHSGFIN": 1000, "M&MFIN": 2000, "SHRIRAMFIN": 150, "LTF": 4462,
+    "MOTHERSON": 4250, "ASHOKLEY": 2500, "HEROMOTOCO": 150, "TVSMOTOR": 350, "BOSCHLTD": 25,
+    "CUMMINSIND": 300, "BHARATFORG": 500, "INDIGO": 150, "MRF": 5, "APOLLOTYRE": 1700,
+    "ICICIGI": 325, "ICICIPRULI": 750, "SBILIFE": 375, "HDFCLIFE": 1100, "HDFCAMC": 150,
+    "PNBHOUSING": 650, "MUTHOOTFIN": 275, "MANAPPURAM": 3000, "RAYMOND": 375, "TRENT": 100,
+    "DMART": 150, "DLF": 825, "GODREJPROP": 225, "OBEROIRLTY": 350, "PRESTIGE": 325,
+    "IDEA": 40000, "INDUSTOWER": 1700, "ZEEL": 4500, "SUNTV": 750, "IRCTC": 875,
+    "CONCOR": 1000, "SHREECEM": 25, "AMBUJACEM": 1050, "ACC": 300, "DALBHARAT": 275,
+    "TATAPOWER": 1350, "ADANIPOWER": 1000, "ADANIGREEN": 600, "ADANIENSOL": 675, "ATGL": 800,
+    "AUROPHARMA": 550, "LUPIN": 425, "IRFC": 4250, "RVNL": 1375, "INDHOTEL": 1000,
+@st.cache_data(ttl=43200, show_spinner=False)
+def get_live_lot_sizes():
+    """Fetches current NSE F&O lot sizes from Fyers public symbol master, falling back to DEFAULT_LOT_SIZES."""
+    lot_map = dict(DEFAULT_LOT_SIZES)
+    try:
+        res = requests.get("https://fyers.in", timeout=12)
+        if res.status_code == 200 and "OPTSTK" in res.text:
+            for line in res.text.splitlines():
+                cols = line.split(",")
+                if len(cols) > 13 and cols[13].strip():
+                    u_sym = cols[13].strip()
+                    lot_val = int(float(cols[3].strip()))
+                    if u_sym in lot_map and lot_val > 0:
+                        lot_map[u_sym] = lot_val
+    except Exception:
+        pass
+    return lot_map
+
+def get_option_strikes(ltp, is_open_high):
+    """Computes NSE ATM and 1-step ITM option strikes (PE for Open=High, CE for Open=Low)."""
+    if ltp < 100:
+        step = 1
+    elif ltp < 250:
+        step = 2.5
+    elif ltp < 500:
+        step = 5
+    elif ltp < 1000:
+        step = 10
+    elif ltp < 2500:
+        step = 20
+    elif ltp < 5000:
+        step = 50
+    elif ltp < 15000:
+        step = 100
+    else:
+        step = 250
+
+    atm = round(ltp / step) * step
+    if is_open_high:
+        itm = atm + step
+        opt_type = "PE"
+    else:
+        itm = atm - step
+        opt_type = "CE"
+
+    fmt = lambda x: f"{int(x)}" if x == int(x) else f"{x:.1f}"
+    return f"{fmt(atm)} {opt_type} | {fmt(itm)} {opt_type}"
+
 def is_exact_ohol(open_p, high_p, low_p):
     o = round(float(open_p), 2)
     h = round(float(high_p), 2)
@@ -151,7 +229,62 @@ def is_exact_ohol(open_p, high_p, low_p):
         return False, False
     return (o == h), (o == l)
 
-def build_row(symbol, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pdl):
+@st.cache_data(ttl=120, show_spinner=False)
+def get_orb_status_map(matched_symbols_tuple, orb_minutes):
+    """Fetches 5m intraday candles for matched symbols to check 5m or 15m ORB breakout/breakdown."""
+    if not matched_symbols_tuple:
+        return {}
+    tickers = [f"{s}.NS" for s in matched_symbols_tuple]
+    raw = yf.download(tickers, period="2d", interval="5m", group_by="ticker", progress=False, threads=True)
+    if raw.empty:
+        return {}
+
+    candles_needed = 1 if orb_minutes == 5 else 3
+    orb_map = {}
+
+    for sym in matched_symbols_tuple:
+        try:
+            df = raw[f"{sym}.NS"].dropna() if len(matched_symbols_tuple) > 1 else raw.dropna()
+            if df.empty:
+                continue
+            last_day = df.index[-1].date()
+            day_df = df[df.index.date == last_day]
+            if len(day_df) < candles_needed:
+                continue
+
+            orb_slice = day_df.iloc[:candles_needed]
+            orb_high = float(orb_slice["High"].max())
+            orb_low = float(orb_slice["Low"].min())
+            latest_close = float(day_df.iloc[-1]["Close"])
+
+            orb_map[sym] = {
+                "orb_high": orb_high,
+                "orb_low": orb_low,
+                "latest_close": latest_close,
+            }
+        except Exception:
+            continue
+
+    return orb_map
+
+def format_orb_signal(sym, is_open_high, ltp, orb_map, orb_minutes):
+    info = orb_map.get(sym)
+    if not info:
+        return "⏳ Pending ORB", False
+
+    price_to_check = ltp if ltp > 0 else info["latest_close"]
+    if is_open_high:
+        lvl = info["orb_low"]
+        if price_to_check < lvl:
+            return f"✅ {orb_minutes}m Broken (<{lvl:.1f})", True
+        return f"⏳ Inside (>{lvl:.1f})", False
+    else:
+        lvl = info["orb_high"]
+        if price_to_check > lvl:
+            return f"✅ {orb_minutes}m Breakout (>{lvl:.1f})", True
+        return f"⏳ Inside (<{lvl:.1f})", False
+
+def build_row(symbol, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pdl, orb_text, orb_ok, lot_size):
     risk_unit = atr * 0.5
     vol_ratio = round(curr_vol / avg_vol, 2) if avg_vol > 0 else 0
 
@@ -185,20 +318,23 @@ def build_row(symbol, open_p, ltp, curr_vol, is_open_high, atr, avg_vol, pdh, pd
     return {
         "Symbol": f"NSE:{symbol}",
         "Pattern": pattern,
+        "ORB Confirm": orb_text,
         "Status": status,
         "Price (₹)": f"{ltp:.2f}",
+        "ATM | 1-ITM Option": get_option_strikes(ltp, is_open_high),
+        "Lot Size": lot_size,
         "Normal Tgt (1:1|1:2)": f"{t1} | {t2}",
         "Rev Target": rev_tgt,
         "PDH/PDL": level_tag,
         "Volume": f"{vol_ratio}x",
         "Power": power,
+        "_orb_ok": orb_ok,
         "_vol_ratio": vol_ratio,
         "_power_rank": power_rank
     }
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_baseline_stats(symbols_tuple):
-    """Fetches 35-day daily OHLCV for ATR-14, 20d Avg Volume, PDH/PDL, and last session fallback."""
     tickers = [f"{s}.NS" for s in symbols_tuple]
     raw = yf.download(tickers, period="35d", interval="1d", group_by="ticker", progress=False, threads=True)
     if raw.empty:
@@ -238,14 +374,11 @@ def get_baseline_stats(symbols_tuple):
     return stats_map, last_date
 
 def fetch_fyers_live(symbols, fyers_auth_token):
-    """Fetches live quotes from Fyers Data API v3 in batches of 50 symbols."""
     if not fyers_auth_token:
         return None, "No Fyers token entered"
-
-    # Check if user accidentally pasted Client ID / Secret instead of JWT Access Token
     token_part = fyers_auth_token.split(":", 1)[-1]
     if len(token_part) < 50:
-        return None, "Invalid token length (paste full Fyers JWT Access Token, not Client ID)"
+        return None, "Paste full Fyers JWT Access Token (eyJ...), not Client ID"
 
     url = "https://fyers.in"
     headers = {"Authorization": fyers_auth_token}
@@ -259,7 +392,7 @@ def fetch_fyers_live(symbols, fyers_auth_token):
             if res.status_code in (401, 403):
                 return None, f"Token expired or invalid (HTTP {res.status_code})"
             if res.status_code != 200 or not res.text.strip():
-                return None, f"Fyers unavailable / Market closed (HTTP {res.status_code})"
+                return None, f"Market closed / Fyers offline (HTTP {res.status_code})"
             payload = res.json()
             if payload.get("s") != "ok":
                 return None, payload.get("message", "Fyers API error")
@@ -284,7 +417,6 @@ def fetch_fyers_live(symbols, fyers_auth_token):
     return quotes_by_sym, None
 
 def fetch_upstox_live(fno_dict, upstox_token):
-    """Fetches live quotes from Upstox v2 API."""
     if not upstox_token:
         return None, "No Upstox token entered"
 
@@ -297,8 +429,8 @@ def fetch_upstox_live(fno_dict, upstox_token):
         batch = keys[i:i + 50]
         try:
             res = requests.get(url, headers=headers, params={"instrument_key": ",".join(batch)}, timeout=10)
-            if res.status_code != 200:
-                return None, f"HTTP {res.status_code}"
+            if res.status_code != 200 or not res.text.strip():
+                return None, f"Market closed / HTTP {res.status_code}"
             payload = res.json()
             if payload.get("status") != "success":
                 return None, "API error"
@@ -324,6 +456,8 @@ def run_scanner():
     symbols = tuple(sorted(FNO_STOCKS.values()))
     total_fno = len(symbols)
     stats_map, last_date = get_baseline_stats(symbols)
+    lot_map = get_live_lot_sizes()
+    orb_mins = 5 if "5-Min" in orb_timeframe else 15
 
     if "Fyers" in broker_choice:
         live_quotes, api_note = fetch_fyers_live(symbols, FYERS_TOKEN)
@@ -332,7 +466,7 @@ def run_scanner():
         live_quotes, api_note = fetch_upstox_live(FNO_STOCKS, UPSTOX_TOKEN)
         broker_label = "Upstox API v2"
 
-    raw_rows = []
+    matched_candidates = []
     if live_quotes:
         source_note = f"{broker_label} Live Feed (Exact Match)"
         for sym, q in live_quotes.items():
@@ -341,19 +475,26 @@ def run_scanner():
                 continue
             is_open_high, is_open_low = is_exact_ohol(q["open"], q["high"], q["low"])
             if is_open_high or is_open_low:
-                raw_rows.append(build_row(
-                    sym, q["open"], q["ltp"], q["vol"], is_open_high,
-                    st_info["atr"], st_info["avg_vol"], st_info["pdh"], st_info["pdl"]
-                ))
+                matched_candidates.append((sym, q["open"], q["ltp"], q["vol"], is_open_high, st_info))
     else:
         source_note = f"Last Trading Session ({last_date} — Exact Match | {broker_label}: {api_note})"
         for sym, st_info in stats_map.items():
             is_open_high, is_open_low = is_exact_ohol(st_info["open"], st_info["high"], st_info["low"])
             if is_open_high or is_open_low:
-                raw_rows.append(build_row(
-                    sym, st_info["open"], st_info["ltp"], st_info["vol"], is_open_high,
-                    st_info["atr"], st_info["avg_vol"], st_info["pdh"], st_info["pdl"]
-                ))
+                matched_candidates.append((sym, st_info["open"], st_info["ltp"], st_info["vol"], is_open_high, st_info))
+
+    matched_syms = tuple(sorted(set(m[0] for m in matched_candidates)))
+    orb_map = get_orb_status_map(matched_syms, orb_mins)
+
+    raw_rows = []
+    for sym, open_p, ltp, curr_vol, is_open_high, st_info in matched_candidates:
+        orb_text, orb_ok = format_orb_signal(sym, is_open_high, ltp, orb_map, orb_mins)
+        lot_size = lot_map.get(sym, 0)
+        raw_rows.append(build_row(
+            sym, open_p, ltp, curr_vol, is_open_high,
+            st_info["atr"], st_info["avg_vol"], st_info["pdh"], st_info["pdl"],
+            orb_text, orb_ok, lot_size
+        ))
 
     filtered = []
     for r in raw_rows:
@@ -361,12 +502,14 @@ def run_scanner():
             continue
         if "Open=High Only" in pattern_filter and "Open=Low" in r["Pattern"]:
             continue
+        if only_orb_confirmed and not r["_orb_ok"]:
+            continue
         filtered.append(r)
 
     df_out = pd.DataFrame(filtered)
     if not df_out.empty:
-        df_out = df_out.sort_values(by=["_power_rank", "_vol_ratio"], ascending=[False, False])
-        df_out = df_out.drop(columns=["_vol_ratio", "_power_rank"])
+        df_out = df_out.sort_values(by=["_orb_ok", "_power_rank", "_vol_ratio"], ascending=[False, False, False])
+        df_out = df_out.drop(columns=["_orb_ok", "_vol_ratio", "_power_rank"])
 
     return df_out, source_note, total_fno
 
@@ -377,6 +520,11 @@ def style_scanner_table(df):
         elif "Open=Low" in str(val):
             return "color: #4caf50; font-weight: bold;"
         return ""
+
+    def highlight_orb(val):
+        if "✅" in str(val):
+            return "color: #00e676; font-weight: bold;"
+        return "color: #ffb74d;"
 
     def highlight_status(val):
         return "color: #4caf50; font-weight: bold;" if val == "Active" else "color: #ff9800; font-weight: bold;"
@@ -391,13 +539,15 @@ def style_scanner_table(df):
     return (
         df.style
         .map(highlight_pattern, subset=["Pattern"])
+        .map(highlight_orb, subset=["ORB Confirm"])
         .map(highlight_status, subset=["Status"])
+        .map(lambda _: "color: #ffd54f; font-weight: bold;", subset=["ATM | 1-ITM Option"])
         .map(lambda _: "color: #00bcd4; font-weight: bold;", subset=["Normal Tgt (1:1|1:2)"])
         .map(highlight_power, subset=["Power"])
     )
 
 # --- Main App UI ---
-st.subheader("📊 NSE F&O Exact Open=High / Open=Low Scanner")
+st.subheader("📊 NSE F&O Exact Open=High / Open=Low + ORB & Options Scanner")
 
 col_btn, col_info = st.columns([1, 5])
 with col_btn:
@@ -405,7 +555,7 @@ with col_btn:
         st.cache_data.clear()
         st.rerun()
 
-with st.spinner("Scanning all NSE F&O stocks..."):
+with st.spinner("Scanning NSE F&O stocks, ORB levels & Option strikes..."):
     df_results, source_note, total_fno = run_scanner()
 
 with col_info:
@@ -414,15 +564,17 @@ with col_info:
 if not df_results.empty:
     bull_count = df_results["Pattern"].str.contains("Open=Low").sum()
     bear_count = df_results["Pattern"].str.contains("Open=High").sum()
+    orb_count = df_results["ORB Confirm"].str.contains("✅").sum()
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Exact Matches", len(df_results))
     m2.metric("🟢 Open=Low (Bullish)", int(bull_count))
     m3.metric("🔴 Open=High (Bearish)", int(bear_count))
+    m4.metric("✅ ORB Confirmed", int(orb_count))
 
-    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=550)
+    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=560)
 else:
-    st.info("No F&O stocks had an exact Open=High or Open=Low in this session.")
+    st.info("No F&O stocks matched your current filters in this session.")
 
 if auto_refresh:
     time.sleep(60)
