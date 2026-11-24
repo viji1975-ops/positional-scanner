@@ -614,27 +614,67 @@ def run_ohol_backtest(symbols_list, days_back, orb_minutes, target_rr, auth_toke
 # --- Main App UI ---
 st.subheader("📊 Fyers Pure NSE F&O Exact Open=High / Open=Low + ORB Scanner")
 
-col_btn, col_info = st.columns([1, 5])
-with col_btn:
-    if st.button("🔄 Refresh"):
-        st.cache_data.clear()
-        st.rerun()
+tab_live, tab_bt = st.tabs(("📡 Live Intraday Scanner", "📈 Strategy Backtester"))
 
-with st.spinner("Fetching 100% Fyers API v3 data..."):
-    df_results, source_note, total_fno = run_pure_fyers_scanner()
+with tab_live:
+    col_btn, col_info = st.columns((1, 5))
+    with col_btn:
+        if st.button("🔄 Refresh"):
+            st.cache_data.clear()
+            st.rerun()
 
-with col_info:
-    st.caption(f"Scanned **{total_fno} F&O Stocks** | Mode: **{source_note}**")
+    with st.spinner("Fetching 100% Fyers API v3 data..."):
+        df_results, source_note, total_fno = run_pure_fyers_scanner()
 
-if not df_results.empty:
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Exact Matches", len(df_results))
-    m2.metric("🟢 Open=Low (Bullish)", int(df_results["Pattern"].str.contains("Open=Low").sum()))
-    m3.metric("🔴 Open=High (Bearish)", int(df_results["Pattern"].str.contains("Open=High").sum()))
-    m4.metric("✅ ORB Confirmed", int(df_results["ORB Confirm"].str.contains("✅").sum()))
-    st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=560)
-elif FYERS_TOKEN:
-    st.info("No F&O stocks matched your current filters (ensure you pasted your full Fyers JWT token starting with 'eyJ...').")
+    with col_info:
+        st.caption(f"Scanned **{total_fno} F&O Stocks** | Mode: **{source_note}**")
+
+    if not df_results.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Exact Matches", len(df_results))
+        m2.metric("🟢 Open=Low (Bullish)", int(df_results["Pattern"].str.contains("Open=Low").sum()))
+        m3.metric("🔴 Open=High (Bearish)", int(df_results["Pattern"].str.contains("Open=High").sum()))
+        m4.metric("✅ ORB Confirmed", int(df_results["ORB Confirm"].str.contains("✅").sum()))
+        st.dataframe(style_scanner_table(df_results), use_container_width=True, hide_index=True, height=560)
+    elif FYERS_TOKEN:
+        st.info("No F&O stocks matched your current filters right now.")
+
+with tab_bt:
+    st.markdown("Test how **Exact Open=High / Open=Low + ORB** performed over past trading days using **Fyers 5-Min Historical Data**.")
+    b1, b2, b3, b4 = st.columns(4)
+    with b1:
+        bt_universe = st.selectbox("Stock Universe", ("Top 30 Liquid F&O (Fast ~6s)", "All 148 F&O Stocks (~25s)"))
+    with b2:
+        bt_days = st.selectbox("Lookback Period", (15, 30, 60), index=1, format_func=lambda d: f"Last {d} Calendar Days")
+    with b3:
+        bt_orb = st.selectbox("ORB Confirmation", (5, 15), format_func=lambda m: f"{m}-Min ORB")
+    with b4:
+        bt_rr = st.selectbox("Target Multiple", (1.0, 1.5, 2.0), format_func=lambda r: f"1:{r} ATR Target")
+
+    if st.button("▶️ Run Fyers Backtest", type="primary"):
+        if not FYERS_TOKEN:
+            st.warning("⚠️ Please log in to Fyers in the left sidebar first.")
+        else:
+            test_syms = sorted(set(FNO_SYMBOLS))[:30] if "Top 30" in bt_universe else sorted(set(FNO_SYMBOLS))
+            df_bt = run_ohol_backtest(test_syms, bt_days, bt_orb, bt_rr, FYERS_TOKEN)
+
+            if df_bt.empty:
+                st.info("No triggered trades found in this period.")
+            else:
+                df_bt = df_bt.sort_values(by=["Date", "Entry Time"], ascending=[False, True])
+                wins = (df_bt["Return (%)"] > 0).sum()
+                total_t = len(df_bt)
+                win_rate = round((wins / total_t) * 100, 1)
+                avg_ret = round(df_bt["Return (%)"].mean(), 2)
+                net_ret = round(df_bt["Return (%)"].sum(), 2)
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Total Triggered Trades", total_t)
+                k2.metric("Win Rate (%)", f"{win_rate}%")
+                k3.metric("Avg Return / Trade", f"{avg_ret}%")
+                k4.metric("Cumulative Return (Unleveraged)", f"{net_ret}%")
+
+                st.dataframe(df_bt, use_container_width=True, hide_index=True, height=500)
 
 if auto_refresh and FYERS_TOKEN:
     time.sleep(60)
