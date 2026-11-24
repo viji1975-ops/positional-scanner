@@ -54,6 +54,21 @@ def scan_ohol():
         st.error("Missing UPSTOX_ACCESS_TOKEN. Please add it in Streamlit App Settings -> Secrets.")
         return pd.DataFrame()
 
+    url = "https://upstox.com"
+    params = {"instrument_key": ",".join(k.strip() for k in INSTRUMENTS.keys())}
+    
+    res = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    
+    # Prevent JSONDecodeError if Upstox returns an HTML error or 401 Unauthorized
+    if res.status_code != 200:
+        st.error(f"Upstox API Error (HTTP {res.status_code}): {res.text}")
+        return pd.DataFrame()
+
+    response = res.json()
+    if response.get("status") != "success":
+        st.error(f"Upstox API Error: {response}")
+        return pd.DataFrame()
+
     # Passing params as a dict prevents LocationParseError completely
     url = "https://upstox.com"
     params = {"instrument_key": ",".join(k.strip() for k in INSTRUMENTS.keys())}
