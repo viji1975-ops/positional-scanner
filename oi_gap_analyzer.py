@@ -1,3 +1,4 @@
+import datetime
 import glob
 import io
 import os
@@ -7,10 +8,10 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
-st.title("📊 NSE & BSE Bhavcopy OI + Fyers Live Gap Scanner")
+st.title("📊 NSE & BSE Bhavcopy OI + Fyers Live Option Chain Scanner")
 
 INDEX_CONFIG = {
-    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25900.0},
+    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25660.0},
     "BANKNIFTY": {"syms": ["BANKNIFTY"], "step": 100, "fyers": "NSE:NIFTYBANK-INDEX", "spot": 53500.0},
     "FINNIFTY": {"syms": ["FINNIFTY"], "step": 50, "fyers": "NSE:FINNIFTY-INDEX", "spot": 24500.0},
     "MIDCPNIFTY": {"syms": ["MIDCPNIFTY"], "step": 25, "fyers": "NSE:MIDCPNIFTY-INDEX", "spot": 12800.0},
@@ -27,7 +28,7 @@ idx = st.sidebar.selectbox("Select Index", list(INDEX_CONFIG.keys()))
 cfg = INDEX_CONFIG[idx]
 step = cfg["step"]
 
-use_fyers = st.sidebar.checkbox("Fetch Live Spot from Fyers API", value=False)
+use_fyers = st.sidebar.checkbox("Fetch Live Spot & Option Chain (Fyers)", value=False)
 client_id = st.sidebar.text_input("Fyers App ID (Client ID)", placeholder="e.g. XC4XXXXM-100")
 
 with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
@@ -61,6 +62,7 @@ with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
 
 token = st.sidebar.text_input("Fyers Access Token (Daily JWT)", value=st.session_state["fyers_token"], type="password")
 manual_spot = st.sidebar.number_input("Or Enter Simulated / Live Open Price", value=cfg["spot"], step=float(step))
+skip_expired = st.sidebar.checkbox("Auto-Skip Expired Contracts (Post-Holiday Safe)", value=True)
 
 st.header("2. Load 20–25 NSE (.zip) or BSE (.csv) UDiFF Bhavcopies")
 mode = st.radio(
@@ -88,7 +90,7 @@ else:
                 buf.name = os.path.basename(p)
                 files.append(buf)
     else:
-        st.warning("No files found in ./bhavcopy_data/. Create that folder in GitHub and upload your ZIP/CSV files there.")
+        st.warning("No files found in ./bhavcopy_data/.")
 
 def read_file(f):
     f.seek(0)
@@ -97,12 +99,11 @@ def read_file(f):
             csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not csvs:
                 return None
-            first_csv = next(iter(csvs))
-            with zf.open(first_csv) as c:
+            with zf.open(next(iter(csvs))) as c:
                 return pd.read_csv(c)
     return pd.read_csv(f)
 
-def process_files(file_list, syms):
+def load_master_df(file_list, syms):
     frames = []
     for f in file_list[-25:]:
         try:
@@ -120,30 +121,45 @@ def process_files(file_list, syms):
         except Exception as e:
             st.warning(f"Skipped {f.name}: {e}")
     if not frames:
-        return None, None, None
+        return None
     master = pd.concat(frames, ignore_index=True)
     master["TradDt"] = pd.to_datetime(master["TradDt"])
     master["XpryDt"] = pd.to_datetime(master["XpryDt"])
     master["OptnTp"] = master["OptnTp"].astype(str).str.strip()
-    latest_dt = master["TradDt"].max()
-    near_exp = master[master["TradDt"] == latest_dt]["XpryDt"].min()
-    return master[master["XpryDt"] == near_exp].sort_values("TradDt"), latest_dt, near_exp
+    return master
 
-def get_fyers_spot(cid, tok, sym):
+def get_fyers_live_chain(cid, tok, sym):
     from fyers_apiv3 import fyersModel
     fyers = fyersModel.FyersModel(client_id=cid.strip(), token=tok.strip(), is_async=False)
-    res = fyers.quotes(data={"symbols": sym})
-    if res.get("s") == "ok" and res.get("d"):
-        first_item = next(iter(res["d"]))
-        return first_item["v"]["lp"]
-    raise Exception(f"Fyers Error: {res}")
+    q_res = fyers.quotes(data={"symbols": sym})
+    spot = None
+    if q_res.get("s") == "ok" and q_res.get("d"):
+        spot = next(iter(q_res["d"]))["v"]["lp"]
+    oc_res = fyers.optionchain(data={"symbol": sym, "strikecount": 10, "timestamp": ""})
+    chain_rows = oc_res.get("data", {}).get("optionsChain", []) if oc_res.get("s") == "ok" else []
+    return spot, chain_rows
 
 if files:
-    exp_df, latest_dt, near_exp = process_files(files, cfg["syms"])
-    if exp_df is None or exp_df.empty:
-        st.error(f"No valid {idx} options data found. Check exchange file match.")
+    master = load_master_df(files, cfg["syms"])
+    if master is None or master.empty:
+        st.error(f"No valid {idx} options data found.")
     else:
-        eod = exp_df[exp_df["TradDt"] == latest_dt].copy()
+        latest_dt = master["TradDt"].max()
+        avail_expiries = sorted(master[master["TradDt"] == latest_dt]["XpryDt"].unique())
+        today_ts = pd.Timestamp(datetime.date.today())
+
+        if skip_expired:
+            active_expiries = [e for e in avail_expiries if e >= today_ts]
+            if not active_expiries:
+                active_expiries = avail_expiries
+        else:
+            active_expiries = avail_expiries
+
+        exp_labels = [e.strftime("%d %b %Y") for e in active_expiries]
+        chosen_label = st.selectbox("Select Active Contract Expiry", exp_labels)
+        chosen_exp = active_expiries[exp_labels.index(chosen_label)]
+
+        eod = master[(master["TradDt"] == latest_dt) & (master["XpryDt"] == chosen_exp)].copy()
         ce = eod[eod["OptnTp"] == "CE"].set_index("StrkPric")
         pe = eod[eod["OptnTp"] == "PE"].set_index("StrkPric")
 
@@ -155,18 +171,21 @@ if files:
         trapped_strikes = trapped_ce.index.tolist()[:5]
 
         live_price = manual_spot
+        live_chain = []
         if use_fyers and client_id and token:
             try:
-                live_price = get_fyers_spot(client_id, token, cfg["fyers"])
-                st.sidebar.success(f"Live {idx}: {live_price}")
+                f_spot, live_chain = get_fyers_live_chain(client_id, token, cfg["fyers"])
+                if f_spot:
+                    live_price = f_spot
+                    st.sidebar.success(f"Live {idx}: {live_price}")
             except Exception as e:
                 st.sidebar.error(str(e))
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Latest EOD", latest_dt.strftime("%d %b %Y"))
-        c2.metric("Nearest Expiry", near_exp.strftime("%d %b %Y"))
-        c3.metric("EOD PCR", pcr)
-        c4.metric(f"{idx} Open / Live", live_price)
+        c1.metric("Latest EOD Bhavcopy", latest_dt.strftime("%d %b %Y"))
+        c2.metric("Active Target Expiry", chosen_exp.strftime("%d %b %Y"))
+        c3.metric("EOD Active PCR", pcr)
+        c4.metric(f"{idx} Live / Open", live_price)
 
         st.divider()
 
@@ -174,17 +193,25 @@ if files:
         if breached:
             atm = round(live_price / step) * step
             eff_strike = int(atm - step)
-            st.success(f"🚀 SHORT SQUEEZE ({idx}): Breached {breached}. Best Strike: {eff_strike} CE")
+            st.success(f"🚀 ACTIVE EXPIRY SHORT SQUEEZE ({idx}): Breached {breached}. Best Strike: {eff_strike} CE")
         else:
-            st.info(f"No trapped Call walls breached. Resistance: {int(call_wall)} CE | Support: {int(put_wall)} PE")
+            st.info(f"No active trapped Call walls breached. Resistance: {int(call_wall)} CE | Support: {int(put_wall)} PE")
 
         cols = ["ClsPric", "OpnIntrst", "ChngInOpnIntrst"]
         left, right = st.columns(2)
         with left:
-            st.subheader(f"Top Trapped {idx} Call (CE) Strikes")
+            st.subheader(f"EOD Trapped {idx} Call (CE) — {chosen_label}")
             st.dataframe(trapped_ce[cols].head(10))
         with right:
-            st.subheader(f"Top {idx} Put (PE) Support Strikes")
+            st.subheader(f"EOD {idx} Put (PE) Support — {chosen_label}")
             st.dataframe(pe[cols].sort_values(by="OpnIntrst", ascending=False).head(10))
+
+        if live_chain:
+            st.divider()
+            st.subheader(f"⚡ Live Fyers Intraday Option Chain OI Change ({idx})")
+            lc_df = pd.DataFrame(live_chain)
+            keep_cols = [c for c in ["strike_price", "option_type", "ltp", "oi", "oich", "volume"] if c in lc_df.columns]
+            if keep_cols:
+                st.dataframe(lc_df[keep_cols].sort_values(by="strike_price"))
 else:
     st.info("👈 Upload your NSE (.zip) or BSE (.csv) files or add them to ./bhavcopy_data/ in GitHub.")
