@@ -4,3 +4,4 @@ requests
 numpy
 streamlit-autorefresh
 yfinance
+fyers-apiv3
