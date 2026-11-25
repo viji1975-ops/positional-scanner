@@ -305,6 +305,7 @@ def render_multi_index_radar(index_config, client_id, token):
             file_name=f"multi_index_snapshots_{datetime.date.today()}.csv",
             mime="text/csv",
         )
+        
 def render_eod_vs_live_blocks(master, ce_live, pe_live, live_price, lot_size, skip_expired):
     if master is None or ce_live.empty:
         return
