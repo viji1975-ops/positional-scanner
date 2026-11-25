@@ -9,6 +9,7 @@ from bhavcopy_analytics import (
     render_bhavcopy_section,
     render_confluence_tab,
     render_live_institutional,
+    render_multi_index_radar,
 )
 
 st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
@@ -86,6 +87,9 @@ if use_fyers and client_id and token:
             st.sidebar.success(f"Live {idx}: {live_price}")
     except Exception as e:
         st.sidebar.error(f"Fyers Live Error: {e}")
+if use_fyers and client_id and token:
+    if st.button("📡 Scan All 7 Indices (Multi-Index Squeeze & Institutional Radar)"):
+        render_multi_index_radar(INDEX_CONFIG, client_id, token)
 
 with st.expander("📁 EOD Data Loader (20–25 Bhavcopy Files + Optional Participant OI CSV)", expanded=True):
     col_a, col_b = st.columns([2, 1])
