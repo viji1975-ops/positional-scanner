@@ -300,7 +300,7 @@ def render_multi_index_radar(index_config, client_id, token):
             st.success(f"🔥 SYNCHRONIZED MARKET BREAKOUT ({view_slot}): {sq_cnt} of {len(snap_df)} indices in active squeeze!")
         st.dataframe(snap_df, use_container_width=True)
 
-        all_snaps = pd.concat([v for v in st.session_state["radar_snapshots"].values()], ignore_index=True)
+        all_snaps = pd.concat([v(0) for v in st.session_state["radar_snapshots"].values()], ignore_index=True)
         st.download_button(
             "📥 Export All Saved Time-Slot Snapshots (CSV)",
             data=all_snaps.to_csv(index=False).encode("utf-8"),
