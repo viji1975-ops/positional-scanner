@@ -4,13 +4,13 @@ import os
 import urllib.parse
 import pandas as pd
 import streamlit as st
-from bhavcopy_analytics import render_bhavcopy_section
+from bhavcopy_analytics import parse_bhav_master, render_bhavcopy_section, render_confluence_tab
 
 st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
-st.title("📊 NSE & BSE Live Option Chain + 25-Day Bhavcopy OI Scanner")
+st.title("📊 NSE & BSE 3-Mode OI Scanner (Live • EOD • Combined Confluence)")
 
 INDEX_CONFIG = {
-    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25660.0},
+    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25720.0},
     "BANKNIFTY": {"syms": ["BANKNIFTY"], "step": 100, "fyers": "NSE:NIFTYBANK-INDEX", "spot": 63350.0},
     "FINNIFTY": {"syms": ["FINNIFTY"], "step": 50, "fyers": "NSE:FINNIFTY-INDEX", "spot": 24500.0},
     "MIDCPNIFTY": {"syms": ["MIDCPNIFTY"], "step": 25, "fyers": "NSE:MIDCPNIFTY-INDEX", "spot": 12800.0},
@@ -72,8 +72,7 @@ def get_fyers_live_chain(cid, tok, sym):
     chain_rows = oc_res.get("data", {}).get("optionsChain", []) if oc_res.get("s") == "ok" else []
     return spot, chain_rows
 
-live_price = manual_spot
-live_chain = []
+live_price, live_chain = manual_spot, []
 if use_fyers and client_id and token:
     try:
         f_spot, live_chain = get_fyers_live_chain(client_id, token, cfg["fyers"])
@@ -83,80 +82,81 @@ if use_fyers and client_id and token:
     except Exception as e:
         st.sidebar.error(f"Fyers Live Error: {e}")
 
-if live_chain:
-    st.header(f"⚡ Live Fyers Intraday OI & Dual-Squeeze Scanner ({idx})")
-    lc_df = pd.DataFrame(live_chain)
-    lc_df = lc_df[lc_df["option_type"].isin(["CE", "PE"])].copy()
-    lc_df["prev_eod_oi"] = lc_df["oi"] - lc_df["oich"]
+with st.expander("📁 Bhavcopy Data Loader (20–25 NSE .zip or BSE .csv files)", expanded=True):
+    mode = st.radio("Data Source", ["Upload Files Manually", "Auto-Load from GitHub Folder (./bhavcopy_data)"], horizontal=True)
+    files = []
+    if mode == "Upload Files Manually":
+        uploaded = st.file_uploader("Select NSE (.zip) or BSE (.csv) files", type=["zip", "csv"], accept_multiple_files=True)
+        if uploaded:
+            files = uploaded
+    else:
+        paths = sorted(glob.glob("bhavcopy_data/*.zip") + glob.glob("bhavcopy_data/*.csv"))
+        if paths:
+            st.success(f"Loaded {len(paths[-25:])} file(s) from ./bhavcopy_data/")
+            for p in paths[-25:]:
+                with open(p, "rb") as fp:
+                    buf = io.BytesIO(fp.read())
+                    buf.name = os.path.basename(p)
+                    files.append(buf)
 
-    ce_live = lc_df[lc_df["option_type"] == "CE"].set_index("strike_price")
-    pe_live = lc_df[lc_df["option_type"] == "PE"].set_index("strike_price")
+eod_master = parse_bhav_master(files, cfg["syms"]) if files else None
 
-    live_pcr = round(pe_live["oi"].sum() / ce_live["oi"].sum(), 2) if ce_live["oi"].sum() > 0 else 0
-    res_wall = ce_live["oi"].idxmax()
-    sup_wall = pe_live["oi"].idxmax()
+tab_live, tab_eod, tab_both = st.tabs([
+    "⚡ 1. Live Market Analysis",
+    "📁 2. EOD Bhavcopy Analysis",
+    "🎯 3. Combined (EOD + Live Confluence)",
+])
 
-    trapped_ce = ce_live[(ce_live["prev_eod_oi"] > ce_live["prev_eod_oi"].median()) & (ce_live.index < live_price)].sort_values(by="prev_eod_oi", ascending=False)
-    trapped_pe = pe_live[(pe_live["prev_eod_oi"] > pe_live["prev_eod_oi"].median()) & (pe_live.index > live_price)].sort_values(by="prev_eod_oi", ascending=False)
+ce_live, pe_live = pd.DataFrame(), pd.DataFrame()
+call_sq, put_sq = False, False
+atm = round(live_price / step) * step
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric(f"Live {idx} Spot", live_price)
-    m2.metric("Live Intraday PCR", live_pcr)
-    m3.metric("Immediate Resistance (Max CE OI)", f"{int(res_wall)} CE")
-    m4.metric("Immediate Support (Max PE OI)", f"{int(sup_wall)} PE")
+with tab_live:
+    if live_chain:
+        lc_df = pd.DataFrame(live_chain)
+        lc_df = lc_df[lc_df["option_type"].isin(["CE", "PE"])].copy()
+        lc_df["prev_eod_oi"] = lc_df["oi"] - lc_df["oich"]
 
-    atm = round(live_price / step) * step
-    alert_shown = False
+        ce_live = lc_df[lc_df["option_type"] == "CE"].set_index("strike_price")
+        pe_live = lc_df[lc_df["option_type"] == "PE"].set_index("strike_price")
 
-    if not trapped_ce.empty:
-        ce_breached = trapped_ce.index.tolist()[:4]
-        unwinding_ce = trapped_ce[trapped_ce["oich"] < 0].index.tolist()
-        note_ce = f" | Live Unwinding Confirmed at: {unwinding_ce}" if unwinding_ce else ""
-        st.success(f"🚀 GAP-UP CALL SQUEEZE ({idx}): Breached EOD Call walls {ce_breached}. Best Strike: **{int(atm - step)} CE**{note_ce}")
-        alert_shown = True
+        live_pcr = round(pe_live["oi"].sum() / ce_live["oi"].sum(), 2) if ce_live["oi"].sum() > 0 else 0
+        res_wall, sup_wall = ce_live["oi"].idxmax(), pe_live["oi"].idxmax()
 
-    if not trapped_pe.empty:
-        pe_breached = trapped_pe.index.tolist()[:4]
-        unwinding_pe = trapped_pe[trapped_pe["oich"] < 0].index.tolist()
-        note_pe = f" | Live Unwinding Confirmed at: {unwinding_pe}" if unwinding_pe else ""
-        st.error(f"🔻 GAP-DOWN PUT SQUEEZE ({idx}): Broke below EOD Put walls {pe_breached}. Best Strike: **{int(atm + step)} PE**{note_pe}")
-        alert_shown = True
+        trapped_ce = ce_live[(ce_live["prev_eod_oi"] > ce_live["prev_eod_oi"].median()) & (ce_live.index < live_price) & (ce_live["oich"] < 0)].sort_values(by="oich")
+        trapped_pe = pe_live[(pe_live["prev_eod_oi"] > pe_live["prev_eod_oi"].median()) & (pe_live.index > live_price) & (pe_live["oich"] < 0)].sort_values(by="oich")
 
-    if not alert_shown:
-        st.info(f"Range-Bound Zone: Resistance at **{int(res_wall)} CE** | Support at **{int(sup_wall)} PE**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(f"Live {idx} Spot", live_price)
+        m2.metric("Live Intraday PCR", live_pcr)
+        m3.metric("Live Call Wall", f"{int(res_wall)} CE")
+        m4.metric("Live Put Wall", f"{int(sup_wall)} PE")
 
-    c_left, c_right = st.columns(2)
-    show_cols = [c for c in ["ltp", "prev_eod_oi", "oi", "oich", "volume"] if c in lc_df.columns]
-    with c_left:
-        st.subheader(f"Live {idx} Call (CE) OI & Unwinding")
-        st.dataframe(ce_live[show_cols].sort_index())
-    with c_right:
-        st.subheader(f"Live {idx} Put (PE) OI & Unwinding")
-        st.dataframe(pe_live[show_cols].sort_index())
-else:
-    st.info("💡 Enter your **Fyers App ID** and **Access Token** in the sidebar to run live without uploading Bhavcopies.")
+        if not trapped_ce.empty:
+            call_sq = True
+            st.success(f"🚀 LIVE CALL SQUEEZE ({idx}): Unwinding confirmed at {trapped_ce.index.tolist()[:4]}. Best Strike: **{int(atm - step)} CE**")
+        if not trapped_pe.empty and live_pcr < 0.85:
+            put_sq = True
+            st.error(f"🔻 LIVE PUT SQUEEZE ({idx}): Unwinding confirmed at {trapped_pe.index.tolist()[:4]}. Best Strike: **{int(atm + step)} PE**")
+        if not call_sq and not put_sq:
+            st.info(f"No confirmed live squeeze. Resistance: **{int(res_wall)} CE** | Support: **{int(sup_wall)} PE**")
 
-st.divider()
-st.header("📁 20–25 Day Bhavcopy Multi-Day OI, PCR History & Writer Breakeven")
-mode = st.radio("Choose Bhavcopy Source", ["Upload Files Manually", "Auto-Load from GitHub Folder (./bhavcopy_data)"], horizontal=True)
+        c1, c2 = st.columns(2)
+        cols = [c for c in ["ltp", "prev_eod_oi", "oi", "oich", "volume"] if c in lc_df.columns]
+        with c1:
+            st.subheader(f"Live {idx} Call (CE) Option Chain")
+            st.dataframe(ce_live[cols].sort_index())
+        with c2:
+            st.subheader(f"Live {idx} Put (PE) Option Chain")
+            st.dataframe(pe_live[cols].sort_index())
+    else:
+        st.info("Enter your Fyers App ID and Access Token in the sidebar to view live intraday analysis.")
 
-files = []
-if mode == "Upload Files Manually":
-    uploaded = st.file_uploader("Select 20–25 NSE (.zip) or BSE (.csv) files", type=["zip", "csv"], accept_multiple_files=True)
-    if uploaded:
-        files = uploaded
-else:
-    paths = sorted(glob.glob("bhavcopy_data/*.zip") + glob.glob("bhavcopy_data/*.csv"))
-    if paths:
-        st.success(f"Auto-loaded {len(paths[-25:])} file(s) from ./bhavcopy_data/")
-        for p in paths[-25:]:
-            with open(p, "rb") as fp:
-                buf = io.BytesIO(fp.read())
-                buf.name = os.path.basename(p)
-                files.append(buf)
+with tab_eod:
+    if eod_master is not None:
+        render_bhavcopy_section(eod_master, idx, live_price, skip_expired)
+    else:
+        st.info("Upload 20–25 NSE (.zip) or BSE (.csv) files above to view EOD positional analysis.")
 
-if files:
-    render_bhavcopy_section(files, cfg["syms"], idx, live_price, skip_expired)
-else:
-    st.info("Upload 20–25 NSE (.zip) or BSE (.csv) files above to view the rolling PCR chart, cumulative OI buildup, and writer breakeven status.")
-
+with tab_both:
+    render_confluence_tab(eod_master, ce_live, pe_live, idx, live_price, step, skip_expired, call_sq, put_sq)
