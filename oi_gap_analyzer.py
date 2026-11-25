@@ -4,19 +4,24 @@ import os
 import urllib.parse
 import pandas as pd
 import streamlit as st
-from bhavcopy_analytics import parse_bhav_master, render_bhavcopy_section, render_confluence_tab
+from bhavcopy_analytics import (
+    parse_bhav_master,
+    render_bhavcopy_section,
+    render_confluence_tab,
+    render_live_institutional,
+)
 
 st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
-st.title("📊 NSE & BSE 3-Mode OI Scanner (Live • EOD • Combined Confluence)")
+st.title("📊 NSE & BSE 3-Mode OI & Institutional Scanner (Live • EOD • Combined)")
 
 INDEX_CONFIG = {
-    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25720.0},
-    "BANKNIFTY": {"syms": ["BANKNIFTY"], "step": 100, "fyers": "NSE:NIFTYBANK-INDEX", "spot": 63350.0},
-    "FINNIFTY": {"syms": ["FINNIFTY"], "step": 50, "fyers": "NSE:FINNIFTY-INDEX", "spot": 24500.0},
-    "MIDCPNIFTY": {"syms": ["MIDCPNIFTY"], "step": 25, "fyers": "NSE:MIDCPNIFTY-INDEX", "spot": 12800.0},
-    "NIFTYNXT50": {"syms": ["NIFTYNXT50"], "step": 100, "fyers": "NSE:NIFTYNXT50-INDEX", "spot": 71000.0},
-    "SENSEX": {"syms": ["SENSEX", "BSX"], "step": 100, "fyers": "BSE:SENSEX-INDEX", "spot": 84350.0},
-    "BANKEX": {"syms": ["BANKEX", "BKX"], "step": 100, "fyers": "BSE:BANKEX-INDEX", "spot": 72000.0},
+    "NIFTY": {"syms": ["NIFTY"], "step": 50, "lot": 75, "fyers": "NSE:NIFTY50-INDEX", "spot": 25720.0},
+    "BANKNIFTY": {"syms": ["BANKNIFTY"], "step": 100, "lot": 30, "fyers": "NSE:NIFTYBANK-INDEX", "spot": 63350.0},
+    "FINNIFTY": {"syms": ["FINNIFTY"], "step": 50, "lot": 65, "fyers": "NSE:FINNIFTY-INDEX", "spot": 24500.0},
+    "MIDCPNIFTY": {"syms": ["MIDCPNIFTY"], "step": 25, "lot": 120, "fyers": "NSE:MIDCPNIFTY-INDEX", "spot": 12800.0},
+    "NIFTYNXT50": {"syms": ["NIFTYNXT50"], "step": 100, "lot": 25, "fyers": "NSE:NIFTYNXT50-INDEX", "spot": 71000.0},
+    "SENSEX": {"syms": ["SENSEX", "BSX"], "step": 100, "lot": 20, "fyers": "BSE:SENSEX-INDEX", "spot": 84350.0},
+    "BANKEX": {"syms": ["BANKEX", "BKX"], "step": 100, "lot": 30, "fyers": "BSE:BANKEX-INDEX", "spot": 72000.0},
 }
 
 if "fyers_token" not in st.session_state:
@@ -25,7 +30,7 @@ if "fyers_token" not in st.session_state:
 st.sidebar.header("1. Index & Broker Settings")
 idx = st.sidebar.selectbox("Select Index", list(INDEX_CONFIG.keys()))
 cfg = INDEX_CONFIG[idx]
-step = cfg["step"]
+step, lot_size = cfg["step"], cfg["lot"]
 
 use_fyers = st.sidebar.checkbox("Fetch Live Spot & Option Chain (Fyers)", value=True)
 client_id = st.sidebar.text_input("Fyers App ID (Client ID)", placeholder="e.g. XC4XXXXM-100")
@@ -82,28 +87,32 @@ if use_fyers and client_id and token:
     except Exception as e:
         st.sidebar.error(f"Fyers Live Error: {e}")
 
-with st.expander("📁 Bhavcopy Data Loader (20–25 NSE .zip or BSE .csv files)", expanded=True):
-    mode = st.radio("Data Source", ["Upload Files Manually", "Auto-Load from GitHub Folder (./bhavcopy_data)"], horizontal=True)
-    files = []
-    if mode == "Upload Files Manually":
-        uploaded = st.file_uploader("Select NSE (.zip) or BSE (.csv) files", type=["zip", "csv"], accept_multiple_files=True)
-        if uploaded:
-            files = uploaded
-    else:
-        paths = sorted(glob.glob("bhavcopy_data/*.zip") + glob.glob("bhavcopy_data/*.csv"))
-        if paths:
-            st.success(f"Loaded {len(paths[-25:])} file(s) from ./bhavcopy_data/")
-            for p in paths[-25:]:
-                with open(p, "rb") as fp:
-                    buf = io.BytesIO(fp.read())
-                    buf.name = os.path.basename(p)
-                    files.append(buf)
+with st.expander("📁 EOD Data Loader (20–25 Bhavcopy Files + Optional Participant OI CSV)", expanded=True):
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        mode = st.radio("Bhavcopy Source", ["Upload Files Manually", "Auto-Load from GitHub Folder (./bhavcopy_data)"], horizontal=True)
+        files = []
+        if mode == "Upload Files Manually":
+            uploaded = st.file_uploader("Select 20–25 NSE (.zip) or BSE (.csv) Bhavcopies", type=["zip", "csv"], accept_multiple_files=True)
+            if uploaded:
+                files = uploaded
+        else:
+            paths = sorted(glob.glob("bhavcopy_data/*.zip") + glob.glob("bhavcopy_data/*.csv"))
+            if paths:
+                st.success(f"Loaded {len(paths[-25:])} file(s) from ./bhavcopy_data/")
+                for p in paths[-25:]:
+                    with open(p, "rb") as fp:
+                        buf = io.BytesIO(fp.read())
+                        buf.name = os.path.basename(p)
+                        files.append(buf)
+    with col_b:
+        part_csv = st.file_uploader("Optional: NSE Participant OI CSV (fao_participant_oi_*.csv)", type=["csv"])
 
 eod_master = parse_bhav_master(files, cfg["syms"]) if files else None
 
 tab_live, tab_eod, tab_both = st.tabs([
-    "⚡ 1. Live Market Analysis",
-    "📁 2. EOD Bhavcopy Analysis",
+    "⚡ 1. Live Market & Institutional Footprint",
+    "📁 2. EOD Bhavcopy & FII Positioning",
     "🎯 3. Combined (EOD + Live Confluence)",
 ])
 
@@ -149,14 +158,16 @@ with tab_live:
         with c2:
             st.subheader(f"Live {idx} Put (PE) Option Chain")
             st.dataframe(pe_live[cols].sort_index())
+
+        render_live_institutional(lc_df, lot_size)
     else:
-        st.info("Enter your Fyers App ID and Access Token in the sidebar to view live intraday analysis.")
+        st.info("Enter your Fyers App ID and Access Token in the sidebar to view live intraday & institutional analysis.")
 
 with tab_eod:
     if eod_master is not None:
-        render_bhavcopy_section(eod_master, idx, live_price, skip_expired)
+        render_bhavcopy_section(eod_master, idx, live_price, skip_expired, part_csv)
     else:
-        st.info("Upload 20–25 NSE (.zip) or BSE (.csv) files above to view EOD positional analysis.")
+        st.info("Upload 20–25 NSE (.zip) or BSE (.csv) Bhavcopies above to view EOD positional & institutional analysis.")
 
 with tab_both:
     render_confluence_tab(eod_master, ce_live, pe_live, idx, live_price, step, skip_expired, call_sq, put_sq)
