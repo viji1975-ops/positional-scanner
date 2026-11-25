@@ -92,9 +92,9 @@ def render_participant_eod(part_file):
         p_df = pd.read_csv(part_file, skiprows=1)
         p_df.columns = p_df.columns.str.strip()
         p_df["Client Type"] = p_df["Client Type"].astype(str).str.strip()
-        fii = p_df[p_df["Client Type"] == "FII"].iloc
-        pro = p_df[p_df["Client Type"] == "Pro"].iloc
-        cli = p_df[p_df["Client Type"] == "Client"].iloc
+        fii = p_df[p_df["Client Type"] == "FII"].iloc[0]
+        pro = p_df[p_df["Client Type"] == "Pro"].iloc[0]
+        cli = p_df[p_df["Client Type"] == "Client"].iloc[0]
 
         f_long, f_short = float(fii["Future Index Long"]), float(fii["Future Index Short"])
         fii_pct = round((f_long / (f_long + f_short)) * 100, 1)
@@ -129,7 +129,6 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
     exp_hist = master[master["XpryDt"] == chosen_exp].copy()
     latest_eod = exp_hist[exp_hist["TradDt"] == latest_dt]
 
-    # EOD Institutional Strike Surge Detector (> 3x Median OI Change)
     eod_inst = latest_eod.copy()
     med_chg = eod_inst["ChngInOpnIntrst"].abs().median()
     eod_inst["OI_Surge_x"] = (eod_inst["ChngInOpnIntrst"].abs() / (med_chg if med_chg > 0 else 1)).round(1)
@@ -149,7 +148,7 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
         "Latest_Cls": ce_latest["ClsPric"],
         "Avg_Prem": ce_hist.groupby("StrkPric")["ClsPric"].mean().round(2),
     }).dropna()
-    ce_sum["Writer_BE"] = (ce_sum.index + ce_summary_prem if False else ce_sum.index + ce_sum["Avg_Prem"]).round(1)
+    ce_sum["Writer_BE"] = (ce_sum.index + ce_sum["Avg_Prem"]).round(1)
     ce_sum["Status"] = ce_sum["Writer_BE"].apply(lambda b: "🚨 UNDERWATER" if live_price > b else "✅ Safe")
 
     pe_sum = pd.DataFrame({
@@ -179,6 +178,7 @@ def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_
     latest_dt = master["TradDt"].max()
     near_exp = next(iter(get_active_expiries(master, latest_dt, skip_expired)))
     exp_df = master[master["XpryDt"] == near_exp]
+    latest_eod = exp_df[exp_df["TradDt"] == latest_dt]
 
     ce_avg = exp_df[exp_df["OptnTp"] == "CE"].groupby("StrkPric")["ClsPric"].mean()
     pe_avg = exp_df[exp_df["OptnTp"] == "PE"].groupby("StrkPric")["ClsPric"].mean()
@@ -198,3 +198,40 @@ def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_
         st.error(f"✅ **HIGH-CONVICTION BEARISH CONFLUENCE:** EOD Put writers at **{uw_pe}** are underwater AND unwinding live! Favor **{int(atm + step)} PE**.")
     else:
         st.warning("⚖️ **MIXED / NO FULL CONFLUENCE:** EOD writer breakevens and live unwinding are not aligned yet. Wait for confirmation.")
+
+    # ==========================================
+    # AUTOMATED TRADE ZONE & SUPPORT/RESISTANCE BOX
+    # ==========================================
+    st.divider()
+    st.subheader("🧭 Automated Institutional Trade Zone & Invalidation Levels")
+
+    # 1. Institutional Support Floor (Top Live PE Addition <= Spot, fallback to Max Live PE OI)
+    pe_below = pe_live[pe_live.index <= live_price]
+    if not pe_below.empty and pe_below["oich"].max() > 0:
+        inst_floor = int(pe_below["oich"].idxmax())
+    else:
+        inst_floor = int(pe_live["oi"].idxmax())
+
+    ce_above = ce_live[ce_live.index >= live_price]
+    if not ce_above.empty and ce_above["oich"].max() > 0:
+        live_ceiling = int(ce_above["oich"].idxmax())
+    else:
+        live_ceiling = int(ce_live["oi"].idxmax())
+
+    eod_ce = latest_eod[(latest_eod["OptnTp"] == "CE") & (latest_eod["StrkPric"] >= live_price)]
+    eod_mega_wall = int(eod_ce.set_index("StrkPric")["OpnIntrst"].idxmax()) if not eod_ce.empty else live_ceiling
+
+    invalidation_low = int(inst_floor - (step * 0.4))
+    breakout_trigger = int(live_ceiling + (step * 0.4))
+
+    z1, z2, z3, z4 = st.columns(4)
+    z1.metric("🛡️ Institutional Floor (Live PE)", f"{inst_floor}")
+    z2.metric("🧱 Immediate Ceiling (Live CE)", f"{live_ceiling}")
+    z3.metric("🏔️ EOD Positional Mega-Wall", f"{eod_mega_wall}")
+    z4.metric("🛑 Bullish Invalidation SL", f"{invalidation_low}")
+
+    st.info(
+        f"**Actionable Zone Plan ({idx}):**\n"
+        f"- **Buy-on-Dip Zone:** `{inst_floor}` to `{inst_floor + int(step * 0.4)}` (target `{live_ceiling - int(step * 0.2)}` – `{live_ceiling}`, strict SL below `{invalidation_low}`).\n"
+        f"- **Profit-Booking / Ceiling Zone:** `{live_ceiling}` to `{eod_mega_wall}` (breakout trigger above `{breakout_trigger}` with negative Call `oich`)."
+    )
