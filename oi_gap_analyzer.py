@@ -1,165 +1,144 @@
-import glob
-import os
-import numpy as np
+import streamlit as st
 import pandas as pd
+import numpy as np
+
+# Page configuration
+st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
+st.title("📊 NSE & BSE Bhavcopy OI + Fyers Live Gap Scanner")
 
 # ==========================================
-# 1. MULTI-DAY BHAVCOPY LOADER (20-25 FILES)
+# SIDEBAR: SETTINGS & FYERS API INPUTS
 # ==========================================
-def load_bhavcopies(folder_path, symbol="NIFTY", instrument="OPTIDX"):
-    """
-    Loads 20-25 NSE/BSE UDiFF Bhavcopy CSVs and filters for the target index.
-    Note: NSE/BSE standardized to UDiFF format (columns: TckrSymb, FinInstrmTp, 
-    XpryDt, StrkPric, OptnTp, ClsPric, OpnIntrst, ChngInOpnIntrst, TradDt).
-    """
-    all_files = sorted(glob.glob(os.path.join(folder_path, "*.csv")))
-    if not all_files:
-        raise FileNotFoundError(f"No CSV files found in {folder_path}")
-    
-    # Take the latest 25 files
-    recent_files = all_files[-25:]
+st.sidebar.header("1. Index & Broker Settings")
+index_choice = st.sidebar.selectbox("Select Index", ["NIFTY", "SENSEX"])
+step_size = 50 if index_choice == "NIFTY" else 100
+
+use_fyers = st.sidebar.checkbox("Fetch Live Spot from Fyers API", value=False)
+fyers_client_id = st.sidebar.text_input("Fyers App ID (Client ID)", type="password")
+fyers_access_token = st.sidebar.text_input("Fyers Access Token", type="password")
+
+manual_spot = st.sidebar.number_input(
+    "Or Enter Simulated / Live Open Price",
+    value=25850.0 if index_choice == "NIFTY" else 84350.0,
+    step=10.0
+)
+
+# ==========================================
+# 1. MULTI-FILE BHAVCOPY UPLOADER (20-25 FILES)
+# ==========================================
+st.header("2. Upload 20–25 NSE/BSE UDiFF Bhavcopy CSVs")
+uploaded_files = st.file_uploader(
+    "Drag and drop your daily Bhavcopy CSV files here",
+    type=["csv"],
+    accept_multiple_files=True
+)
+
+def process_bhavcopies(files, symbol):
     df_list = []
+    # Map possible BSE/NSE ticker names
+    valid_symbols = ["NIFTY"] if symbol == "NIFTY" else ["SENSEX", "BSX"]
     
-    for file in recent_files:
+    for file in files[-25:]:
         df = pd.read_csv(file)
-        # Filter for Index Options (OPTIDX for NSE, check 'IO' or 'OPTIDX' for BSE)
+        df.columns = df.columns.str.strip()
+        
+        if 'TckrSymb' not in df.columns or 'FinInstrmTp' not in df.columns:
+            st.warning(f"Skipping {file.name}: Missing UDiFF columns (TckrSymb / FinInstrmTp).")
+            continue
+            
         filtered = df[
-            (df['TckrSymb'] == symbol) & 
-            (df['FinInstrmTp'].isin([instrument, 'IO']))
+            (df['TckrSymb'].isin(valid_symbols)) &
+            (df['FinInstrmTp'].isin(['OPTIDX', 'IO']))
         ].copy()
         df_list.append(filtered)
+        
+    if not df_list:
+        return None, None, None
         
     master_df = pd.concat(df_list, ignore_index=True)
     master_df['TradDt'] = pd.to_datetime(master_df['TradDt'])
     master_df['XpryDt'] = pd.to_datetime(master_df['XpryDt'])
     
-    # Focus on the nearest active expiry for the latest trading date
     latest_date = master_df['TradDt'].max()
     nearest_expiry = master_df[master_df['TradDt'] == latest_date]['XpryDt'].min()
-    
     expiry_df = master_df[master_df['XpryDt'] == nearest_expiry].sort_values('TradDt')
+    
     return expiry_df, latest_date, nearest_expiry
 
-
-# ==========================================
-# 2. EOD OI ANALYSIS & TRAPPED STRIKE DETECTOR
-# ==========================================
-def analyze_eod_oi(expiry_df, latest_date):
-    """
-    Analyzes EOD OI buildup, calculates PCR, and pinpoints trapped writers.
-    """
-    latest_eod = expiry_df[expiry_df['TradDt'] == latest_date].copy()
-    
-    # Separate Calls (CE) and Puts (PE)
-    ce_df = latest_eod[latest_eod['OptnTp'] == 'CE'].set_index('StrkPric')
-    pe_df = latest_eod[latest_eod['OptnTp'] == 'PE'].set_index('StrkPric')
-    
-    # 1. Calculate EOD Put-Call Ratio (PCR)
-    total_pe_oi = pe_df['OpnIntrst'].sum()
-    total_ce_oi = ce_df['OpnIntrst'].sum()
-    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
-    
-    # 2. Identify Major Resistance (Highest Call OI) & Support (Highest Put OI)
-    major_call_wall = ce_df['OpnIntrst'].idxmax()
-    major_put_wall = pe_df['OpnIntrst'].idxmax()
-    
-    # 3. Identify Aggressive Call Writing (Short Buildup) on Latest EOD
-    # Condition: High positive Change in OI + Option Price dropped
-    ce_df['Prev_Close'] = ce_df['ClsPric'] - ce_df['ChngInOpnIntrst'] # Proxy check if PrevCls missing
-    trapped_ce_candidates = ce_df[
-        (ce_df['ChngInOpnIntrst'] > ce_df['ChngInOpnIntrst'].quantile(0.75))
-    ].sort_values(by='OpnIntrst', ascending=False)
-    
-    # 4. Multi-day (20-25 day) OI Z-Score to detect abnormal positioning
-    historical_oi_std = expiry_df.groupby(['StrkPric', 'OptnTp'])['ChngInOpnIntrst'].std().unstack()
-    
-    summary = {
-        "Latest_EOD": latest_date.strftime('%Y-%m-%d'),
-        "PCR": pcr,
-        "Major_Call_Wall (Resistance)": major_call_wall,
-        "Major_Put_Wall (Support)": major_put_wall,
-        "Top_Trapped_CE_Strikes": trapped_ce_candidates.index.tolist()[:5],
-        "CE_Data": ce_df[['ClsPric', 'OpnIntrst', 'ChngInOpnIntrst']],
-        "PE_Data": pe_df[['ClsPric', 'OpnIntrst', 'ChngInOpnIntrst']]
-    }
-    return summary
-
-
-# ==========================================
-# 3. LIVE MARKET DATA INTEGRATION (UPSTOX / FYERS)
-# ==========================================
-def get_live_spot_price(broker="FYERS", access_token="", client_id="", symbol="NSE:NIFTY50-INDEX"):
-    """
-    Fetches live spot price at 9:15 AM to compare against EOD OI Walls.
-    """
-    if broker.upper() == "FYERS":
-        from fyers_apiv3 import fyersModel
-        fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False)
-        data = {"symbols": symbol}
-        response = fyers.quotes(data=data)
-        if response.get("s") == "ok":
-            return response["d"][0]["v"]["lp"] # Last traded price
-        else:
-            raise Exception(f"Fyers API Error: {response}")
-            
-    elif broker.upper() == "UPSTOX":
-        import upstox_client
-        configuration = upstox_client.Configuration()
-        configuration.access_token = access_token
-        api_instance = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
-        # Upstox instrument key format: 'NSE_INDEX|Nifty 50' or 'BSE_INDEX|SENSEX'
-        response = api_instance.get_full_market_quote(symbol, api_version='2.0')
-        return response.data[symbol].last_price
-
-
-# ==========================================
-# 4. EFFECTIVE STRIKE SELECTOR (EOD + LIVE)
-# ==========================================
-def select_effective_strike(eod_summary, live_open_price, step_size=50):
-    """
-    Compares 9:15 AM Live Open against EOD Trapped Strikes to pick the best option.
-    """
-    trapped_strikes = eod_summary["Top_Trapped_CE_Strikes"]
-    call_wall = eod_summary["Major_Call_Wall (Resistance)"]
-    
-    # Check if Live Open gapped ABOVE heavily written Call strikes
-    breached_strikes = [s for s in trapped_strikes if live_open_price > s]
-    
-    print(f"\n--- MARKET OPEN ANALYSIS ({eod_summary['Latest_EOD']}) ---")
-    print(f"EOD PCR: {eod_summary['PCR']} | Major Call Wall: {call_wall}")
-    print(f"Live Open Price: {live_open_price}")
-    
-    if breached_strikes:
-        # The highest breached strike has the maximum trapped writers forced to cover
-        highest_breached = max(breached_strikes)
-        # Most effective strike: 1 strike ITM from Live Open for high Delta + Gamma
-        atm_strike = round(live_open_price / step_size) * step_size
-        effective_ce_strike = atm_strike - step_size 
-        
-        print(f"ALERT: Gap-up breached trapped Call strikes: {breached_strikes}")
-        print(f"Short Covering Triggered above: {highest_breached}")
-        print(f"--> RECOMMENDED EFFECTIVE STRIKE: {effective_ce_strike} CE (High Delta/Gamma Squeeze)")
-        return effective_ce_strike
+def get_fyers_live_price(client_id, token, symbol):
+    from fyers_apiv3 import fyersModel
+    fyers = fyersModel.FyersModel(client_id=client_id, token=token, is_async=False)
+    fyers_symbol = "NSE:NIFTY50-INDEX" if symbol == "NIFTY" else "BSE:SENSEX-INDEX"
+    response = fyers.quotes(data={"symbols": fyers_symbol})
+    if response.get("s") == "ok":
+        return response["d"][0]["v"]["lp"]
     else:
-        print("No major EOD Call walls breached at open. Wait for price action confirmation.")
-        return None
+        raise Exception(f"Fyers Error: {response}")
 
 # ==========================================
-# EXECUTION EXAMPLE
+# 3. RUN ANALYSIS & RENDER UI OUTPUT
 # ==========================================
-if __name__ == "__main__":
-    # 1. Point to your GitHub folder containing 20-25 Bhavcopy CSVs
-    BHAVCOPY_FOLDER = "./bhavcopy_data/"
-    
-    # Run for NIFTY (step_size=50) or SENSEX (step_size=100)
-    try:
-        df_exp, latest_dt, exp_dt = load_bhavcopies(BHAVCOPY_FOLDER, symbol="NIFTY")
-        eod_stats = analyze_eod_oi(df_exp, latest_dt)
+if uploaded_files:
+    with st.spinner("Analyzing Bhavcopy Open Interest..."):
+        expiry_df, latest_date, nearest_expiry = process_bhavcopies(uploaded_files, index_choice)
         
-        # 2. Replace with live API call at 9:15:05 AM
-        # live_price = get_live_spot_price(broker="FYERS", access_token="YOUR_TOKEN", client_id="YOUR_ID")
-        simulated_live_open = 25850.0  # Example based on your chart's gap-up
+    if expiry_df is None or expiry_df.empty:
+        st.error(f"No valid {index_choice} options data found in the uploaded CSVs.")
+    else:
+        latest_eod = expiry_df[expiry_df['TradDt'] == latest_date].copy()
+        ce_df = latest_eod[latest_eod['OptnTp'] == 'CE'].set_index('StrkPric')
+        pe_df = latest_eod[latest_eod['OptnTp'] == 'PE'].set_index('StrkPric')
         
-        select_effective_strike(eod_stats, simulated_live_open, step_size=50)
-    except Exception as e:
-        print(f"Setup Info: {e}")
+        total_pe_oi = pe_df['OpnIntrst'].sum()
+        total_ce_oi = ce_df['OpnIntrst'].sum()
+        pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
+        
+        major_call_wall = ce_df['OpnIntrst'].idxmax()
+        major_put_wall = pe_df['OpnIntrst'].idxmax()
+        
+        # Trapped Call Writers (Top 25% OI addition on latest EOD)
+        trapped_ce = ce_df[
+            ce_df['ChngInOpnIntrst'] > ce_df['ChngInOpnIntrst'].quantile(0.75)
+        ].sort_values(by='OpnIntrst', ascending=False)
+        trapped_strikes = trapped_ce.index.tolist()[:5]
+        
+        # Determine Live / Open Price
+        live_price = manual_spot
+        if use_fyers and fyers_client_id and fyers_access_token:
+            try:
+                live_price = get_fyers_live_price(fyers_client_id, fyers_access_token, index_choice)
+                st.sidebar.success(f"Live Fyers Price: {live_price}")
+            except Exception as e:
+                st.sidebar.error(str(e))
+                
+        # Display Key Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Latest EOD Date", latest_date.strftime('%d %b %Y'))
+        col2.metric("Nearest Expiry", nearest_expiry.strftime('%d %b %Y'))
+        col3.metric("EOD Put-Call Ratio (PCR)", pcr)
+        col4.metric("Live / Target Open", live_price)
+        
+        st.divider()
+        
+        # Gap-Up Squeeze Check
+        breached = [s for s in trapped_strikes if live_price > s]
+        if breached:
+            atm_strike = round(live_price / step_size) * step_size
+            effective_strike = atm_strike - step_size
+            st.success(
+                f"🚀 **SHORT SQUEEZE ALERT:** Open price ({live_price}) breached trapped Call strikes: {breached}. "
+                f"**Most Effective Strike to Watch:** `{effective_strike} CE`"
+            )
+        else:
+            st.info(f"No major trapped Call walls breached yet. Major Resistance Wall is at **{major_call_wall} CE**.")
+            
+        # Display Top Call & Put Strikes Side-by-Side
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Top Trapped Call (CE) Strikes")
+            st.dataframe(trapped_ce[['ClsPric', 'OpnIntrst', 'ChngInOpnIntrst']].head(10))
+        with c2:
+            st.subheader("Top Put (PE) Support Strikes")
+            st.dataframe(pe_df[['ClsPric', 'OpnIntrst', 'ChngInOpnIntrst']].sort_values(by='OpnIntrst', ascending=False).head(10))
+else:
+    st.info("👈 Upload your NSE or BSE Bhavcopy CSV files above to generate the OI & Strike report.")
