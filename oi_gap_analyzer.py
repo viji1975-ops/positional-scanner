@@ -1,4 +1,6 @@
+import glob
 import io
+import os
 import urllib.parse
 import zipfile
 import pandas as pd
@@ -45,7 +47,7 @@ with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
         if st.button("Generate Access Token") and redir_url:
             try:
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(redir_url.strip()).query)
-                code = q.get("auth_code", [redir_url.strip()])[0]
+                code = q.get("auth_code", [redir_url.strip()])
                 sess.set_token(code)
                 resp = sess.generate_token()
                 if "access_token" in resp:
@@ -59,8 +61,33 @@ with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
 token = st.sidebar.text_input("Fyers Access Token (Daily JWT)", value=st.session_state["fyers_token"], type="password")
 manual_spot = st.sidebar.number_input("Or Enter Simulated / Live Open Price", value=cfg["spot"], step=float(step))
 
-st.header("2. Upload 20–25 NSE (.zip) or BSE (.csv) UDiFF Bhavcopies")
-files = st.file_uploader("Upload NSE (.zip) or BSE (.csv) files", type=["zip", "csv"], accept_multiple_files=True)
+st.header("2. Load 20–25 NSE (.zip) or BSE (.csv) UDiFF Bhavcopies")
+mode = st.radio(
+    "Choose Data Source",
+    ["Upload Files Manually", "Auto-Load from GitHub Folder (./bhavcopy_data)"],
+    horizontal=True,
+)
+
+files = []
+if mode == "Upload Files Manually":
+    uploaded = st.file_uploader(
+        "Click Upload and select your NSE (.zip) or BSE (.csv) files",
+        type=["zip", "csv"],
+        accept_multiple_files=True,
+    )
+    if uploaded:
+        files = uploaded
+else:
+    paths = sorted(glob.glob("bhavcopy_data/*.zip") + glob.glob("bhavcopy_data/*.csv"))
+    if paths:
+        st.success(f"Loaded {len(paths[-25:])} file(s) from ./bhavcopy_data/")
+        for p in paths[-25:]:
+            with open(p, "rb") as fp:
+                buf = io.BytesIO(fp.read())
+                buf.name = os.path.basename(p)
+                files.append(buf)
+    else:
+        st.warning("No files found in ./bhavcopy_data/. Create that folder in GitHub and upload your ZIP/CSV files there.")
 
 def read_file(f):
     f.seek(0)
@@ -69,7 +96,7 @@ def read_file(f):
             csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not csvs:
                 return None
-            with zf.open(csvs[0]) as c:
+            with zf.open(csvs) as c:
                 return pd.read_csv(c)
     return pd.read_csv(f)
 
@@ -105,7 +132,7 @@ def get_fyers_spot(cid, tok, sym):
     fyers = fyersModel.FyersModel(client_id=cid.strip(), token=tok.strip(), is_async=False)
     res = fyers.quotes(data={"symbols": sym})
     if res.get("s") == "ok" and res.get("d"):
-        return res["d"][0]["v"]["lp"]
+        return res["d"]["v"]["lp"]
     raise Exception(f"Fyers Error: {res}")
 
 if files:
@@ -157,4 +184,4 @@ if files:
             st.subheader(f"Top {idx} Put (PE) Support Strikes")
             st.dataframe(pe[cols].sort_values(by="OpnIntrst", ascending=False).head(10))
 else:
-    st.info("👈 Upload your NSE (.zip) or BSE (.csv) Bhavcopy files above to begin.")
+    st.info("👈 Upload your NSE (.zip) or BSE (.csv) files or add them to ./bhavcopy_data/ in GitHub.")
