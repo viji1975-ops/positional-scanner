@@ -187,13 +187,12 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
 
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader(f"Call (CE) EOD OI & Pain ({chosen_exp.strftime('%d %b')})")
+        st.subheader(f"Call (CE) {ref_dt.strftime('%d %b')} EOD OI & Pain (Exp: {chosen_exp.strftime('%d %b')})")
         st.dataframe(ce_sum.sort_values(by="EOD_OI", ascending=False).head(12))
     with c2:
-        st.subheader(f"Put (PE) EOD OI & Pain ({chosen_exp.strftime('%d %b')})")
+        st.subheader(f"Put (PE) {ref_dt.strftime('%d %b')} EOD OI & Pain (Exp: {chosen_exp.strftime('%d %b')})")
         st.dataframe(pe_sum.sort_values(by="EOD_OI", ascending=False).head(12))
-
-
+    
 def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_expired, call_sq, put_sq):
     st.subheader(f"🎯 Master Confluence Signal ({idx} @ {live_price})")
     if master is None or ce_live.empty:
