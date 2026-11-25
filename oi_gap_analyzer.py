@@ -8,6 +8,7 @@ from bhavcopy_analytics import (
     parse_bhav_master,
     render_bhavcopy_section,
     render_confluence_tab,
+    render_eod_vs_live_blocks,
     render_live_institutional,
     render_multi_index_radar,
 )
@@ -164,6 +165,7 @@ with tab_live:
             st.dataframe(pe_live[cols].sort_index())
 
         render_live_institutional(lc_df, lot_size)
+        render_eod_vs_live_blocks(eod_master, ce_live, pe_live, live_price, lot_size, skip_expired)
     else:
         st.info("Enter your Fyers App ID and Access Token in the sidebar to view live intraday & institutional analysis.")
 
