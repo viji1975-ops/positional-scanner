@@ -235,3 +235,72 @@ def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_
         f"- **Buy-on-Dip Zone:** `{inst_floor}` to `{inst_floor + int(step * 0.4)}` (target `{live_ceiling - int(step * 0.2)}` – `{live_ceiling}`, strict SL below `{invalidation_low}`).\n"
         f"- **Profit-Booking / Ceiling Zone:** `{live_ceiling}` to `{eod_mega_wall}` (breakout trigger above `{breakout_trigger}` with negative Call `oich`)."
     )
+def render_multi_index_radar(index_config, client_id, token):
+    from fyers_apiv3 import fyersModel
+
+    fyers = fyersModel.FyersModel(client_id=client_id.strip(), token=token.strip(), is_async=False)
+    rows = []
+    squeeze_count = 0
+
+    with st.spinner("Scanning all 7 NSE & BSE indices for squeezes & institutional footprints..."):
+        for name, cfg in index_config.items():
+            try:
+                q_res = fyers.quotes(data={"symbols": cfg["fyers"]})
+                spot = next(iter(q_res["d"]))["v"]["lp"] if q_res.get("s") == "ok" and q_res.get("d") else None
+                oc_res = fyers.optionchain(data={"symbol": cfg["fyers"], "strikecount": 10, "timestamp": ""})
+                chain = oc_res.get("data", {}).get("optionsChain", []) if oc_res.get("s") == "ok" else []
+                if not spot or not chain:
+                    continue
+
+                df = pd.DataFrame(chain)
+                df = df[df["option_type"].isin(["CE", "PE"])].copy()
+                df["prev_oi"] = df["oi"] - df["oich"]
+                df["lots_chg"] = (df["oich"] / cfg["lot"]).round(0)
+
+                ce = df[df["option_type"] == "CE"].set_index("strike_price")
+                pe = df[df["option_type"] == "PE"].set_index("strike_price")
+
+                pcr = round(pe["oi"].sum() / ce["oi"].sum(), 2) if ce["oi"].sum() > 0 else 0
+                pe_lots = int(pe["lots_chg"].sum())
+                ce_lots = int(ce["lots_chg"].sum())
+
+                if pe_lots > ce_lots * 1.25:
+                    bias = f"🟢 Bullish ({pe_lots - ce_lots:+,} net lots)"
+                elif ce_lots > pe_lots * 1.25:
+                    bias = f"🔴 Bearish ({ce_lots - pe_lots:+,} net lots)"
+                else:
+                    bias = "🟡 Neutral / Straddle"
+
+                trap_ce = ce[(ce["prev_oi"] > ce["prev_oi"].median()) & (ce.index < spot) & (ce["oich"] < 0)]
+                trap_pe = pe[(pe["prev_oi"] > pe["prev_oi"].median()) & (pe.index > spot) & (pe["oich"] < 0)]
+
+                atm = round(spot / cfg["step"]) * cfg["step"]
+                if not trap_ce.empty:
+                    sig = f"🚀 CALL SQUEEZE ({trap_ce.index.tolist()[:2]})"
+                    strike = f"{int(atm - cfg['step'])} CE"
+                    squeeze_count += 1
+                elif not trap_pe.empty and pcr < 0.85:
+                    sig = f"🔻 PUT SQUEEZE ({trap_pe.index.tolist()[:2]})"
+                    strike = f"{int(atm + cfg['step'])} PE"
+                    squeeze_count += 1
+                else:
+                    sig = "⚖️ Range-Bound"
+                    strike = "—"
+
+                rows.append({
+                    "Index": name,
+                    "Live Spot": spot,
+                    "PCR": pcr,
+                    "Institutional Footprint": bias,
+                    "Squeeze Signal": sig,
+                    "Best Strike": strike,
+                })
+            except Exception:
+                pass
+
+    if rows:
+        if squeeze_count >= 3:
+            st.success(f"🔥 SYNCHRONIZED MARKET BREAKOUT: {squeeze_count} of {len(rows)} indices are in an active institutional squeeze!")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.warning("Could not fetch multi-index quotes. Verify your Fyers Access Token.")
