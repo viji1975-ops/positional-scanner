@@ -117,7 +117,7 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
 
     # EOD Backtest Date Selector (Rewind to any Bhavcopy date)
     avail_dates = sorted(master["TradDt"].unique(), reverse=True)
-    c_dt, c_info = st.columns()
+    c_dt, c_info = st.columns(2)
     with c_dt:
         ref_dt = st.selectbox(
             "⏮️ Select EOD Analysis / Backtest Date",
