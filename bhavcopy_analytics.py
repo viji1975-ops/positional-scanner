@@ -127,7 +127,7 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
 
     hist_upto_dt = master[master["TradDt"] <= ref_dt].copy()
     future_dates = sorted([d for d in avail_dates if d > ref_dt])
-    next_dt = future_dates if future_dates else None
+    next_dt = next(iter(future_dates)) if future_dates else None
 
     with c_info:
         if next_dt is not None:
@@ -146,13 +146,12 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=Non
     exp_hist = hist_upto_dt[hist_upto_dt["XpryDt"] == chosen_exp].copy()
     ref_eod = exp_hist[exp_hist["TradDt"] == ref_dt]
 
-    # Backtest Next-Day Underlying Reference (from UndrlygPric if available, else live_price)
     eval_price = live_price
     if next_dt is not None and "UndrlygPric" in master.columns:
-        nxt_rows = master[(master["TradDt"] == next_dt) & (master["XpryDt"] == chosen_exp)]
-        if not nxt_rows.empty and pd.notna(nxt_rows["UndrlygPric"].iloc):
-            eval_price = float(nxt_rows["UndrlygPric"].iloc)
-
+        nxt_vals = master[(master["TradDt"] == next_dt) & (master["XpryDt"] == chosen_exp)]["UndrlygPric"].dropna()
+        if not nxt_vals.empty:
+            eval_price = float(next(iter(nxt_vals)))
+    
     med_chg = ref_eod["ChngInOpnIntrst"].abs().median()
     eod_inst = ref_eod.copy()
     eod_inst["OI_Surge_x"] = (eod_inst["ChngInOpnIntrst"].abs() / (med_chg if med_chg > 0 else 1)).round(1)
