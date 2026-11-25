@@ -32,7 +32,7 @@ client_id = st.sidebar.text_input("Fyers App ID (Client ID)", placeholder="e.g. 
 
 with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
     secret_id = st.text_input("Fyers Secret ID", type="password")
-    redir_uri = st.text_input("Redirect URI", value="https://fyers.in")
+    redir_uri = st.text_input("Redirect URI", value="https://127.0.0.1")
     if client_id and secret_id:
         from fyers_apiv3 import fyersModel
         sess = fyersModel.SessionModel(
@@ -46,9 +46,10 @@ with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
         redir_url = st.text_input("2. Paste full redirected URL here:")
         if st.button("Generate Access Token") and redir_url:
             try:
-                q = urllib.parse.parse_qs(urllib.parse.urlparse(redir_url.strip()).query)
-                code = q.get("auth_code", [redir_url.strip()])
-                sess.set_token(code)
+                parsed = urllib.parse.urlparse(redir_url.strip())
+                q = urllib.parse.parse_qs(parsed.query)
+                code = next(iter(q["auth_code"])) if "auth_code" in q else redir_url.strip()
+                sess.set_token(code.strip())
                 resp = sess.generate_token()
                 if "access_token" in resp:
                     st.session_state["fyers_token"] = resp["access_token"]
@@ -96,7 +97,8 @@ def read_file(f):
             csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not csvs:
                 return None
-            with zf.open(csvs) as c:
+            first_csv = next(iter(csvs))
+            with zf.open(first_csv) as c:
                 return pd.read_csv(c)
     return pd.read_csv(f)
 
@@ -132,7 +134,8 @@ def get_fyers_spot(cid, tok, sym):
     fyers = fyersModel.FyersModel(client_id=cid.strip(), token=tok.strip(), is_async=False)
     res = fyers.quotes(data={"symbols": sym})
     if res.get("s") == "ok" and res.get("d"):
-        return res["d"]["v"]["lp"]
+        first_item = next(iter(res["d"]))
+        return first_item["v"]["lp"]
     raise Exception(f"Fyers Error: {res}")
 
 if files:
