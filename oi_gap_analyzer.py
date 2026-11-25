@@ -89,7 +89,7 @@ if use_fyers and client_id and token:
         st.sidebar.error(f"Fyers Live Error: {e}")
 if use_fyers and client_id and token:
     if st.button("📡 Scan All 7 Indices (Multi-Index Squeeze & Institutional Radar)"):
-        if use_fyers and client_id and token:
+if use_fyers and client_id and token:
     with st.expander("📡 Multi-Index Squeeze & Institutional Radar (With Time-Slot Snapshots)", expanded=True):
         render_multi_index_radar(INDEX_CONFIG, client_id, token)
 
