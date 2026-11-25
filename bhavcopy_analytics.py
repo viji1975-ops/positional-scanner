@@ -214,3 +214,96 @@ def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_
 
     atm = round(live_price / step) * step
     k1, k2, k3 = st.columns(3)
+def render_multi_index_radar(index_config, client_id, token):
+    from fyers_apiv3 import fyersModel
+
+    if "radar_snapshots" not in st.session_state:
+        st.session_state["radar_snapshots"] = {}
+
+    slots = ["Live Now", "09:30 AM", "10:30 AM", "11:00 AM", "11:30 AM", "01:30 PM", "02:30 PM"]
+    c_slot, c_btn, c_view = st.columns(3)
+    with c_slot:
+        chosen_slot = st.selectbox("Select Time Slot to Capture / View", slots)
+    with c_btn:
+        st.write("")
+        scan_clicked = st.button("📡 Scan & Save Selected Slot", use_container_width=True)
+    with c_view:
+        saved_keys = list(st.session_state["radar_snapshots"].keys())
+        view_slot = st.selectbox("Compare Saved Time Slot", saved_keys if saved_keys else ["No snapshots saved yet"])
+
+    if scan_clicked:
+        fyers = fyersModel.FyersModel(client_id=client_id.strip(), token=token.strip(), is_async=False)
+        rows = []
+        squeeze_count = 0
+        with st.spinner(f"Scanning all 7 indices for {chosen_slot}..."):
+            for name, cfg in index_config.items():
+                try:
+                    q_res = fyers.quotes(data={"symbols": cfg["fyers"]})
+                    spot = next(iter(q_res["d"]))["v"]["lp"] if q_res.get("s") == "ok" and q_res.get("d") else None
+                    oc_res = fyers.optionchain(data={"symbol": cfg["fyers"], "strikecount": 10, "timestamp": ""})
+                    chain = oc_res.get("data", {}).get("optionsChain", []) if oc_res.get("s") == "ok" else []
+                    if not spot or not chain:
+                        continue
+
+                    df = pd.DataFrame(chain)
+                    df = df[df["option_type"].isin(["CE", "PE"])].copy()
+                    df["prev_oi"] = df["oi"] - df["oich"]
+                    df["lots_chg"] = (df["oich"] / cfg["lot"]).round(0)
+
+                    ce = df[df["option_type"] == "CE"].set_index("strike_price")
+                    pe = df[df["option_type"] == "PE"].set_index("strike_price")
+
+                    pcr = round(pe["oi"].sum() / ce["oi"].sum(), 2) if ce["oi"].sum() > 0 else 0
+                    pe_lots, ce_lots = int(pe["lots_chg"].sum()), int(ce["lots_chg"].sum())
+
+                    if pe_lots > ce_lots * 1.25:
+                        bias = f"🟢 Bullish ({pe_lots - ce_lots:+,} net lots)"
+                    elif ce_lots > pe_lots * 1.25:
+                        bias = f"🔴 Bearish ({ce_lots - pe_lots:+,} net lots)"
+                    else:
+                        bias = "🟡 Neutral / Straddle"
+
+                    trap_ce = ce[(ce["prev_oi"] > ce["prev_oi"].median()) & (ce.index < spot) & (ce["oich"] < 0)]
+                    trap_pe = pe[(pe["prev_oi"] > pe["prev_oi"].median()) & (pe.index > spot) & (pe["oich"] < 0)]
+
+                    atm = round(spot / cfg["step"]) * cfg["step"]
+                    if not trap_ce.empty:
+                        sig = f"🚀 CALL SQUEEZE ({trap_ce.index.tolist()[:2]})"
+                        strike = f"{int(atm - cfg['step'])} CE"
+                        squeeze_count += 1
+                    elif not trap_pe.empty and pcr < 0.85:
+                        sig = f"🔻 PUT SQUEEZE ({trap_pe.index.tolist()[:2]})"
+                        strike = f"{int(atm + cfg['step'])} PE"
+                        squeeze_count += 1
+                    else:
+                        sig, strike = "⚖️ Range-Bound", "—"
+
+                    rows.append({
+                        "Time Slot": chosen_slot,
+                        "Index": name,
+                        "Live Spot": spot,
+                        "PCR": pcr,
+                        "Institutional Footprint": bias,
+                        "Squeeze Signal": sig,
+                        "Best Strike": strike,
+                    })
+                except Exception:
+                    pass
+
+        if rows:
+            st.session_state["radar_snapshots"][chosen_slot] = (pd.DataFrame(rows), squeeze_count)
+            view_slot = chosen_slot
+
+    if view_slot in st.session_state["radar_snapshots"]:
+        snap_df, sq_cnt = st.session_state["radar_snapshots"][view_slot]
+        if sq_cnt >= 3:
+            st.success(f"🔥 SYNCHRONIZED MARKET BREAKOUT ({view_slot}): {sq_cnt} of {len(snap_df)} indices in active squeeze!")
+        st.dataframe(snap_df, use_container_width=True)
+
+        all_snaps = pd.concat([v for v in st.session_state["radar_snapshots"].values()], ignore_index=True)
+        st.download_button(
+            "📥 Export All Saved Time-Slot Snapshots (CSV)",
+            data=all_snaps.to_csv(index=False).encode("utf-8"),
+            file_name=f"multi_index_snapshots_{datetime.date.today()}.csv",
+            mime="text/csv",
+        )
