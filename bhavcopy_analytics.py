@@ -305,3 +305,50 @@ def render_multi_index_radar(index_config, client_id, token):
             file_name=f"multi_index_snapshots_{datetime.date.today()}.csv",
             mime="text/csv",
         )
+def render_eod_vs_live_blocks(master, ce_live, pe_live, live_price, lot_size, skip_expired):
+    if master is None or ce_live.empty:
+        return
+
+    latest_dt = master["TradDt"].max()
+    near_exp = next(iter(get_active_expiries(master, latest_dt, skip_expired)))
+    eod = master[(master["TradDt"] == latest_dt) & (master["XpryDt"] == near_exp)].copy()
+    if eod.empty:
+        return
+
+    med_chg = eod["ChngInOpnIntrst"].abs().median()
+    eod["Surge_x"] = (eod["ChngInOpnIntrst"].abs() / (med_chg if med_chg > 0 else 1)).round(1)
+    blocks = eod[(eod["Surge_x"] >= 3.0) & (eod["ChngInOpnIntrst"] > 0)].sort_values(by="Surge_x", ascending=False)
+    if blocks.empty:
+        return
+
+    st.divider()
+    st.subheader(f"🧱 EOD Institutional Blocks vs. Live Market ({latest_dt.strftime('%d %b')} EOD → Exp: {near_exp.strftime('%d %b')})")
+
+    trapped_rows, ceiling_rows = [], []
+    for _, r in blocks.iterrows():
+        strike = float(r["StrkPric"])
+        opt = str(r["OptnTp"]).strip()
+        surge = r["Surge_x"]
+        live_tbl = ce_live if opt == "CE" else pe_live
+        live_lots = int(round(live_tbl.loc[strike, "oich"] / lot_size)) if strike in live_tbl.index else 0
+
+        if opt == "CE" and strike < live_price:
+            status = "🏃 TRAPPED & UNWINDING (Fuel)" if live_lots < 0 else "⚠️ Breached (Holding)"
+            trapped_rows.append({"Strike": f"{int(strike)} CE", "EOD Surge": f"{surge}x", "Live Lots Chg": f"{live_lots:+,}", "Status": status})
+        elif opt == "CE" and strike >= live_price:
+            status = "🛡️ DEFENDING CEILING (Book Profit)" if live_lots >= 0 else "🚀 BREAKING OUT (Unwinding)"
+            ceiling_rows.append({"Strike": f"{int(strike)} CE", "EOD Surge": f"{surge}x", "Live Lots Chg": f"{live_lots:+,}", "Status": status})
+        elif opt == "PE" and strike > live_price:
+            status = "🏃 TRAPPED & UNWINDING (Drop Fuel)" if live_lots < 0 else "⚠️ Breached (Holding)"
+            trapped_rows.append({"Strike": f"{int(strike)} PE", "EOD Surge": f"{surge}x", "Live Lots Chg": f"{live_lots:+,}", "Status": status})
+        elif opt == "PE" and strike <= live_price:
+            status = "🛡️ DEFENDING FLOOR (Buy Support)" if live_lots >= 0 else "🔻 BREAKING DOWN (Unwinding)"
+            ceiling_rows.append({"Strike": f"{int(strike)} PE", "EOD Surge": f"{surge}x", "Live Lots Chg": f"{live_lots:+,}", "Status": status})
+
+    b1, b2 = st.columns(2)
+    with b1:
+        st.caption("🔥 Trapped EOD Blocks (Crossed by Live Spot)")
+        st.dataframe(pd.DataFrame(trapped_rows) if trapped_rows else pd.DataFrame(), use_container_width=True)
+    with b2:
+        st.caption("🚧 Active EOD Walls (Overhead Ceilings & Support Floors)")
+        st.dataframe(pd.DataFrame(ceiling_rows) if ceiling_rows else pd.DataFrame(), use_container_width=True)
