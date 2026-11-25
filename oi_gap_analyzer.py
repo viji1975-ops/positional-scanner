@@ -1,237 +1,160 @@
 import io
+import urllib.parse
 import zipfile
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Page configuration
 st.set_page_config(page_title="NSE/BSE OI & Gap Scanner", layout="wide")
 st.title("📊 NSE & BSE Bhavcopy OI + Fyers Live Gap Scanner")
 
-# ==========================================
-# INDEX CONFIGURATION (NSE & BSE F&O INDICES)
-# ==========================================
 INDEX_CONFIG = {
-    "NIFTY": {
-        "bhav_symbols": ["NIFTY"],
-        "step_size": 50,
-        "fyers_symbol": "NSE:NIFTY50-INDEX",
-        "default_spot": 25850.0,
-    },
-    "BANKNIFTY": {
-        "bhav_symbols": ["BANKNIFTY"],
-        "step_size": 100,
-        "fyers_symbol": "NSE:NIFTYBANK-INDEX",
-        "default_spot": 53500.0,
-    },
-    "FINNIFTY": {
-        "bhav_symbols": ["FINNIFTY"],
-        "step_size": 50,
-        "fyers_symbol": "NSE:FINNIFTY-INDEX",
-        "default_spot": 24500.0,
-    },
-    "MIDCPNIFTY": {
-        "bhav_symbols": ["MIDCPNIFTY"],
-        "step_size": 25,
-        "fyers_symbol": "NSE:MIDCPNIFTY-INDEX",
-        "default_spot": 12800.0,
-    },
-    "NIFTYNXT50": {
-        "bhav_symbols": ["NIFTYNXT50"],
-        "step_size": 100,
-        "fyers_symbol": "NSE:NIFTYNXT50-INDEX",
-        "default_spot": 71000.0,
-    },
-    "SENSEX": {
-        "bhav_symbols": ["SENSEX", "BSX"],
-        "step_size": 100,
-        "fyers_symbol": "BSE:SENSEX-INDEX",
-        "default_spot": 84350.0,
-    },
-    "BANKEX": {
-        "bhav_symbols": ["BANKEX", "BKX"],
-        "step_size": 100,
-        "fyers_symbol": "BSE:BANKEX-INDEX",
-        "default_spot": 72000.0,
-    },
+    "NIFTY": {"syms": ["NIFTY"], "step": 50, "fyers": "NSE:NIFTY50-INDEX", "spot": 25900.0},
+    "BANKNIFTY": {"syms": ["BANKNIFTY"], "step": 100, "fyers": "NSE:NIFTYBANK-INDEX", "spot": 53500.0},
+    "FINNIFTY": {"syms": ["FINNIFTY"], "step": 50, "fyers": "NSE:FINNIFTY-INDEX", "spot": 24500.0},
+    "MIDCPNIFTY": {"syms": ["MIDCPNIFTY"], "step": 25, "fyers": "NSE:MIDCPNIFTY-INDEX", "spot": 12800.0},
+    "NIFTYNXT50": {"syms": ["NIFTYNXT50"], "step": 100, "fyers": "NSE:NIFTYNXT50-INDEX", "spot": 71000.0},
+    "SENSEX": {"syms": ["SENSEX", "BSX"], "step": 100, "fyers": "BSE:SENSEX-INDEX", "spot": 84350.0},
+    "BANKEX": {"syms": ["BANKEX", "BKX"], "step": 100, "fyers": "BSE:BANKEX-INDEX", "spot": 72000.0},
 }
 
-# ==========================================
-# SIDEBAR: SETTINGS & FYERS API INPUTS
-# ==========================================
+if "fyers_token" not in st.session_state:
+    st.session_state["fyers_token"] = ""
+
 st.sidebar.header("1. Index & Broker Settings")
-index_choice = st.sidebar.selectbox("Select Index", list(INDEX_CONFIG.keys()))
-selected_cfg = INDEX_CONFIG[index_choice]
-step_size = selected_cfg["step_size"]
+idx = st.sidebar.selectbox("Select Index", list(INDEX_CONFIG.keys()))
+cfg = INDEX_CONFIG[idx]
+step = cfg["step"]
 
 use_fyers = st.sidebar.checkbox("Fetch Live Spot from Fyers API", value=False)
-fyers_client_id = st.sidebar.text_input("Fyers App ID (Client ID)", type="password")
-fyers_access_token = st.sidebar.text_input("Fyers Access Token", type="password")
+client_id = st.sidebar.text_input("Fyers App ID (Client ID)", placeholder="e.g. XC4XXXXM-100")
 
-manual_spot = st.sidebar.number_input(
-    "Or Enter Simulated / Live Open Price",
-    value=selected_cfg["default_spot"],
-    step=float(step_size),
-)
+with st.sidebar.expander("🔑 Generate Today's Fyers Access Token"):
+    secret_id = st.text_input("Fyers Secret ID", type="password")
+    redir_uri = st.text_input("Redirect URI", value="https://fyers.in")
+    if client_id and secret_id:
+        from fyers_apiv3 import fyersModel
+        sess = fyersModel.SessionModel(
+            client_id=client_id.strip(),
+            secret_key=secret_id.strip(),
+            redirect_uri=redir_uri.strip(),
+            response_type="code",
+            grant_type="authorization_code",
+        )
+        st.markdown(f"1. [Click here to Login to Fyers]({sess.generate_authcode()})")
+        redir_url = st.text_input("2. Paste full redirected URL here:")
+        if st.button("Generate Access Token") and redir_url:
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(redir_url.strip()).query)
+                code = q.get("auth_code", [redir_url.strip()])[0]
+                sess.set_token(code)
+                resp = sess.generate_token()
+                if "access_token" in resp:
+                    st.session_state["fyers_token"] = resp["access_token"]
+                    st.success("Token applied!")
+                else:
+                    st.error(f"Error: {resp}")
+            except Exception as e:
+                st.error(f"Failed: {e}")
 
-# ==========================================
-# 2. MULTI-FILE BHAVCOPY UPLOADER (.ZIP & .CSV)
-# ==========================================
+token = st.sidebar.text_input("Fyers Access Token (Daily JWT)", value=st.session_state["fyers_token"], type="password")
+manual_spot = st.sidebar.number_input("Or Enter Simulated / Live Open Price", value=cfg["spot"], step=float(step))
+
 st.header("2. Upload 20–25 NSE (.zip) or BSE (.csv) UDiFF Bhavcopies")
-uploaded_files = st.file_uploader(
-    "Drag and drop NSE Bhavcopy (.zip) or BSE Bhavcopy (.csv) files here",
-    type=["zip", "csv"],
-    accept_multiple_files=True,
-)
+files = st.file_uploader("Upload NSE (.zip) or BSE (.csv) files", type=["zip", "csv"], accept_multiple_files=True)
 
-
-def read_bhavcopy_file(uploaded_file):
-    """Reads either a CSV directly (BSE) or extracts the CSV inside a ZIP (NSE)."""
-    filename = uploaded_file.name.lower()
-    if filename.endswith(".zip"):
-        with zipfile.ZipFile(io.BytesIO(uploaded_file.read())) as zf:
-            csv_names = [name for name in zf.namelist() if name.lower().endswith(".csv")]
-            if not csv_names:
+def read_file(f):
+    f.seek(0)
+    if f.name.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(f.read())) as zf:
+            csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not csvs:
                 return None
-            with zf.open(csv_names[0]) as csv_file:
-                return pd.read_csv(csv_file)
-    else:
-        return pd.read_csv(uploaded_file)
+            with zf.open(csvs[0]) as c:
+                return pd.read_csv(c)
+    return pd.read_csv(f)
 
-
-def process_bhavcopies(files, valid_symbols):
-    df_list = []
-
-    for file in files[-25:]:
+def process_files(file_list, syms):
+    frames = []
+    for f in file_list[-25:]:
         try:
-            df = read_bhavcopy_file(file)
+            df = read_file(f)
             if df is None:
-                st.warning(f"Skipping {file.name}: No CSV found inside archive.")
                 continue
-
             df.columns = df.columns.str.strip()
-
             if "TckrSymb" not in df.columns or "FinInstrmTp" not in df.columns:
-                st.warning(f"Skipping {file.name}: Missing UDiFF columns (TckrSymb / FinInstrmTp).")
                 continue
-
             df["TckrSymb"] = df["TckrSymb"].astype(str).str.strip()
             df["FinInstrmTp"] = df["FinInstrmTp"].astype(str).str.strip()
-
-            filtered = df[
-                (df["TckrSymb"].isin(valid_symbols))
-                & (df["FinInstrmTp"].isin(["OPTIDX", "IO"]))
-            ].copy()
-
-            if not filtered.empty:
-                df_list.append(filtered)
+            sub = df[(df["TckrSymb"].isin(syms)) & (df["FinInstrmTp"].isin(["IDO", "OPTIDX", "IO"]))].copy()
+            if not sub.empty:
+                frames.append(sub)
         except Exception as e:
-            st.warning(f"Error reading {file.name}: {e}")
-
-    if not df_list:
+            st.warning(f"Skipped {f.name}: {e}")
+    if not frames:
         return None, None, None
+    master = pd.concat(frames, ignore_index=True)
+    master["TradDt"] = pd.to_datetime(master["TradDt"])
+    master["XpryDt"] = pd.to_datetime(master["XpryDt"])
+    master["OptnTp"] = master["OptnTp"].astype(str).str.strip()
+    latest_dt = master["TradDt"].max()
+    near_exp = master[master["TradDt"] == latest_dt]["XpryDt"].min()
+    return master[master["XpryDt"] == near_exp].sort_values("TradDt"), latest_dt, near_exp
 
-    master_df = pd.concat(df_list, ignore_index=True)
-    master_df["TradDt"] = pd.to_datetime(master_df["TradDt"])
-    master_df["XpryDt"] = pd.to_datetime(master_df["XpryDt"])
-    master_df["OptnTp"] = master_df["OptnTp"].astype(str).str.strip()
-
-    latest_date = master_df["TradDt"].max()
-    nearest_expiry = master_df[master_df["TradDt"] == latest_date]["XpryDt"].min()
-    expiry_df = master_df[master_df["XpryDt"] == nearest_expiry].sort_values("TradDt")
-
-    return expiry_df, latest_date, nearest_expiry
-
-
-def get_fyers_live_price(client_id, token, fyers_symbol):
+def get_fyers_spot(cid, tok, sym):
     from fyers_apiv3 import fyersModel
+    fyers = fyersModel.FyersModel(client_id=cid.strip(), token=tok.strip(), is_async=False)
+    res = fyers.quotes(data={"symbols": sym})
+    if res.get("s") == "ok" and res.get("d"):
+        return res["d"][0]["v"]["lp"]
+    raise Exception(f"Fyers Error: {res}")
 
-    fyers = fyersModel.FyersModel(client_id=client_id, token=token, is_async=False)
-    response = fyers.quotes(data={"symbols": fyers_symbol})
-    if response.get("s") == "ok" and response.get("d"):
-        return response["d"][0]["v"]["lp"]
+if files:
+    exp_df, latest_dt, near_exp = process_files(files, cfg["syms"])
+    if exp_df is None or exp_df.empty:
+        st.error(f"No valid {idx} options data found. Check exchange file match.")
     else:
-        raise Exception(f"Fyers API Error: {response}")
+        eod = exp_df[exp_df["TradDt"] == latest_dt].copy()
+        ce = eod[eod["OptnTp"] == "CE"].set_index("StrkPric")
+        pe = eod[eod["OptnTp"] == "PE"].set_index("StrkPric")
 
+        pcr = round(pe["OpnIntrst"].sum() / ce["OpnIntrst"].sum(), 2) if ce["OpnIntrst"].sum() > 0 else 0
+        call_wall = ce["OpnIntrst"].idxmax()
+        put_wall = pe["OpnIntrst"].idxmax()
 
-# ==========================================
-# 3. RUN ANALYSIS & RENDER UI OUTPUT
-# ==========================================
-if uploaded_files:
-    with st.spinner(f"Extracting and analyzing {len(uploaded_files)} Bhavcopy file(s) for {index_choice}..."):
-        expiry_df, latest_date, nearest_expiry = process_bhavcopies(
-            uploaded_files, selected_cfg["bhav_symbols"]
-        )
-
-    if expiry_df is None or expiry_df.empty:
-        st.error(
-            f"No valid **{index_choice}** options data found in the uploaded files. "
-            f"Verify that your files match the selected exchange (NSE `.zip` vs BSE `.csv`)."
-        )
-    else:
-        latest_eod = expiry_df[expiry_df["TradDt"] == latest_date].copy()
-        ce_df = latest_eod[latest_eod["OptnTp"] == "CE"].set_index("StrkPric")
-        pe_df = latest_eod[latest_eod["OptnTp"] == "PE"].set_index("StrkPric")
-
-        total_pe_oi = pe_df["OpnIntrst"].sum()
-        total_ce_oi = ce_df["OpnIntrst"].sum()
-        pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
-
-        major_call_wall = ce_df["OpnIntrst"].idxmax()
-        major_put_wall = pe_df["OpnIntrst"].idxmax()
-
-        # Trapped Call Writers (Top 25% OI addition on latest EOD)
-        trapped_ce = ce_df[
-            ce_df["ChngInOpnIntrst"] > ce_df["ChngInOpnIntrst"].quantile(0.75)
-        ].sort_values(by="OpnIntrst", ascending=False)
+        trapped_ce = ce[ce["ChngInOpnIntrst"] > ce["ChngInOpnIntrst"].quantile(0.75)].sort_values(by="OpnIntrst", ascending=False)
         trapped_strikes = trapped_ce.index.tolist()[:5]
 
-        # Determine Live / Open Price
         live_price = manual_spot
-        if use_fyers and fyers_client_id and fyers_access_token:
+        if use_fyers and client_id and token:
             try:
-                live_price = get_fyers_live_price(
-                    fyers_client_id, fyers_access_token, selected_cfg["fyers_symbol"]
-                )
-                st.sidebar.success(f"Live Fyers {index_choice}: {live_price}")
+                live_price = get_fyers_spot(client_id, token, cfg["fyers"])
+                st.sidebar.success(f"Live {idx}: {live_price}")
             except Exception as e:
                 st.sidebar.error(str(e))
 
-        # Display Key Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Latest EOD Date", latest_date.strftime("%d %b %Y"))
-        col2.metric("Nearest Expiry", nearest_expiry.strftime("%d %b %Y"))
-        col3.metric("EOD Put-Call Ratio (PCR)", pcr)
-        col4.metric(f"{index_choice} Live / Open", live_price)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Latest EOD", latest_dt.strftime("%d %b %Y"))
+        c2.metric("Nearest Expiry", near_exp.strftime("%d %b %Y"))
+        c3.metric("EOD PCR", pcr)
+        c4.metric(f"{idx} Open / Live", live_price)
 
         st.divider()
 
-        # Gap-Up Squeeze Check
         breached = [s for s in trapped_strikes if live_price > s]
         if breached:
-            atm_strike = round(live_price / step_size) * step_size
-            effective_strike = atm_strike - step_size
-            st.success(
-                f"🚀 **SHORT SQUEEZE ALERT ({index_choice}):** Open price ({live_price}) breached trapped Call strikes: {breached}. "
-                f"**Most Effective Strike to Watch:** `{int(effective_strike)} CE`"
-            )
+            atm = round(live_price / step) * step
+            eff_strike = int(atm - step)
+            st.success(f"🚀 SHORT SQUEEZE ({idx}): Breached {breached}. Best Strike: {eff_strike} CE")
         else:
-            st.info(
-                f"No major trapped Call walls breached yet for **{index_choice}**. "
-                f"Major Resistance Wall is at **{int(major_call_wall)} CE** | Major Support at **{int(major_put_wall)} PE**."
-            )
+            st.info(f"No trapped Call walls breached. Resistance: {int(call_wall)} CE | Support: {int(put_wall)} PE")
 
-        # Display Top Call & Put Strikes Side-by-Side
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader(f"Top Trapped {index_choice} Call (CE) Strikes")
-            st.dataframe(trapped_ce[["ClsPric", "OpnIntrst", "ChngInOpnIntrst"]].head(10))
-        with c2:
-            st.subheader(f"Top {index_choice} Put (PE) Support Strikes")
-            st.dataframe(
-                pe_df[["ClsPric", "OpnIntrst", "ChngInOpnIntrst"]]
-                .sort_values(by="OpnIntrst", ascending=False)
-                .head(10)
-            )
+        cols = ["ClsPric", "OpnIntrst", "ChngInOpnIntrst"]
+        left, right = st.columns(2)
+        with left:
+            st.subheader(f"Top Trapped {idx} Call (CE) Strikes")
+            st.dataframe(trapped_ce[cols].head(10))
+        with right:
+            st.subheader(f"Top {idx} Put (PE) Support Strikes")
+            st.dataframe(pe[cols].sort_values(by="OpnIntrst", ascending=False).head(10))
 else:
-    st.info("👈 Upload your NSE Bhavcopy (.zip) or BSE Bhavcopy (.csv) files above to generate the OI & Strike report.")
+    st.info("👈 Upload your NSE (.zip) or BSE (.csv) Bhavcopy files above to begin.")
