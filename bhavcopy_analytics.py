@@ -52,7 +52,71 @@ def get_active_expiries(master, latest_dt, skip_expired):
     return exps
 
 
-def render_bhavcopy_section(master, idx, live_price, skip_expired):
+def render_live_institutional(lc_df, lot_size):
+    st.divider()
+    st.subheader(f"🏦 Live Institutional Footprint (Lot Size: {lot_size})")
+    df = lc_df.copy()
+    df["OI_Lots_Chg"] = (df["oich"] / lot_size).round(0)
+    df["Total_Lots"] = (df["oi"] / lot_size).round(0)
+
+    pe_lots = int(df[df["option_type"] == "PE"]["OI_Lots_Chg"].sum())
+    ce_lots = int(df[df["option_type"] == "CE"]["OI_Lots_Chg"].sum())
+
+    if pe_lots > ce_lots * 1.25:
+        bias = "🟢 INSTITUTIONAL BULLISH (Heavy Put Writing)"
+    elif ce_lots > pe_lots * 1.25:
+        bias = "🔴 INSTITUTIONAL BEARISH (Heavy Call Writing)"
+    else:
+        bias = "🟡 NEUTRAL / STRADDLE WRITING"
+
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Smart Money Intraday Bias", bias)
+    i2.metric("Net Put (PE) Lots Added", f"{pe_lots:+,}")
+    i3.metric("Net Call (CE) Lots Added", f"{ce_lots:+,}")
+
+    inst_walls = df[df["OI_Lots_Chg"] >= 2500].sort_values(by="OI_Lots_Chg", ascending=False)
+    inst_unwind = df[df["OI_Lots_Chg"] <= -2500].sort_values(by="OI_Lots_Chg")
+
+    w1, w2 = st.columns(2)
+    with w1:
+        st.caption("🧱 Institutional Writing Walls (+2,500 Lots Added)")
+        st.dataframe(inst_walls[["strike_price", "option_type", "ltp", "OI_Lots_Chg", "volume"]] if not inst_walls.empty else pd.DataFrame())
+    with w2:
+        st.caption("🏃 Institutional Short Covering (-2,500 Lots Unwound)")
+        st.dataframe(inst_unwind[["strike_price", "option_type", "ltp", "OI_Lots_Chg", "volume"]] if not inst_unwind.empty else pd.DataFrame())
+
+
+def render_participant_eod(part_file):
+    try:
+        part_file.seek(0)
+        p_df = pd.read_csv(part_file, skiprows=1)
+        p_df.columns = p_df.columns.str.strip()
+        p_df["Client Type"] = p_df["Client Type"].astype(str).str.strip()
+        fii = p_df[p_df["Client Type"] == "FII"].iloc
+        pro = p_df[p_df["Client Type"] == "Pro"].iloc
+        cli = p_df[p_df["Client Type"] == "Client"].iloc
+
+        f_long, f_short = float(fii["Future Index Long"]), float(fii["Future Index Short"])
+        fii_pct = round((f_long / (f_long + f_short)) * 100, 1)
+        fii_net = int(f_long - f_short)
+        pro_net = int(float(pro["Future Index Long"]) - float(pro["Future Index Short"]))
+        cli_net = int(float(cli["Future Index Long"]) - float(cli["Future Index Short"]))
+
+        st.subheader("🏛️ EOD Participant-Wise Institutional Positioning (FII / Pro / Client)")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("FII Index Fut Long %", f"{fii_pct}%", help="<20% = Extreme Oversold | >75% = Overbought")
+        p2.metric("FII Net Index Futures", f"{fii_net:+,}")
+        p3.metric("Pro Desk Net Futures", f"{pro_net:+,}")
+        p4.metric("Retail (Client) Net Futures", f"{cli_net:+,}")
+    except Exception as e:
+        st.warning(f"Could not parse Participant OI CSV: {e}")
+
+
+def render_bhavcopy_section(master, idx, live_price, skip_expired, part_file=None):
+    if part_file is not None:
+        render_participant_eod(part_file)
+        st.divider()
+
     daily_oi = master.groupby(["TradDt", "OptnTp"])["OpnIntrst"].sum().unstack(fill_value=0)
     if "PE" in daily_oi.columns and "CE" in daily_oi.columns:
         daily_oi["PCR"] = (daily_oi["PE"] / daily_oi["CE"]).round(2)
@@ -65,6 +129,15 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired):
     exp_hist = master[master["XpryDt"] == chosen_exp].copy()
     latest_eod = exp_hist[exp_hist["TradDt"] == latest_dt]
 
+    # EOD Institutional Strike Surge Detector (> 3x Median OI Change)
+    eod_inst = latest_eod.copy()
+    med_chg = eod_inst["ChngInOpnIntrst"].abs().median()
+    eod_inst["OI_Surge_x"] = (eod_inst["ChngInOpnIntrst"].abs() / (med_chg if med_chg > 0 else 1)).round(1)
+    spikes = eod_inst[eod_inst["OI_Surge_x"] >= 3.0].sort_values(by="OI_Surge_x", ascending=False)
+    if not spikes.empty:
+        st.subheader(f"🏦 EOD Institutional Block OI Surges (>= 3.0x Median) — {chosen_exp.strftime('%d %b')}")
+        st.dataframe(spikes[["OptnTp", "StrkPric", "ClsPric", "OpnIntrst", "ChngInOpnIntrst", "OI_Surge_x"]].head(8))
+
     ce_hist = exp_hist[exp_hist["OptnTp"] == "CE"]
     pe_hist = exp_hist[exp_hist["OptnTp"] == "PE"]
     ce_latest = latest_eod[latest_eod["OptnTp"] == "CE"].set_index("StrkPric")
@@ -76,7 +149,7 @@ def render_bhavcopy_section(master, idx, live_price, skip_expired):
         "Latest_Cls": ce_latest["ClsPric"],
         "Avg_Prem": ce_hist.groupby("StrkPric")["ClsPric"].mean().round(2),
     }).dropna()
-    ce_sum["Writer_BE"] = (ce_sum.index + ce_sum["Avg_Prem"]).round(1)
+    ce_sum["Writer_BE"] = (ce_sum.index + ce_summary_prem if False else ce_sum.index + ce_sum["Avg_Prem"]).round(1)
     ce_sum["Status"] = ce_sum["Writer_BE"].apply(lambda b: "🚨 UNDERWATER" if live_price > b else "✅ Safe")
 
     pe_sum = pd.DataFrame({
@@ -107,11 +180,8 @@ def render_confluence_tab(master, ce_live, pe_live, idx, live_price, step, skip_
     near_exp = next(iter(get_active_expiries(master, latest_dt, skip_expired)))
     exp_df = master[master["XpryDt"] == near_exp]
 
-    ce_hist = exp_df[exp_df["OptnTp"] == "CE"]
-    pe_hist = exp_df[exp_df["OptnTp"] == "PE"]
-
-    ce_avg = ce_hist.groupby("StrkPric")["ClsPric"].mean()
-    pe_avg = pe_hist.groupby("StrkPric")["ClsPric"].mean()
+    ce_avg = exp_df[exp_df["OptnTp"] == "CE"].groupby("StrkPric")["ClsPric"].mean()
+    pe_avg = exp_df[exp_df["OptnTp"] == "PE"].groupby("StrkPric")["ClsPric"].mean()
 
     uw_ce = [int(k) for k, prem in ce_avg.items() if live_price > (k + prem) and k in ce_live.index and ce_live.loc[k, "oich"] < 0]
     uw_pe = [int(k) for k, prem in pe_avg.items() if live_price < (k - prem) and k in pe_live.index and pe_live.loc[k, "oich"] < 0]
