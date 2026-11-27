@@ -44,7 +44,10 @@ def resolve_fyers_sym(t):
         "FINNIFTY": "NSE:FINNIFTY-INDEX",
         "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
         "SENSEX": "BSE:SENSEX-INDEX",
-        "BANKEX": "BSE:BANKEX-INDEX"
+        "BANKEX": "BSE:BANKEX-INDEX",
+        "ZOMATO": "NSE:ETERNAL-EQ",
+        "LTIM": "NSE:LTM-EQ",
+        "TATAMOTORS": "NSE:TMPV-EQ"
     }
     if ":" in t:
         return t
@@ -325,6 +328,23 @@ with tab2:
 
             if wl_rows:
                 wl_res_df = pd.DataFrame(wl_rows)
+                
+                # Rank Strong Squeezes first, then sort by highest absolute Spot % Move
+                priority_map = {
+                    "🔥 STRONG BULLISH SQUEEZE": 1,
+                    "🔻 STRONG BEARISH SQUEEZE": 1,
+                    "📈 Mild Bullish": 2,
+                    "📉 Mild Bearish": 2,
+                    "⚖️ Neutral / Choppy": 3
+                }
+                wl_res_df["_prio"] = wl_res_df["Squeeze_Bias"].map(priority_map).fillna(4)
+                wl_res_df["_abs_chg"] = pd.to_numeric(
+                    wl_res_df["Spot_Chg%"].astype(str).str.replace("%", "").str.replace("+", ""),
+                    errors="coerce"
+                ).abs().fillna(-1)
+                
+                wl_res_df = wl_res_df.sort_values(by=["_prio", "_abs_chg"], ascending=[True, False]).drop(columns=["_prio", "_abs_chg"])
+                
                 st.dataframe(wl_res_df, use_container_width=True, hide_index=True)
                 st.download_button("⬇️ Download Watchlist Scan (.csv)", wl_res_df.to_csv(index=False).encode('utf-8'), f"Watchlist_Squeeze_{datetime.now().strftime('%Y-%m-%d_%H%M')}.csv", "text/csv")
 # --- END OF PART 2 ---
