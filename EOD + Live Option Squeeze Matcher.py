@@ -1,39 +1,25 @@
 import streamlit as st
 import pandas as pd
-import requests, gzip, json, io, hashlib
+import requests, hashlib
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 
 st.set_page_config(page_title="EOD + Live Option Squeeze Matcher", layout="wide")
 st.title("📊 EOD + Live Market Option Squeeze Matcher")
 
-@st.cache_data(ttl=86400)
-def load_upstox_master():
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-    url = "https://upstox.com"
-    resp = requests.get(url, headers=headers, timeout=25)
-    resp.raise_for_status()
-    raw_bytes = gzip.decompress(resp.content) if resp.content[:2] == b'\x1f\x8b' else resp.content
-    data = json.loads(raw_bytes.decode("utf-8"))
-
-    eq_map, exp_map = {}, {}
-    for item in data:
-        seg = item.get("segment")
-        sym = str(item.get("trading_symbol", "")).upper().strip()
-        if seg == "NSE_EQ" and item.get("instrument_type") == "EQ":
-            eq_map[sym] = item.get("instrument_key")
-        elif seg == "NSE_INDEX":
-            if sym in ("NIFTY", "NIFTY 50"): eq_map["NIFTY"] = item.get("instrument_key")
-            elif sym in ("BANKNIFTY", "NIFTY BANK"): eq_map["BANKNIFTY"] = item.get("instrument_key")
-            elif sym in ("FINNIFTY", "NIFTY FIN SERVICE"): eq_map["FINNIFTY"] = item.get("instrument_key")
-        elif seg == "NSE_FO" and item.get("instrument_type") in ("CE", "PE"):
-            und = str(item.get("underlying_symbol", "")).upper().strip()
-            exp_ms = item.get("expiry")
-            if und and exp_ms:
-                exp_str = datetime.fromtimestamp(exp_ms / 1000.0).strftime("%Y-%m-%d")
-                exp_map.setdefault(und, set()).add(exp_str)
-
-    return eq_map, {k: sorted(list(v)) for k, v in exp_map.items()}
+# Direct Upstox Instrument Keys for Indices & Top F&O Stocks (Instant, zero download delay)
+UPSTOX_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank", "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT", "DIXON": "NSE_EQ|INE935N01020", "RELIANCE": "NSE_EQ|INE002A01018",
+    "HDFCBANK": "NSE_EQ|INE040A01034", "ICICIBANK": "NSE_EQ|INE090A01021", "INFY": "NSE_EQ|INE009A01021",
+    "TCS": "NSE_EQ|INE467B01029", "SBIN": "NSE_EQ|INE062A01020", "AXISBANK": "NSE_EQ|INE238A01034",
+    "KOTAKBANK": "NSE_EQ|INE237A01028", "LT": "NSE_EQ|INE018A01030", "BHARTIARTL": "NSE_EQ|INE397D01024",
+    "BAJFINANCE": "NSE_EQ|INE296A01024", "BAJAJFINSV": "NSE_EQ|INE918I01026", "MARUTI": "NSE_EQ|INE585B01010",
+    "TATAMOTORS": "NSE_EQ|INE155A01022", "TATASTEEL": "NSE_EQ|INE081A01020", "SUNPHARMA": "NSE_EQ|INE044A01036",
+    "M&M": "NSE_EQ|INE101A01026", "NTPC": "NSE_EQ|INE733E01010", "ITC": "NSE_EQ|INE154A01025",
+    "TRENT": "NSE_EQ|INE849A01020", "BEL": "NSE_EQ|INE263A01024", "HAL": "NSE_EQ|INE066F01020",
+    "TITAN": "NSE_EQ|INE280A01028", "ADANIENT": "NSE_EQ|INE423A01024", "ADANIPORTS": "NSE_EQ|INE742F01042"
+}
 
 def resolve_fyers_sym(t):
     t = t.upper().strip()
@@ -63,10 +49,7 @@ def standardize_columns(df):
 
 def generate_fyers_token_from_url(app_id, secret_key, redirect_url_or_code):
     raw = redirect_url_or_code.strip()
-    if "auth_code=" in raw:
-        auth_code = parse_qs(urlparse(raw).query).get("auth_code", [""]).pop(0)
-    else:
-        auth_code = raw
+    auth_code = parse_qs(urlparse(raw).query).get("auth_code", [""]).pop(0) if "auth_code=" in raw else raw
     app_hash = hashlib.sha256(f"{app_id.strip()}:{secret_key.strip()}".encode()).hexdigest()
     res = requests.post(
         "https://fyers.in",
@@ -80,9 +63,8 @@ def generate_fyers_token_from_url(app_id, secret_key, redirect_url_or_code):
 def fetch_fyers(cid, tok, ticker):
     from fyers_apiv3 import fyersModel
     clean_tok = tok.split(":")[-1].strip()
-    clean_cid = cid.strip()
     fsym = resolve_fyers_sym(ticker)
-    fyers = fyersModel.FyersModel(client_id=clean_cid, token=clean_tok, is_async=False, log_path="")
+    fyers = fyersModel.FyersModel(client_id=cid.strip(), token=clean_tok, is_async=False, log_path="")
     resp = fyers.optionchain(data={"symbol": fsym, "strikecount": 30, "timestamp": ""})
     if resp.get("s") != "ok":
         raise ValueError(f"{resp.get('message', 'Fyers API Error')}")
@@ -95,11 +77,10 @@ def fetch_fyers(cid, tok, ticker):
 
 def fetch_upstox(tok, ticker, man_exp=""):
     clean_tok = tok.strip()
-    eq_map, exp_map = load_upstox_master()
     t = ticker.upper().strip()
-    ikey = eq_map.get(t)
+    ikey = t if "|" in t else UPSTOX_KEYS.get(t)
     if not ikey:
-        raise ValueError(f"Ticker '{t}' not found in Upstox NSE master.")
+        raise ValueError(f"Ticker '{t}' not in quick list. Paste its Upstox key (e.g. NSE_EQ|INE...) in the Stock box.")
     
     exp = man_exp.strip()
     if not exp:
@@ -109,17 +90,14 @@ def fetch_upstox(tok, ticker, man_exp=""):
             params={"instrument_key": ikey},
             timeout=10
         )
-        if c_res.status_code == 200 and c_res.text.strip():
-            c_resp = c_res.json()
-            if c_resp.get("status") == "success" and c_resp.get("data"):
-                exps = sorted(list({item["expiry"] for item in c_resp["data"] if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
-                exp = exps.pop(0) if exps else ""
-        if not exp:
-            valid_exps = [e for e in exp_map.get(t, []) if e >= datetime.now().strftime("%Y-%m-%d")]
-            exp = valid_exps.pop(0) if valid_exps else ""
+        if c_res.status_code != 200 or not c_res.text.strip():
+            raise ValueError(f"Upstox Auth/Contract Error (HTTP {c_res.status_code}). Verify your Upstox Access Token was generated today.")
+        c_resp = c_res.json()
+        exps = sorted(list({item["expiry"] for item in c_resp.get("data", []) if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
+        exp = exps.pop(0) if exps else ""
 
     if not exp:
-        raise ValueError(f"No valid expiry date found for '{t}'. Try typing YYYY-MM-DD in the Expiry box.")
+        raise ValueError(f"No active expiry found for {ikey}. Enter YYYY-MM-DD in Expiry box.")
 
     r = requests.get(
         "https://upstox.com",
@@ -128,7 +106,7 @@ def fetch_upstox(tok, ticker, man_exp=""):
         timeout=10
     )
     if r.status_code != 200 or not r.text.strip():
-        raise ValueError(f"Upstox HTTP {r.status_code}: Check if your Access Token was generated today or verify Expiry ({exp}).")
+        raise ValueError(f"Upstox Chain Error (HTTP {r.status_code}). Check token or Expiry ({exp}).")
     resp = r.json()
     if resp.get("status") != "success":
         raise ValueError(resp.get("errors", "Upstox API Error"))
@@ -141,17 +119,37 @@ def fetch_upstox(tok, ticker, man_exp=""):
     return pd.DataFrame(rows), spot, f"{ikey} ({exp})"
 # --- END OF PART 1 ---
 # --- START OF PART 2 ---
+import io
+
 st.sidebar.header("Scanner & Broker Settings")
 asset_type = st.sidebar.radio("Instrument Type", ["F&O Stock", "Index"], index=0)
 min_premium = st.sidebar.number_input("Minimum Option Premium (₹)", value=10.0 if asset_type == "F&O Stock" else 80.0, step=5.0)
 live_broker = st.sidebar.selectbox("Live Market Feed", ["None (EOD CSV Only)", "Fyers API v3", "Upstox API v2"])
-f_cid = st.sidebar.text_input("Fyers App ID") if live_broker == "Fyers API v3" else ""
-f_tok = st.sidebar.text_input("Fyers Access Token", type="password") if live_broker == "Fyers API v3" else ""
-u_tok = st.sidebar.text_input("Upstox Access Token", type="password") if live_broker == "Upstox API v2" else ""
+
+f_cid = f_tok = u_tok = ""
+if live_broker == "Fyers API v3":
+    f_cid = st.sidebar.text_input("Fyers App ID", value="D2B1MP5NVR-100")
+    f_tok = st.sidebar.text_input("Fyers Access Token (starts with eyJ...)", type="password")
+    with st.sidebar.expander("🔑 Generate Fyers Token Here", expanded=True):
+        f_sec = st.text_input("Fyers Secret Key", type="password")
+        f_red = st.text_input("Redirect URI (Must match Fyers App)", value="https://fyers.in")
+        if f_cid and f_red:
+            l_url = f"https://fyers.in{f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
+            st.markdown(f"**[Step 1: Click here to Login to Fyers]({l_url})**")
+        p_url = st.text_input("Step 2: Paste Redirected URL here")
+        if st.button("Step 3: Get Access Token") and f_sec and p_url:
+            try:
+                gt = generate_fyers_token_from_url(f_cid, f_sec, p_url)
+                st.success("✅ Copy token below & paste into Fyers Access Token box above:")
+                st.code(gt)
+            except Exception as e:
+                st.error(f"Token Error: {e}")
+elif live_broker == "Upstox API v2":
+    u_tok = st.sidebar.text_input("Upstox Access Token", type="password")
 
 c1, c2, c3 = st.columns([2, 1.5, 1])
 uploaded_file = c1.file_uploader("1. Upload EOD Option CSV", type=["csv"])
-stock_box = c2.text_input("2. Stock / Index Name (Auto-connects Live)", placeholder="e.g. BAJAJFINSV, RELIANCE, NIFTY")
+stock_box = c2.text_input("2. Stock / Index Name (Auto-connects Live)", placeholder="e.g. DIXON, RELIANCE, NIFTY")
 manual_exp = c3.text_input("Expiry (Optional YYYY-MM-DD)", placeholder="Auto-detects")
 
 if uploaded_file is not None:
