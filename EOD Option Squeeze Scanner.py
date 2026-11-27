@@ -59,8 +59,15 @@ if uploaded_file is not None:
     if 'OI_Action' in df.columns:
         df['OI_Action'] = df['OI_Action'].astype(str).str.strip().str.upper()
 
-    symbol_name = str(df['Index'].dropna().iloc).strip() if 'Index' in df.columns and not df['Index'].dropna().empty else uploaded_file.name.rsplit('.', 1)
-    expiry_date = str(df['Expiry'].dropna().iloc).strip() if 'Expiry' in df.columns and not df['Expiry'].dropna().empty else "Current Expiry"
+    if 'Index' in df.columns and not df['Index'].dropna().empty:
+        symbol_name = str(df['Index'].dropna().head(1).item()).strip()
+    else:
+        symbol_name = uploaded_file.name.removesuffix('.csv').removesuffix('.CSV')
+
+    if 'Expiry' in df.columns and not df['Expiry'].dropna().empty:
+        expiry_date = str(df['Expiry'].dropna().head(1).item()).strip()
+    else:
+        expiry_date = "Current Expiry"
 
     # ATM Straddle Breakeven
     ce_df = df[df['Type'] == 'CE'][['Strike', 'Close']].rename(columns={'Close': 'CE_Close'}).dropna()
@@ -69,12 +76,14 @@ if uploaded_file is not None:
 
     if not straddle_df.empty:
         straddle_df['Diff'] = (straddle_df['CE_Close'] - straddle_df['PE_Close']).abs()
-        atm_row = straddle_df.sort_values(by='Diff').iloc
-        atm_strike = atm_row['Strike']
+        atm_row = straddle_df.sort_values(by='Diff').head(1).squeeze()
+        atm_strike = float(atm_row['Strike'])
         atm_strike_display = int(atm_strike) if atm_strike == int(atm_strike) else round(atm_strike, 2)
-        ce_prem, pe_prem = atm_row['CE_Close'], atm_row['PE_Close']
+        ce_prem = float(atm_row['CE_Close'])
+        pe_prem = float(atm_row['PE_Close'])
         straddle_pts = ce_prem + pe_prem
-        upper_be, lower_be = atm_strike + straddle_pts, atm_strike - straddle_pts
+        upper_be = atm_strike + straddle_pts
+        lower_be = atm_strike - straddle_pts
     else:
         atm_strike_display = ce_prem = pe_prem = straddle_pts = upper_be = lower_be = 0
 
@@ -108,7 +117,9 @@ if uploaded_file is not None:
             subset = base[base['Chg%'] < 0] if is_writing else base[base['Chg%'] > 0]
         else:
             subset = pd.DataFrame()
-        return None if subset.empty else subset.sort_values(by='Squeeze_Score', ascending=False).iloc
+        if subset.empty:
+            return None
+        return subset.sort_values(by='Squeeze_Score', ascending=False).head(1).to_dict('records').pop()
 
     candidates = [
         ("#1 Bullish Short Squeeze (CE Write)", get_top_candidate('CE', True), "CE", True),
@@ -120,9 +131,9 @@ if uploaded_file is not None:
     prep_rows = []
     for role, row, opt_type, is_writing in candidates:
         if row is not None:
-            strike_val = row['Strike']
+            strike_val = float(row['Strike'])
             strike_disp = int(strike_val) if strike_val == int(strike_val) else round(strike_val, 2)
-            close_p = row['Close']
+            close_p = float(row['Close'])
             if is_writing:
                 be = strike_val + close_p if opt_type == "CE" else strike_val - close_p
                 direction = "Calls" if opt_type == "CE" else "Puts"
