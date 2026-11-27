@@ -69,7 +69,7 @@ if uploaded_file is not None:
     else:
         expiry_date = "Current Expiry"
 
-    # ATM Straddle Breakeven
+    # 1. ATM Straddle Breakeven
     ce_df = df[df['Type'] == 'CE'][['Strike', 'Close']].rename(columns={'Close': 'CE_Close'}).dropna()
     pe_df = df[df['Type'] == 'PE'][['Strike', 'Close']].rename(columns={'Close': 'PE_Close'}).dropna()
     straddle_df = pd.merge(ce_df, pe_df, on='Strike')
@@ -85,7 +85,7 @@ if uploaded_file is not None:
         upper_be = atm_strike + straddle_pts
         lower_be = atm_strike - straddle_pts
     else:
-        atm_strike_display = ce_prem = pe_prem = straddle_pts = upper_be = lower_be = 0
+        atm_strike = atm_strike_display = ce_prem = pe_prem = straddle_pts = upper_be = lower_be = 0
 
     straddle_summary = pd.DataFrame([{
         "Symbol": symbol_name, "Expiry": expiry_date, "ATM_Strike": atm_strike_display,
@@ -97,26 +97,40 @@ if uploaded_file is not None:
     st.subheader(f"🎯 ATM Straddle Breakeven — {symbol_name} ({expiry_date})")
     st.dataframe(straddle_summary, use_container_width=True, hide_index=True)
 
-    # Filter Liquid Strikes FIRST, then Top 15 Institutional Activity
+    # 2. Filter Liquid Strikes & Score OI Buildup
     has_turnover = 'Cr' in df.columns and df['Cr'].notna().any()
     rank_col = 'Cr' if has_turnover else 'OI'
     liquid_pool = df[df['Close'] >= min_premium].copy()
     top_institutional = liquid_pool.sort_values(by=rank_col, ascending=False).head(15).copy()
     top_institutional['Squeeze_Score'] = top_institutional['OI_Chg'] + (top_institutional['OI'] * 0.25)
 
+    has_chg_pct = 'Chg%' in top_institutional.columns and top_institutional['Chg%'].notna().any()
+    has_explicit_sl = (
+        'OI_Action' in top_institutional.columns and 
+        top_institutional['OI_Action'].str.contains('SHORT|LONG|WRIT|BUY', regex=True, na=False).any()
+    )
+
     def get_top_candidate(opt_type, is_writing):
         base = top_institutional[(top_institutional['Type'] == opt_type) & (top_institutional['OI_Chg'] > 0)]
         if base.empty:
             return None
-        if 'OI_Action' in base.columns and base['OI_Action'].notna().any():
+
+        # Mode A: Explicit SHORT/LONG labels in OI_Action
+        if has_explicit_sl:
             if is_writing:
                 subset = base[base['OI_Action'].str.contains('SHORT|WRIT|SB', regex=True, na=False) & ~base['OI_Action'].str.contains('COVER', na=False)]
             else:
                 subset = base[base['OI_Action'].str.contains('LONG|BUY|LB', regex=True, na=False) & ~base['OI_Action'].str.contains('UNWIND', na=False)]
-        elif 'Chg%' in base.columns and base['Chg%'].notna().any():
+        # Mode B: Price Change % available (Index CSV format)
+        elif has_chg_pct:
             subset = base[base['Chg%'] < 0] if is_writing else base[base['Chg%'] > 0]
+        # Mode C: Stock CSV with 'ADDITION' / 'MASSIVE ADDITION' (Uses ATM Moneyness to separate OTM Writing vs ITM Positioning)
         else:
-            subset = pd.DataFrame()
+            if opt_type == 'CE':
+                subset = base[base['Strike'] >= atm_strike] if is_writing else base[base['Strike'] < atm_strike]
+            else:
+                subset = base[base['Strike'] <= atm_strike] if is_writing else base[base['Strike'] > atm_strike]
+
         if subset.empty:
             return None
         return subset.sort_values(by='Squeeze_Score', ascending=False).head(1).to_dict('records').pop()
@@ -171,6 +185,7 @@ if uploaded_file is not None:
         top_institutional.to_excel(writer, sheet_name="Top_15_Institutional", index=False)
 
     col1, col2 = st.columns(2)
+    with col1:
     with col1:
         st.download_button("⬇️ Download Excel (.xlsx)", excel_buffer.getvalue(), f"{symbol_name}_Prep_{date_tag}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with col2:
