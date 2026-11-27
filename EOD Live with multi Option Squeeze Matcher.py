@@ -255,5 +255,52 @@ with tab2:
     )
     if st.button("🚀 Scan Entire Watchlist Live"):
         if not f_cid or not f_tok:
-            st.error("⚠️ Please select **Fyers API v3** in the left sidebar and enter your **App ID** and **Access Token** first.")
+            st.error("⚠️ Please select **Fyers API v3** in the left sidebar and enter your **App ID** and **Access Token** first.")       
         else:
+            tickers = [t.strip().upper() for t in wl_input.split(",") if t.strip()]
+            wl_rows = []
+            prog = st.progress(0)
+            for idx, tk in enumerate(tickers):
+                try:
+                    wdf, w_spot, w_chg, _ = fetch_fyers(f_cid, f_tok, tk, strike_count=15)
+                    if not wdf.empty:
+                        liq = wdf[wdf['Live_LTP'] >= min_premium].copy()
+                        ce_sq = liq[(liq['Type']=='CE') & (liq['Live_Chg%']>5) & (liq['Live_OI_Chg']<0)].sort_values('Live_OI', ascending=False)
+                        pe_sq = liq[(liq['Type']=='PE') & (liq['Live_Chg%']>5) & (liq['Live_OI_Chg']<0)].sort_values('Live_OI', ascending=False)
+                        ce_tr = liq[(liq['Type']=='CE') & (liq['Live_Chg%']<-5) & (liq['Live_OI_Chg']>0)].sort_values('Live_OI', ascending=False)
+                        pe_tr = liq[(liq['Type']=='PE') & (liq['Live_Chg%']<-5) & (liq['Live_OI_Chg']>0)].sort_values('Live_OI', ascending=False)
+
+                        r_cs = ce_sq.head(1).squeeze() if not ce_sq.empty else None
+                        r_ps = pe_sq.head(1).squeeze() if not pe_sq.empty else None
+                        r_pt = pe_tr.head(1).squeeze() if not pe_tr.empty else None
+                        r_ct = ce_tr.head(1).squeeze() if not ce_tr.empty else None
+
+                        bull_sq_txt = f"{int(r_cs['Strike'])} CE (+{r_cs['Live_Chg%']:.1f}%)" if r_cs is not None else "-"
+                        bear_sq_txt = f"{int(r_ps['Strike'])} PE (+{r_ps['Live_Chg%']:.1f}%)" if r_ps is not None else "-"
+                        bull_tr_txt = f"{int(r_pt['Strike'])} PE ({r_pt['Live_Chg%']:.1f}%)" if r_pt is not None else "-"
+                        bear_tr_txt = f"{int(r_ct['Strike'])} CE ({r_ct['Live_Chg%']:.1f}%)" if r_ct is not None else "-"
+
+                        bull_pts = (1 if r_cs is not None else 0) + (1 if r_pt is not None else 0)
+                        bear_pts = (1 if r_ps is not None else 0) + (1 if r_ct is not None else 0)
+                        if bull_pts == 2 and bear_pts == 0: bias = "🔥 STRONG BULLISH SQUEEZE"
+                        elif bear_pts == 2 and bull_pts == 0: bias = "🔻 STRONG BEARISH SQUEEZE"
+                        elif bull_pts > bear_pts: bias = "📈 Mild Bullish"
+                        elif bear_pts > bull_pts: bias = "📉 Mild Bearish"
+                        else: bias = "⚖️ Neutral / Choppy"
+
+                        wl_rows.append({
+                            "Symbol": tk, "Spot_LTP": f"₹{w_spot:.2f}", "Spot_Chg%": f"{w_chg:+.2f}%",
+                            "Squeeze_Bias": bias, "Bullish_Short_Squeeze (CE)": bull_sq_txt,
+                            "Bullish_Long_Trap (PE)": bull_tr_txt, "Bearish_Short_Squeeze (PE)": bear_sq_txt,
+                            "Bearish_Long_Trap (CE)": bear_tr_txt
+                        })
+                except Exception as ex:
+                    wl_rows.append({"Symbol": tk, "Spot_LTP": "Error", "Spot_Chg%": "-", "Squeeze_Bias": str(ex)[:45], "Bullish_Short_Squeeze (CE)": "-", "Bullish_Long_Trap (PE)": "-", "Bearish_Short_Squeeze (PE)": "-", "Bearish_Long_Trap (CE)": "-"})
+                prog.progress((idx + 1) / len(tickers))
+                time.sleep(0.15)
+
+            if wl_rows:
+                wl_res_df = pd.DataFrame(wl_rows)
+                st.dataframe(wl_res_df, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Download Watchlist Scan (.csv)", wl_res_df.to_csv(index=False).encode('utf-8'), f"Watchlist_Squeeze_{datetime.now().strftime('%Y-%m-%d_%H%M')}.csv", "text/csv")
+# --- END OF PART 2 ---
