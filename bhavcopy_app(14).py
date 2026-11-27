@@ -617,7 +617,7 @@ if bse_files or nse_files:
                 ].copy()
 
                 # Row 2: Specific Stock Filter & Per-Stock Limits
-                s_col1, s_col2, s_col3 = st.columns(3)
+                s_col1, s_col2, s_col3 = st.columns([3, 1, 1])
                 avail_fo_stocks = sorted(filtered_sto["TckrSymb"].unique())
                 sel_fo_stocks = s_col1.multiselect(
                     "Filter F&O Stocks (Leave empty for Top Active Stocks)",
