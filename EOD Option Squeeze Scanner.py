@@ -79,14 +79,13 @@ if uploaded_file is not None:
     if 'OI_Action' in df.columns:
         df['OI_Action'] = df['OI_Action'].astype(str).str.strip().str.upper()
 
-    # Extract Symbol/Index name and Expiry safely from columns or filename
+    # Extract Symbol/Index name and Expiry safely
     if 'Index' in df.columns and not df['Index'].dropna().empty:
-        symbol_name = str(df['Index'].dropna().iloc).strip()
+        symbol_name = str(df['Index'].dropna().iloc[0]).strip()
     else:
-        # Clean filename fallback (e.g., '2026-11-26_RELIANCE_export.csv' -> 'RELIANCE' or clean stem)
-        symbol_name = uploaded_file.name.rsplit('.', 1)
+        symbol_name = uploaded_file.name.rsplit('.', 1)[0]
         
-    expiry_date = str(df['Expiry'].dropna().iloc).strip() if 'Expiry' in df.columns and not df['Expiry'].dropna().empty else "Current Expiry"
+    expiry_date = str(df['Expiry'].dropna().iloc[0]).strip() if 'Expiry' in df.columns and not df['Expiry'].dropna().empty else "Current Expiry"
 
     # 2. Automated ATM Straddle Breakeven Calculation
     ce_df = df[df['Type'] == 'CE'][['Strike', 'Close']].rename(columns={'Close': 'CE_Close'}).dropna()
@@ -95,7 +94,7 @@ if uploaded_file is not None:
 
     if not straddle_df.empty:
         straddle_df['Diff'] = (straddle_df['CE_Close'] - straddle_df['PE_Close']).abs()
-        atm_row = straddle_df.sort_values(by='Diff').iloc
+        atm_row = straddle_df.sort_values(by='Diff').iloc[0]
         atm_strike = atm_row['Strike']
         atm_strike_display = int(atm_strike) if atm_strike == int(atm_strike) else round(atm_strike, 2)
         ce_prem = atm_row['CE_Close']
@@ -133,7 +132,6 @@ if uploaded_file is not None:
         if base.empty:
             return None
             
-        # Use OI_Action if present (e.g., F&O Stock CSV), otherwise use Chg% (Index CSV)
         if 'OI_Action' in base.columns and base['OI_Action'].notna().any():
             target_keyword = 'SHORT' if is_writing else 'LONG'
             subset = base[base['OI_Action'].str.contains(target_keyword, na=False)]
@@ -142,7 +140,7 @@ if uploaded_file is not None:
         else:
             subset = pd.DataFrame()
             
-        return None if subset.empty else subset.sort_values(by='Squeeze_Score', ascending=False).iloc
+        return None if subset.empty else subset.sort_values(by='Squeeze_Score', ascending=False).iloc[0]
 
     candidates = [
         ("#1 Bullish Short Squeeze (CE Write)", get_top_candidate('CE', True), "CE", True),
@@ -209,4 +207,8 @@ if uploaded_file is not None:
     with col2:
         st.download_button(
             label="⬇️ Download Prep Card CSV (.csv)",
-        
+            data=prep_df.to_csv(index=False).encode('utf-8'),
+            file_name=f"{symbol_name}_Prep_Card_{date_tag}.csv",
+            mime="text/csv"
+        )
+# End of script
