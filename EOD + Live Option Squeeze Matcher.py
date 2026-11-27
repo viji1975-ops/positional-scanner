@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
-import requests, hashlib
-from urllib.parse import urlparse, parse_qs
+import requests, hashlib, io
 from datetime import datetime
 
 st.set_page_config(page_title="EOD + Live Option Squeeze Matcher", layout="wide")
 st.title("📊 EOD + Live Market Option Squeeze Matcher")
 
-# Direct Upstox Instrument Keys for Indices & Top F&O Stocks (Instant, zero download delay)
 UPSTOX_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank", "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT", "DIXON": "NSE_EQ|INE935N01020", "RELIANCE": "NSE_EQ|INE002A01018",
@@ -49,16 +47,16 @@ def standardize_columns(df):
 
 def generate_fyers_token_from_url(app_id, secret_key, redirect_url_or_code):
     raw = redirect_url_or_code.strip()
-    auth_code = parse_qs(urlparse(raw).query).get("auth_code", [""]).pop(0) if "auth_code=" in raw else raw
+    auth_code = raw.split("auth_code=")[-1].split("&").pop(0) if "auth_code=" in raw else raw
     app_hash = hashlib.sha256(f"{app_id.strip()}:{secret_key.strip()}".encode()).hexdigest()
-    res = requests.post(
-        "https://fyers.in",
-        json={"grant_type": "authorization_code", "appIdHash": app_hash, "code": auth_code},
-        timeout=10
-    ).json()
+    api_url = "https://fyers.in" + "/api/v3/validate-authcode"
+    r = requests.post(api_url, json={"grant_type": "authorization_code", "appIdHash": app_hash, "code": auth_code}, timeout=10)
+    if not r.text.strip():
+        raise ValueError(f"Fyers HTTP {r.status_code}: Auth code expired. Login again for a fresh URL.")
+    res = r.json()
     if res.get("s") == "ok" and res.get("access_token"):
         return res["access_token"]
-    raise ValueError(res.get("message", "Failed to generate Fyers access token"))
+    raise ValueError(res.get("message", f"Fyers Error: {res}"))
 
 def fetch_fyers(cid, tok, ticker):
     from fyers_apiv3 import fyersModel
@@ -80,31 +78,19 @@ def fetch_upstox(tok, ticker, man_exp=""):
     t = ticker.upper().strip()
     ikey = t if "|" in t else UPSTOX_KEYS.get(t)
     if not ikey:
-        raise ValueError(f"Ticker '{t}' not in quick list. Paste its Upstox key (e.g. NSE_EQ|INE...) in the Stock box.")
-    
+        raise ValueError(f"Ticker '{t}' not in quick list. Enter Upstox key (e.g. NSE_EQ|INE...) in Stock box.")
     exp = man_exp.strip()
     if not exp:
-        c_res = requests.get(
-            "https://upstox.com",
-            headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
-            params={"instrument_key": ikey},
-            timeout=10
-        )
+        c_url = "https://upstox.com" + "/v2/option/contract"
+        c_res = requests.get(c_url, headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey}, timeout=10)
         if c_res.status_code != 200 or not c_res.text.strip():
-            raise ValueError(f"Upstox Auth/Contract Error (HTTP {c_res.status_code}). Verify your Upstox Access Token was generated today.")
-        c_resp = c_res.json()
-        exps = sorted(list({item["expiry"] for item in c_resp.get("data", []) if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
+            raise ValueError(f"Upstox Contract Error (HTTP {c_res.status_code}). Verify today's Upstox Access Token.")
+        exps = sorted(list({item["expiry"] for item in c_res.json().get("data", []) if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
         exp = exps.pop(0) if exps else ""
-
     if not exp:
         raise ValueError(f"No active expiry found for {ikey}. Enter YYYY-MM-DD in Expiry box.")
-
-    r = requests.get(
-        "https://upstox.com",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
-        params={"instrument_key": ikey, "expiry_date": exp},
-        timeout=10
-    )
+    chain_url = "https://upstox.com" + "/v2/option/chain"
+    r = requests.get(chain_url, headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10)
     if r.status_code != 200 or not r.text.strip():
         raise ValueError(f"Upstox Chain Error (HTTP {r.status_code}). Check token or Expiry ({exp}).")
     resp = r.json()
@@ -119,8 +105,6 @@ def fetch_upstox(tok, ticker, man_exp=""):
     return pd.DataFrame(rows), spot, f"{ikey} ({exp})"
 # --- END OF PART 1 ---
 # --- START OF PART 2 ---
-import io
-
 st.sidebar.header("Scanner & Broker Settings")
 asset_type = st.sidebar.radio("Instrument Type", ["F&O Stock", "Index"], index=0)
 min_premium = st.sidebar.number_input("Minimum Option Premium (₹)", value=10.0 if asset_type == "F&O Stock" else 80.0, step=5.0)
@@ -132,10 +116,10 @@ if live_broker == "Fyers API v3":
     f_tok = st.sidebar.text_input("Fyers Access Token (starts with eyJ...)", type="password")
     with st.sidebar.expander("🔑 Generate Fyers Token Here", expanded=True):
         f_sec = st.text_input("Fyers Secret Key", type="password")
-        f_red = st.text_input("Redirect URI (Must match Fyers App)", value="https://fyers.in")
+        f_red = st.text_input("Redirect URI (Must match Fyers App)", value="https://127.0.0.1")
         if f_cid and f_red:
-            l_url = f"https://fyers.in{f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
-            st.markdown(f"**[Step 1: Click here to Login to Fyers]({l_url})**")
+            l_url = "https://fyers.in" + f"/api/v3/generate-authcode?client_id={f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
+            st.link_button("Step 1: Click here to Login to Fyers", l_url)
         p_url = st.text_input("Step 2: Paste Redirected URL here")
         if st.button("Step 3: Get Access Token") and f_sec and p_url:
             try:
