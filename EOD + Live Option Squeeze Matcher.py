@@ -133,7 +133,7 @@ if live_broker == "Fyers API v3":
             l_url = "https://" + f"api-t1.fyers.in/api/v3/generate-authcode?client_id={f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
             st.caption("Step 1: Copy & open this URL in a new tab:")
             st.code(l_url)
-         p_url = st.text_input("Step 2: Paste Redirected URL here")
+        p_url = st.text_input("Step 2: Paste Redirected URL here")
         if st.button("Step 3: Get Access Token") and f_sec and p_url:
             try:
                 gt = generate_fyers_token_from_url(f_cid, f_sec, p_url)
