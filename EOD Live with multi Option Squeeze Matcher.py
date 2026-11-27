@@ -37,7 +37,18 @@ def get_default_monthly_expiry():
 
 def resolve_fyers_sym(t):
     t = t.upper().strip()
-    return {"NIFTY": "NSE:NIFTY50-INDEX", "NIFTY50": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:NIFTYBANK-INDEX", "FINNIFTY": "NSE:FINNIFTY-INDEX"}.get(t, f"NSE:{t}-EQ")
+    special_map = {
+        "NIFTY": "NSE:NIFTY50-INDEX",
+        "NIFTY50": "NSE:NIFTY50-INDEX",
+        "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+        "FINNIFTY": "NSE:FINNIFTY-INDEX",
+        "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+        "SENSEX": "BSE:SENSEX-INDEX",
+        "BANKEX": "BSE:BANKEX-INDEX"
+    }
+    if ":" in t:
+        return t
+    return special_map.get(t, f"NSE:{t}-EQ")
 
 def standardize_columns(df):
     df.columns = [str(c).strip() for c in df.columns]
@@ -248,10 +259,23 @@ with tab1:
 # ================= TAB 2: MULTI-STOCK WATCHLIST RADAR =================
 with tab2:
     st.subheader("📋 Multi-Stock Live Option Squeeze Radar (Fyers API v3)")
-    st.caption("Scans your F&O watchlist simultaneously to find the strongest intraday Short Squeezes and Long Traps across stocks.")
+    st.caption("Select an F&O Sector Preset or customize your ticker list to scan for simultaneous Short Squeezes & Long Traps.")
+
+    SECTOR_PRESETS = {
+        "Custom / My Watchlist": "NIFTY, BANKNIFTY, SENSEX, DIXON, RELIANCE, TRENT, HAL, BEL, HDFCBANK, ICICIBANK, BAJFINANCE",
+        "Indices (NSE & BSE)": "NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY, BANKEX",
+        "Banking & Financials": "HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK, INDUSINDBK, BAJFINANCE, BAJAJFINSV, PFC, RECLTD",
+        "Defence, PSU & Infra": "HAL, BEL, MAZDOCK, BDL, NTPC, POWERGRID, ONGC, COALINDIA, LT, ADANIPORTS",
+        "IT & Telecom": "TCS, INFY, HCLTECH, WIPRO, TECHM, LTIM, PERSISTENT, COFORGE, BHARTIARTL",
+        "Auto & EV": "MARUTI, TATAMOTORS, M&M, BAJAJ-AUTO, EICHERMOT, HEROMOTOCO, TVSMOTOR, ASHOKLEY",
+        "High-Beta Momentum": "DIXON, TRENT, ZOMATO, CHOLAFIN, TVSMOTOR, POLYCAB, HAVELLS, VOLTAS, TITAN, ADANIENT"
+    }
+
+    selected_preset = st.selectbox("🎯 Choose F&O Sector Preset", list(SECTOR_PRESETS.keys()), index=0)
     wl_input = st.text_area(
-        "Enter NSE F&O Tickers (comma-separated)",
-        value="NIFTY, BANKNIFTY, DIXON, RELIANCE, TRENT, HAL, BEL, HDFCBANK, ICICIBANK, BAJFINANCE"
+        "Active Tickers to Scan (Edit or add any NSE F&O stock)",
+        value=SECTOR_PRESETS[selected_preset],
+        height=70
     )
     if st.button("🚀 Scan Entire Watchlist Live"):
         if not f_cid or not f_tok:
