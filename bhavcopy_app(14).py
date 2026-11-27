@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(page_title="NSE & BSE Bhavcopy Scanner", layout="wide")
-st.title("📈 NSE + BSE Multi-Day Bhavcopy & Multi-Strike Options Scanner")
+st.title("📈 NSE + BSE + all  indicies Multi-Day Bhavcopy & Multi-Strike Options Scanner")
 
 SECTORS = {
     "HDFCBANK": "Banking & Finance", "ICICIBANK": "Banking & Finance", "SBIN": "Banking & Finance",
