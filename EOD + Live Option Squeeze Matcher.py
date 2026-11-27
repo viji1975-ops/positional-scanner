@@ -218,7 +218,10 @@ if uploaded_file is not None:
         rad['OI_Diff'] = rad['Live_OI'] - rad['OI']
         rad['Signal'] = rad.apply(lambda r: "🔥 LIVE BULLISH SHORT SQUEEZE" if (r['Type']=='CE' and r['Vs_EOD_%']>5 and r['OI_Diff']<0) else ("🔻 LIVE BEARISH SHORT SQUEEZE" if (r['Type']=='PE' and r['Vs_EOD_%']>5 and r['OI_Diff']<0) else ("⚠️ LIVE BEARISH LONG TRAP" if (r['Type']=='CE' and r['Vs_EOD_%']<-5 and r['Live_OI']>r['OI']) else ("🚀 LIVE BULLISH LONG TRAP" if (r['Type']=='PE' and r['Vs_EOD_%']<-5 and r['Live_OI']>r['OI']) else "Normal"))), axis=1)
         act = rad[rad['Signal'] != "Normal"].sort_values('Live_OI', ascending=False)
-        st.dataframe(act[['Strike', 'Type', 'Close', 'Live_LTP', 'Vs_EOD_%', 'OI', 'Live_OI', 'Signal']], use_container_width=True, hide_index=True) if not act.empty else st.info("No >5% multi-strike squeeze divergences right now.")
+        if not act.empty:
+            st.dataframe(act[['Strike', 'Type', 'Close', 'Live_LTP', 'Vs_EOD_%', 'OI', 'Live_OI', 'Signal']], use_container_width=True, hide_index=True)
+        else:
+            st.info("No >5% multi-strike squeeze divergences right now.")
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
