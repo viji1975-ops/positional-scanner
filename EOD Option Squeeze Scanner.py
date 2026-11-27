@@ -186,7 +186,6 @@ if uploaded_file is not None:
 
     col1, col2 = st.columns(2)
     with col1:
-    with col1:
         st.download_button("⬇️ Download Excel (.xlsx)", excel_buffer.getvalue(), f"{symbol_name}_Prep_{date_tag}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with col2:
         st.download_button("⬇️ Download CSV (.csv)", prep_df.to_csv(index=False).encode('utf-8'), f"{symbol_name}_Prep_{date_tag}.csv", "text/csv")
