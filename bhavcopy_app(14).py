@@ -566,6 +566,119 @@ if bse_files or nse_files:
 
         st.subheader("🏦 Institutional Turnover & Volume Spikes")
         st.dataframe(liq[(liq["Vol_Spike"] >= 2.0) & (liq["Cr"] >= 50)].sort_values("Cr", ascending=False).head(15)[["Sym", "Sector", "Close", "Chg%", "Vol_Spike", "Cr", "OI_Signal"]], use_container_width=True)
+        # --- INSTITUTIONAL TURNOVER & OI ACTIVITY IN F&O STOCK STRIKES ---
+        st.divider()
+        st.subheader(f"🏦 Institutional Turnover & OI Activity in F&O Stock Strikes ({dt})")
+        if not d_fo.empty and "FinInstrmTp" in d_fo.columns and "OptnTp" in d_fo.columns:
+            all_sto = d_fo[
+                (d_fo["FinInstrmTp"].astype(str).str.strip() == "STO") &
+                (d_fo["OptnTp"].astype(str).str.strip().isin(["CE", "PE"]))
+            ].copy()
+
+            if not all_sto.empty:
+                all_sto["TckrSymb"] = all_sto["TckrSymb"].astype(str).str.strip()
+                all_sto["Sector"] = all_sto["TckrSymb"].map(sec_map).fillna("Other / F&O")
+                all_sto["Cr"] = all_sto["TtlTrfVal"] / 1e7
+                all_sto["Chg%"] = np.where(
+                    all_sto["PrvsClsgPric"] > 0,
+                    ((all_sto["ClsPric"] - all_sto["PrvsClsgPric"]) / all_sto["PrvsClsgPric"]) * 100,
+                    0.0
+                )
+                all_sto["Strk_Int"] = all_sto["StrkPric"].apply(
+                    lambda x: int(x) if float(x).is_integer() else round(float(x), 2)
+                )
+                all_sto["Activity"] = np.where(
+                    (all_sto["Chg%"] > 0) & (all_sto["ChngInOpnIntrst"] > 0), "🟢 Option Buying",
+                    np.where((all_sto["Chg%"] < 0) & (all_sto["ChngInOpnIntrst"] > 0), "🔴 Option Writing",
+                    np.where(all_sto["Chg%"] > 0, "🟡 Short Covering", "🟠 Long Unwinding"))
+                )
+
+                # Row 1: Sector Filter & Activity Filter
+                f1, f2 = st.columns(2)
+                avail_sectors = sorted(all_sto["Sector"].unique())
+                sel_sto_sectors = f1.multiselect(
+                    "Filter by Sector",
+                    options=avail_sectors,
+                    default=avail_sectors,
+                    key=f"inst_stk_sec_{dt}"
+                )
+                activity_opts = ["🟢 Option Buying", "🔴 Option Writing", "🟡 Short Covering", "🟠 Long Unwinding"]
+                sel_sto_activity = f2.multiselect(
+                    "Filter by Activity Signal",
+                    options=activity_opts,
+                    default=activity_opts,
+                    key=f"inst_stk_act_{dt}"
+                )
+
+                # Apply Sector & Activity filters first
+                filtered_sto = all_sto[
+                    (all_sto["Sector"].isin(sel_sto_sectors)) &
+                    (all_sto["Activity"].isin(sel_sto_activity))
+                ].copy()
+
+                # Row 2: Specific Stock Filter & Per-Stock Limits
+                s_col1, s_col2, s_col3 = st.columns(3)
+                avail_fo_stocks = sorted(filtered_sto["TckrSymb"].unique())
+                sel_fo_stocks = s_col1.multiselect(
+                    "Filter F&O Stocks (Leave empty for Top Active Stocks)",
+                    options=avail_fo_stocks,
+                    default=[],
+                    key=f"inst_stk_filter_{dt}"
+                )
+                top_n_stocks = s_col2.number_input(
+                    "Top Active Stocks",
+                    min_value=5,
+                    max_value=50,
+                    value=15,
+                    step=5,
+                    key=f"top_n_fo_stk_{dt}"
+                )
+                top_n_stk_strikes = s_col3.number_input(
+                    "Top Strikes / Stock",
+                    min_value=1,
+                    max_value=10,
+                    value=2,
+                    step=1,
+                    key=f"top_n_stk_strk_{dt}"
+                )
+
+                if not filtered_sto.empty:
+                    if sel_fo_stocks:
+                        final_sto = filtered_sto[filtered_sto["TckrSymb"].isin(sel_fo_stocks)].copy()
+                    else:
+                        top_syms_by_cr = (
+                            filtered_sto.groupby("TckrSymb")["Cr"]
+                            .sum()
+                            .nlargest(int(top_n_stocks))
+                            .index.tolist()
+                        )
+                        final_sto = filtered_sto[filtered_sto["TckrSymb"].isin(top_syms_by_cr)].copy()
+
+                    top_sto_strikes = (
+                        final_sto.sort_values(["TckrSymb", "Cr"], ascending=[True, False])
+                        .groupby("TckrSymb", as_index=False)
+                        .head(int(top_n_stk_strikes))
+                        [["TckrSymb", "Sector", "XpryDt", "Strk_Int", "OptnTp", "ClsPric", "Chg%", "TtlTradgVol", "Cr", "OpnIntrst", "ChngInOpnIntrst", "Activity"]]
+                        .rename(
+                            columns={
+                                "TckrSymb": "Stock",
+                                "XpryDt": "Expiry",
+                                "Strk_Int": "Strike",
+                                "OptnTp": "Type",
+                                "ClsPric": "Close",
+                                "TtlTradgVol": "Volume",
+                                "OpnIntrst": "OI",
+                                "ChngInOpnIntrst": "OI_Chg"
+                            }
+                        )
+                    )
+                    st.dataframe(top_sto_strikes, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No Stock Option strikes match the selected Sector and Activity filters.")
+            else:
+                st.info("No Stock Options (STO) data found for the selected date.")
+        else:
+            st.info("Upload NSE F&O Bhavcopy files to view Stock Option strike activity.")
 else:
     st.info("Upload files above to start.")
         # --- SECTION 5: OPTION CHAIN WALLS, MAX PAIN & EXPIRY RISK ---
