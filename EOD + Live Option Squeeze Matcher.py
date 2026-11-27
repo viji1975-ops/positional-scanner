@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import requests, gzip, json, io
+import requests, gzip, json, io, hashlib
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 
 st.set_page_config(page_title="EOD + Live Option Squeeze Matcher", layout="wide")
@@ -9,7 +10,6 @@ st.title("📊 EOD + Live Market Option Squeeze Matcher")
 @st.cache_data(ttl=86400)
 def load_upstox_master():
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-    # Fetch Upstox official NSE JSON master (avoids CSV comma/quote parsing errors)
     url = "https://upstox.com"
     resp = requests.get(url, headers=headers, timeout=25)
     resp.raise_for_status()
@@ -61,16 +61,31 @@ def standardize_columns(df):
                 break
     return df.rename(columns=rmap)
 
+def generate_fyers_token_from_url(app_id, secret_key, redirect_url_or_code):
+    raw = redirect_url_or_code.strip()
+    if "auth_code=" in raw:
+        auth_code = parse_qs(urlparse(raw).query).get("auth_code", [""]).pop(0)
+    else:
+        auth_code = raw
+    app_hash = hashlib.sha256(f"{app_id.strip()}:{secret_key.strip()}".encode()).hexdigest()
+    res = requests.post(
+        "https://fyers.in",
+        json={"grant_type": "authorization_code", "appIdHash": app_hash, "code": auth_code},
+        timeout=10
+    ).json()
+    if res.get("s") == "ok" and res.get("access_token"):
+        return res["access_token"]
+    raise ValueError(res.get("message", "Failed to generate Fyers access token"))
+
 def fetch_fyers(cid, tok, ticker):
     from fyers_apiv3 import fyersModel
-    # Strip 'APP_ID:' prefix if user pasted combined token string
     clean_tok = tok.split(":")[-1].strip()
     clean_cid = cid.strip()
     fsym = resolve_fyers_sym(ticker)
     fyers = fyersModel.FyersModel(client_id=clean_cid, token=clean_tok, is_async=False, log_path="")
     resp = fyers.optionchain(data={"symbol": fsym, "strikecount": 30, "timestamp": ""})
     if resp.get("s") != "ok":
-        raise ValueError(f"{resp.get('message', 'Fyers API Error')} (Ensure token was generated today after 6:00 AM IST)")
+        raise ValueError(f"{resp.get('message', 'Fyers API Error')}")
     rows, spot = [], 0
     for i in resp["data"]["optionsChain"]:
         if i.get("option_type") == "": spot = i.get("ltp", 0)
@@ -88,20 +103,33 @@ def fetch_upstox(tok, ticker, man_exp=""):
     
     exp = man_exp.strip()
     if not exp:
-        c_resp = requests.get(
+        c_res = requests.get(
             "https://upstox.com",
             headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
             params={"instrument_key": ikey},
             timeout=10
-        ).json()
-        if c_resp.get("status") == "success" and c_resp.get("data"):
-            exps = sorted(list({item["expiry"] for item in c_resp["data"] if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
-            exp = exps[0] if exps else ""
+        )
+        if c_res.status_code == 200 and c_res.text.strip():
+            c_resp = c_res.json()
+            if c_resp.get("status") == "success" and c_resp.get("data"):
+                exps = sorted(list({item["expiry"] for item in c_resp["data"] if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
+                exp = exps.pop(0) if exps else ""
         if not exp:
             valid_exps = [e for e in exp_map.get(t, []) if e >= datetime.now().strftime("%Y-%m-%d")]
-            exp = valid_exps[0] if valid_exps else ""
+            exp = valid_exps.pop(0) if valid_exps else ""
 
-    resp = requests.get("https://upstox.com", headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10).json()
+    if not exp:
+        raise ValueError(f"No valid expiry date found for '{t}'. Try typing YYYY-MM-DD in the Expiry box.")
+
+    r = requests.get(
+        "https://upstox.com",
+        headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
+        params={"instrument_key": ikey, "expiry_date": exp},
+        timeout=10
+    )
+    if r.status_code != 200 or not r.text.strip():
+        raise ValueError(f"Upstox HTTP {r.status_code}: Check if your Access Token was generated today or verify Expiry ({exp}).")
+    resp = r.json()
     if resp.get("status") != "success":
         raise ValueError(resp.get("errors", "Upstox API Error"))
     rows, spot = [], 0
