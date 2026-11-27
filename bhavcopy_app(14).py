@@ -593,28 +593,30 @@ if bse_files or nse_files:
                     np.where(all_sto["Chg%"] > 0, "🟡 Short Covering", "🟠 Long Unwinding"))
                 )
 
-                # Row 1: Sector Filter & Activity Filter
+                # Row 1: Sector Filter & Activity Filter (Empty = Show All)
                 f1, f2 = st.columns(2)
                 avail_sectors = sorted(all_sto["Sector"].unique())
                 sel_sto_sectors = f1.multiselect(
-                    "Filter by Sector",
+                    "Filter by Sector (Empty = All)",
                     options=avail_sectors,
-                    default=avail_sectors,
+                    default=[],
                     key=f"inst_stk_sec_{dt}"
                 )
                 activity_opts = ["🟢 Option Buying", "🔴 Option Writing", "🟡 Short Covering", "🟠 Long Unwinding"]
                 sel_sto_activity = f2.multiselect(
-                    "Filter by Activity Signal",
+                    "Filter by Activity Signal (Empty = All)",
                     options=activity_opts,
-                    default=activity_opts,
+                    default=[],
                     key=f"inst_stk_act_{dt}"
                 )
 
-                # Apply Sector & Activity filters first
-                filtered_sto = all_sto[
-                    (all_sto["Sector"].isin(sel_sto_sectors)) &
-                    (all_sto["Activity"].isin(sel_sto_activity))
-                ].copy()
+                # Apply Sector & Activity filters only if selections are made
+                filtered_sto = all_sto.copy()
+                if sel_sto_sectors:
+                    filtered_sto = filtered_sto[filtered_sto["Sector"].isin(sel_sto_sectors)]
+                if sel_sto_activity:
+                    filtered_sto = filtered_sto[filtered_sto["Activity"].isin(sel_sto_activity)]
+
 
                 # Row 2: Specific Stock Filter & Per-Stock Limits
                 s_col1, s_col2, s_col3 = st.columns([3, 1, 1])
