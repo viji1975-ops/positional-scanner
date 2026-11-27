@@ -8,20 +8,37 @@ st.title("📊 EOD + Live Market Option Squeeze Matcher")
 
 @st.cache_data(ttl=86400)
 def load_upstox_master():
-    resp = requests.get("https://upstox.com", timeout=15)
-    data = json.loads(gzip.decompress(resp.content).decode("utf-8"))
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip, deflate"}
+    # Try Upstox official NSE CSV.gz master (reliable and fast)
+    url = "https://upstox.com"
+    resp = requests.get(url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    raw_bytes = gzip.decompress(resp.content) if resp.content[:2] == b'\x1f\x8b' else resp.content
+    mdf = pd.read_csv(io.BytesIO(raw_bytes))
+
     eq_map, exp_map = {}, {}
-    for item in data:
-        seg, sym = item.get("segment"), str(item.get("trading_symbol", "")).upper().strip()
-        if seg == "NSE_EQ" and item.get("instrument_type") == "EQ":
-            eq_map[sym] = item.get("instrument_key")
-        elif seg == "NSE_INDEX" and sym in ("NIFTY", "NIFTY 50", "BANKNIFTY", "NIFTY BANK", "FINNIFTY"):
-            key_name = "NIFTY" if "50" in sym or sym == "NIFTY" else ("BANKNIFTY" if "BANK" in sym else "FINNIFTY")
-            eq_map[key_name] = item.get("instrument_key")
-        elif seg == "NSE_FO" and item.get("instrument_type") in ("CE", "PE"):
-            und, exp_ms = str(item.get("underlying_symbol", "")).upper().strip(), item.get("expiry")
-            if und and exp_ms:
-                exp_map.setdefault(und, set()).add(datetime.fromtimestamp(exp_ms / 1000.0).strftime("%Y-%m-%d"))
+    # Map Equity & Index instrument keys
+    eq_rows = mdf[(mdf['exchange'] == 'NSE_EQ') & (mdf['instrument_type'] == 'EQUITY')]
+    for _, r in eq_rows.iterrows():
+        eq_map[str(r['tradingsymbol']).upper().strip()] = str(r['instrument_key']).strip()
+
+    idx_rows = mdf[mdf['exchange'] == 'NSE_INDEX']
+    for _, r in idx_rows.iterrows():
+        sym = str(r['tradingsymbol']).upper().strip()
+        if sym in ("NIFTY", "NIFTY 50"): eq_map["NIFTY"] = str(r['instrument_key']).strip()
+        elif sym in ("BANKNIFTY", "NIFTY BANK"): eq_map["BANKNIFTY"] = str(r['instrument_key']).strip()
+        elif sym in ("FINNIFTY", "NIFTY FIN SERVICE"): eq_map["FINNIFTY"] = str(r['instrument_key']).strip()
+
+    # Map active F&O expiry dates per underlying symbol
+    fo_rows = mdf[(mdf['exchange'] == 'NSE_FO') & (mdf['instrument_type'].isin(['OPTSTK', 'OPTIDX']))]
+    for _, r in fo_rows.iterrows():
+        tsym = str(r['tradingsymbol']).upper().strip()
+        exp = str(r['expiry']).strip()
+        # Extract underlying prefix before digits in tradingsymbol (e.g. DIXON26NOV13000CE -> DIXON)
+        und = ''.join([c for c in tsym.split('2')[0] if c.isalpha()]) if '2' in tsym else ""
+        if und and exp:
+            exp_map.setdefault(und, set()).add(exp)
+
     return eq_map, {k: sorted(list(v)) for k, v in exp_map.items()}
 
 def resolve_fyers_sym(t):
@@ -67,8 +84,23 @@ def fetch_upstox(tok, ticker, man_exp=""):
     t = ticker.upper().strip()
     ikey = eq_map.get(t)
     if not ikey: raise ValueError(f"Ticker '{t}' not found in Upstox NSE master.")
-    valid_exps = [e for e in exp_map.get(t, []) if e >= datetime.now().strftime("%Y-%m-%d")]
-    exp = man_exp.strip() or (valid_exps.pop(0) if valid_exps else "")
+    
+    # If manual expiry is provided use it; otherwise fetch available contracts directly from Upstox API
+    exp = man_exp.strip()
+    if not exp:
+        c_resp = requests.get(
+            "https://upstox.com",
+            headers={"Accept": "application/json", "Authorization": f"Bearer {tok}"},
+            params={"instrument_key": ikey},
+            timeout=10
+        ).json()
+        if c_resp.get("status") == "success" and c_resp.get("data"):
+            exps = sorted(list({item["expiry"] for item in c_resp["data"] if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
+            exp = exps[0] if exps else ""
+        if not exp:
+            valid_exps = [e for e in exp_map.get(t, []) if e >= datetime.now().strftime("%Y-%m-%d")]
+            exp = valid_exps[0] if valid_exps else ""
+
     resp = requests.get("https://upstox.com", headers={"Accept": "application/json", "Authorization": f"Bearer {tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10).json()
     if resp.get("status") != "success": raise ValueError(resp.get("errors", "Upstox API Error"))
     rows, spot = [], 0
