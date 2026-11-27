@@ -1,28 +1,21 @@
+import streamlit as st
 import pandas as pd
 from datetime import datetime
-import os
-import tkinter as tk
-from tkinter import filedialog
+import io
 
-def select_csv_file():
-    """Opens a native file upload dialog to pick your EOD CSV file."""
-    root = tk.Tk()
-    root.withdraw()  # Hide the empty main tkinter window
-    root.attributes('-topmost', True)  # Bring the file dialog to the front
-    file_path = filedialog.askopenfilename(
-        title="Select your daily EOD Option CSV file",
-        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-    )
-    root.destroy()
-    return file_path
+st.set_page_config(page_title="EOD Option Squeeze Scanner", layout="wide")
+st.title("📊 EOD Option Squeeze & Straddle Scanner")
+st.caption("Upload your daily EOD Option CSV to generate your Evening Prep Card, ATM Straddle Breakeven, and Excel report.")
 
-def generate_evening_report(csv_filepath, output_folder="reports", min_premium=80.0):
-    if not csv_filepath:
-        print("No file selected. Exiting.")
-        return
+# Sidebar settings
+min_premium = st.sidebar.number_input("Minimum Option Premium (₹)", value=80.0, step=10.0)
 
+# Streamlit Web File Uploader (Replaces tkinter)
+uploaded_file = st.file_uploader("Upload your daily EOD Option CSV file", type=["csv"])
+
+if uploaded_file is not None:
     # 1. Load and clean EOD CSV data
-    df = pd.read_csv(csv_filepath)
+    df = pd.read_csv(uploaded_file)
     numeric_cols = ['Strike', 'Close', 'Chg%', 'Volume', 'Cr', 'OI', 'OI_Chg']
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -57,6 +50,9 @@ def generate_evening_report(csv_filepath, output_folder="reports", min_premium=8
         "Upper_Straddle_Target": f"{upper_be:.2f}",
         "Lower_Straddle_Target": f"{lower_be:.2f}"
     }])
+
+    st.subheader(f"🎯 ATM Straddle Breakeven — {index_name} (Expiry: {expiry_date})")
+    st.dataframe(straddle_summary, use_container_width=True, hide_index=True)
 
     # 3. Filter Top 10 Institutional Turnover (Cr) & Liquid Strikes
     top_institutional = df.sort_values(by='Cr', ascending=False).head(10).copy()
@@ -107,33 +103,31 @@ def generate_evening_report(csv_filepath, output_folder="reports", min_premium=8
 
     prep_df = pd.DataFrame(prep_rows)
 
-    # 4. Export Clean Excel (.xlsx) and CSV (.csv) Reports
-    os.makedirs(output_folder, exist_ok=True)
-    date_tag = datetime.now().strftime("%Y-%m-%d")
-    excel_path = os.path.join(output_folder, f"{index_name}_Prep_Card_{date_tag}.xlsx")
-    csv_path = os.path.join(output_folder, f"{index_name}_Prep_Card_{date_tag}.csv")
+    st.subheader("⚡ Evening Squeeze Prep Card")
+    st.dataframe(prep_df, use_container_width=True, hide_index=True)
 
-    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+    st.info("**Golden Execution Rule:** Wait until **9:30 AM**. Enter ONLY when a Short Squeeze triggers (`> Close`) at the **exact same time** the opposite side's Long Squeeze or Support breaks (`< Close`).")
+
+    # 4. Export Clean 3-Sheet Excel (.xlsx) & CSV Download Buttons
+    date_tag = datetime.now().strftime("%Y-%m-%d")
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
         prep_df.to_excel(writer, sheet_name="Evening_Prep_Card", index=False)
         straddle_summary.to_excel(writer, sheet_name="ATM_Straddle_Math", index=False)
         top_institutional.to_excel(writer, sheet_name="Top_10_Institutional", index=False)
 
-    prep_df.to_csv(csv_path, index=False)
-
-    # 5. Print Summary to Console
-    print("\n" + "="*95)
-    print(f" ATM STRADDLE BREAKEVEN — {index_name} (Expiry: {expiry_date})")
-    print("="*95)
-    print(straddle_summary.to_string(index=False))
-    print("\n" + "="*95)
-    print(f" EVENING SQUEEZE PREP CARD")
-    print("="*95)
-    print(prep_df.to_string(index=False))
-    print("="*95)
-    print(f"Saved Excel report to: {excel_path}")
-    print(f"Saved CSV report to:   {csv_path}\n")
-
-if __name__ == "__main__":
-    print("Opening file picker to select your EOD CSV file...")
-    uploaded_csv = select_csv_file()
-    generate_evening_report(uploaded_csv, output_folder="reports", min_premium=80.0)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="⬇️ Download 3-Sheet Excel Report (.xlsx)",
+            data=excel_buffer.getvalue(),
+            file_name=f"{index_name}_Prep_Card_{date_tag}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    with col2:
+        st.download_button(
+            label="⬇️ Download Prep Card CSV (.csv)",
+            data=prep_df.to_csv(index=False).encode('utf-8'),
+            file_name=f"{index_name}_Prep_Card_{date_tag}.csv",
+            mime="text/csv"
+        )
