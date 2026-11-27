@@ -8,36 +8,30 @@ st.title("📊 EOD + Live Market Option Squeeze Matcher")
 
 @st.cache_data(ttl=86400)
 def load_upstox_master():
-    headers = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip, deflate"}
-    # Try Upstox official NSE CSV.gz master (reliable and fast)
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
+    # Fetch Upstox official NSE JSON master (avoids CSV comma/quote parsing errors)
     url = "https://upstox.com"
-    resp = requests.get(url, headers=headers, timeout=20)
+    resp = requests.get(url, headers=headers, timeout=25)
     resp.raise_for_status()
     raw_bytes = gzip.decompress(resp.content) if resp.content[:2] == b'\x1f\x8b' else resp.content
-    mdf = pd.read_csv(io.BytesIO(raw_bytes))
+    data = json.loads(raw_bytes.decode("utf-8"))
 
     eq_map, exp_map = {}, {}
-    # Map Equity & Index instrument keys
-    eq_rows = mdf[(mdf['exchange'] == 'NSE_EQ') & (mdf['instrument_type'] == 'EQUITY')]
-    for _, r in eq_rows.iterrows():
-        eq_map[str(r['tradingsymbol']).upper().strip()] = str(r['instrument_key']).strip()
-
-    idx_rows = mdf[mdf['exchange'] == 'NSE_INDEX']
-    for _, r in idx_rows.iterrows():
-        sym = str(r['tradingsymbol']).upper().strip()
-        if sym in ("NIFTY", "NIFTY 50"): eq_map["NIFTY"] = str(r['instrument_key']).strip()
-        elif sym in ("BANKNIFTY", "NIFTY BANK"): eq_map["BANKNIFTY"] = str(r['instrument_key']).strip()
-        elif sym in ("FINNIFTY", "NIFTY FIN SERVICE"): eq_map["FINNIFTY"] = str(r['instrument_key']).strip()
-
-    # Map active F&O expiry dates per underlying symbol
-    fo_rows = mdf[(mdf['exchange'] == 'NSE_FO') & (mdf['instrument_type'].isin(['OPTSTK', 'OPTIDX']))]
-    for _, r in fo_rows.iterrows():
-        tsym = str(r['tradingsymbol']).upper().strip()
-        exp = str(r['expiry']).strip()
-        # Extract underlying prefix before digits in tradingsymbol (e.g. DIXON26NOV13000CE -> DIXON)
-        und = ''.join([c for c in tsym.split('2')[0] if c.isalpha()]) if '2' in tsym else ""
-        if und and exp:
-            exp_map.setdefault(und, set()).add(exp)
+    for item in data:
+        seg = item.get("segment")
+        sym = str(item.get("trading_symbol", "")).upper().strip()
+        if seg == "NSE_EQ" and item.get("instrument_type") == "EQ":
+            eq_map[sym] = item.get("instrument_key")
+        elif seg == "NSE_INDEX":
+            if sym in ("NIFTY", "NIFTY 50"): eq_map["NIFTY"] = item.get("instrument_key")
+            elif sym in ("BANKNIFTY", "NIFTY BANK"): eq_map["BANKNIFTY"] = item.get("instrument_key")
+            elif sym in ("FINNIFTY", "NIFTY FIN SERVICE"): eq_map["FINNIFTY"] = item.get("instrument_key")
+        elif seg == "NSE_FO" and item.get("instrument_type") in ("CE", "PE"):
+            und = str(item.get("underlying_symbol", "")).upper().strip()
+            exp_ms = item.get("expiry")
+            if und and exp_ms:
+                exp_str = datetime.fromtimestamp(exp_ms / 1000.0).strftime("%Y-%m-%d")
+                exp_map.setdefault(und, set()).add(exp_str)
 
     return eq_map, {k: sorted(list(v)) for k, v in exp_map.items()}
 
@@ -69,9 +63,14 @@ def standardize_columns(df):
 
 def fetch_fyers(cid, tok, ticker):
     from fyers_apiv3 import fyersModel
+    # Strip 'APP_ID:' prefix if user pasted combined token string
+    clean_tok = tok.split(":")[-1].strip()
+    clean_cid = cid.strip()
     fsym = resolve_fyers_sym(ticker)
-    resp = fyersModel.FyersModel(client_id=cid, token=tok, is_async=False, log_path="").optionchain(data={"symbol": fsym, "strikecount": 30, "timestamp": ""})
-    if resp.get("s") != "ok": raise ValueError(resp.get("message", "Fyers API Error"))
+    fyers = fyersModel.FyersModel(client_id=clean_cid, token=clean_tok, is_async=False, log_path="")
+    resp = fyers.optionchain(data={"symbol": fsym, "strikecount": 30, "timestamp": ""})
+    if resp.get("s") != "ok":
+        raise ValueError(f"{resp.get('message', 'Fyers API Error')} (Ensure token was generated today after 6:00 AM IST)")
     rows, spot = [], 0
     for i in resp["data"]["optionsChain"]:
         if i.get("option_type") == "": spot = i.get("ltp", 0)
@@ -80,17 +79,18 @@ def fetch_fyers(cid, tok, ticker):
     return pd.DataFrame(rows), spot, fsym
 
 def fetch_upstox(tok, ticker, man_exp=""):
+    clean_tok = tok.strip()
     eq_map, exp_map = load_upstox_master()
     t = ticker.upper().strip()
     ikey = eq_map.get(t)
-    if not ikey: raise ValueError(f"Ticker '{t}' not found in Upstox NSE master.")
+    if not ikey:
+        raise ValueError(f"Ticker '{t}' not found in Upstox NSE master.")
     
-    # If manual expiry is provided use it; otherwise fetch available contracts directly from Upstox API
     exp = man_exp.strip()
     if not exp:
         c_resp = requests.get(
             "https://upstox.com",
-            headers={"Accept": "application/json", "Authorization": f"Bearer {tok}"},
+            headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
             params={"instrument_key": ikey},
             timeout=10
         ).json()
@@ -101,8 +101,9 @@ def fetch_upstox(tok, ticker, man_exp=""):
             valid_exps = [e for e in exp_map.get(t, []) if e >= datetime.now().strftime("%Y-%m-%d")]
             exp = valid_exps[0] if valid_exps else ""
 
-    resp = requests.get("https://upstox.com", headers={"Accept": "application/json", "Authorization": f"Bearer {tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10).json()
-    if resp.get("status") != "success": raise ValueError(resp.get("errors", "Upstox API Error"))
+    resp = requests.get("https://upstox.com", headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10).json()
+    if resp.get("status") != "success":
+        raise ValueError(resp.get("errors", "Upstox API Error"))
     rows, spot = [], 0
     for i in resp.get("data", []):
         if not spot: spot = float(i.get("underlying_spot_price", 0))
