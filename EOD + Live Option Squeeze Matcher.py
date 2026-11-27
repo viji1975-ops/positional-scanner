@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import requests, hashlib, io
-from datetime import datetime
+import requests, hashlib, io, calendar
+from datetime import datetime, date
 
 st.set_page_config(page_title="EOD + Live Option Squeeze Matcher", layout="wide")
 st.title("📊 EOD + Live Market Option Squeeze Matcher")
@@ -18,6 +18,22 @@ UPSTOX_KEYS = {
     "TRENT": "NSE_EQ|INE849A01020", "BEL": "NSE_EQ|INE263A01024", "HAL": "NSE_EQ|INE066F01020",
     "TITAN": "NSE_EQ|INE280A01028", "ADANIENT": "NSE_EQ|INE423A01024", "ADANIPORTS": "NSE_EQ|INE742F01042"
 }
+
+def get_default_monthly_expiry():
+    today = date.today()
+    y, m = today.year, today.month
+    last_day = calendar.monthrange(y, m)[1]
+    d = date(y, m, last_day)
+    while d.weekday() != 3:  # 3 = Thursday
+        d = date(y, m, d.day - 1)
+    if d < today:
+        m = 1 if m == 12 else m + 1
+        y = y + 1 if m == 1 else y
+        last_day = calendar.monthrange(y, m)[1]
+        d = date(y, m, last_day)
+        while d.weekday() != 3:
+            d = date(y, m, d.day - 1)
+    return d.strftime("%Y-%m-%d")
 
 def resolve_fyers_sym(t):
     t = t.upper().strip()
@@ -49,7 +65,7 @@ def generate_fyers_token_from_url(app_id, secret_key, redirect_url_or_code):
     raw = redirect_url_or_code.strip()
     auth_code = raw.split("auth_code=")[-1].split("&").pop(0) if "auth_code=" in raw else raw
     app_hash = hashlib.sha256(f"{app_id.strip()}:{secret_key.strip()}".encode()).hexdigest()
-    api_url = "https://fyers.in" + "/api/v3/validate-authcode"
+    api_url = "https://" + "api-t1.fyers.in/api/v3/validate-authcode"
     r = requests.post(api_url, json={"grant_type": "authorization_code", "appIdHash": app_hash, "code": auth_code}, timeout=10)
     if not r.text.strip():
         raise ValueError(f"Fyers HTTP {r.status_code}: Auth code expired. Login again for a fresh URL.")
@@ -79,20 +95,16 @@ def fetch_upstox(tok, ticker, man_exp=""):
     ikey = t if "|" in t else UPSTOX_KEYS.get(t)
     if not ikey:
         raise ValueError(f"Ticker '{t}' not in quick list. Enter Upstox key (e.g. NSE_EQ|INE...) in Stock box.")
-    exp = man_exp.strip()
-    if not exp:
-        c_url = "https://upstox.com" + "/v2/option/contract"
-        c_res = requests.get(c_url, headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey}, timeout=10)
-        if c_res.status_code != 200 or not c_res.text.strip():
-            raise ValueError(f"Upstox Contract Error (HTTP {c_res.status_code}). Verify today's Upstox Access Token.")
-        exps = sorted(list({item["expiry"] for item in c_res.json().get("data", []) if item.get("expiry") >= datetime.now().strftime("%Y-%m-%d")}))
-        exp = exps.pop(0) if exps else ""
-    if not exp:
-        raise ValueError(f"No active expiry found for {ikey}. Enter YYYY-MM-DD in Expiry box.")
-    chain_url = "https://upstox.com" + "/v2/option/chain"
-    r = requests.get(chain_url, headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"}, params={"instrument_key": ikey, "expiry_date": exp}, timeout=10)
+    exp = man_exp.strip() or get_default_monthly_expiry()
+    chain_url = "https://" + "api.upstox.com/v2/option/chain"
+    r = requests.get(
+        chain_url,
+        headers={"Accept": "application/json", "Authorization": f"Bearer {clean_tok}"},
+        params={"instrument_key": ikey, "expiry_date": exp},
+        timeout=10
+    )
     if r.status_code != 200 or not r.text.strip():
-        raise ValueError(f"Upstox Chain Error (HTTP {r.status_code}). Check token or Expiry ({exp}).")
+        raise ValueError(f"Upstox Chain Error (HTTP {r.status_code}) for {ikey} on {exp}: {r.text[:150]}")
     resp = r.json()
     if resp.get("status") != "success":
         raise ValueError(resp.get("errors", "Upstox API Error"))
@@ -118,9 +130,10 @@ if live_broker == "Fyers API v3":
         f_sec = st.text_input("Fyers Secret Key", type="password")
         f_red = st.text_input("Redirect URI (Must match Fyers App)", value="https://127.0.0.1")
         if f_cid and f_red:
-            l_url = "https://fyers.in" + f"/api/v3/generate-authcode?client_id={f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
-            st.link_button("Step 1: Click here to Login to Fyers", l_url)
-        p_url = st.text_input("Step 2: Paste Redirected URL here")
+            l_url = "https://" + f"api-t1.fyers.in/api/v3/generate-authcode?client_id={f_cid.strip()}&redirect_uri={f_red.strip()}&response_type=code&state=sample"
+            st.caption("Step 1: Copy & open this URL in a new tab:")
+            st.code(l_url)
+         p_url = st.text_input("Step 2: Paste Redirected URL here")
         if st.button("Step 3: Get Access Token") and f_sec and p_url:
             try:
                 gt = generate_fyers_token_from_url(f_cid, f_sec, p_url)
