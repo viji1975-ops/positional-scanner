@@ -3,28 +3,15 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title='NSE Index OI Trade Scanner', layout='wide')
-st.title('📈 Institutional Index Options OI Scanner (NIFTY / BANKNIFTY)')
+st.title('📈 Institutional Index Options OI Scanner (All Formats)')
 st.markdown(
-    'Upload your **Index Sentiment Report (CSV)** calibrated for NSE/BSE '
-    'indices with tighter strike tolerances, point-based targets, and '
-    'institutional footprint detection.'
+    'Supports **Index Sentiment Reports** AND **Raw Option Chain CSVs** '
+    '(NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY).'
 )
-
-INDEX_SET = {
-    'NIFTY',
-    'NIFTY 50',
-    'BANKNIFTY',
-    'NIFTY BANK',
-    'FINNIFTY',
-    'MIDCPNIFTY',
-    'NIFTYNXT50',
-    'SENSEX',
-    'BANKEX',
-}
 
 
 def parse_signals(signal_str):
-  if pd.isna(signal_str) or not str(signal_str).strip():
+  if pd.isna(signal_str) or not str(signal_str).strip() or str(signal_str).strip() == 'Neutral':
     return []
   pattern = r'(\d+(?:\.\d+)?)(CE|PE)\s*\(([^)]+)\)'
   matches = re.findall(pattern, str(signal_str))
@@ -48,9 +35,9 @@ def detect_index_inst_move(direction, oi_score, chg_1d, ce_signals, pe_signals):
     if m_ce_wind >= 1:
       pts += 2
       tags.append(f'{m_ce_wind}x Massive CE Squeeze')
-    if oi_score >= 5 and chg_1d >= 0.80:
+    if oi_score >= 3 and chg_1d >= 0.75:
       pts += 2
-      tags.append('High OI + Index Surge')
+      tags.append('OI + Index Surge')
   elif direction == 'BEARISH':
     if m_ce_add >= 2:
       pts += 2
@@ -61,20 +48,17 @@ def detect_index_inst_move(direction, oi_score, chg_1d, ce_signals, pe_signals):
     if m_pe_wind >= 1:
       pts += 2
       tags.append(f'{m_pe_wind}x Massive PE Breakdown')
-    if oi_score >= 5 and chg_1d <= -0.80:
+    if oi_score <= -3 and chg_1d <= -0.50:
       pts += 2
-      tags.append('High OI + Index Drop')
+      tags.append('OI + Index Drop')
 
   if pts >= 3:
     return f"🔥 HEAVY INST. ({', '.join(tags)})", pts
   elif pts >= 1:
     return f"⚡ MODERATE INST. ({', '.join(tags)})", pts
   return '⚠️ WEAK / RANGEBOUND', 0
-def analyze_index_row(row, only_indices=True):
+def analyze_sentiment_row(row):
   symbol = str(row.get('SYMBOL', '')).upper().strip()
-  if only_indices and symbol not in INDEX_SET:
-    return None
-
   sentiment = str(row.get('SENTIMENT', '')).upper().strip()
   try:
     close = float(row['CLOSE'])
@@ -83,87 +67,68 @@ def analyze_index_row(row, only_indices=True):
   except (ValueError, KeyError):
     return None
 
-  ce_signals = parse_signals(row.get('TOP_CE_SIGNALS', ''))
-  pe_signals = parse_signals(row.get('TOP_PE_SIGNALS', ''))
+  ce_col = row.get('TOP_CE', row.get('TOP_CE_SIGNALS', ''))
+  pe_col = row.get('TOP_PE', row.get('TOP_PE_SIGNALS', ''))
+  ce_signals = parse_signals(ce_col)
+  pe_signals = parse_signals(pe_col)
   score, reasons = 0, []
 
-  # Index-specific tolerances (0.35% ATM zone, 0.25% SL buffer)
-  if 'BULLISH' in sentiment:
+  # Determine direction from SENTIMENT or OI_SCORE (handles REVERSAL WATCH)
+  if 'BULLISH' in sentiment or ('REVERSAL' in sentiment and oi_score > 0):
     direction = 'BULLISH'
-    if oi_score >= 4 and chg_1d >= 0.50:
-      score += 30
+    if oi_score >= 3 and chg_1d >= 0.50:
+      score += 35
       reasons.append(f'Strong Index trend (+{chg_1d:.2f}%)')
-    elif chg_1d < 0.25:
-      score -= 20
-      reasons.append('Flat Index move (<0.25%)')
+    elif oi_score >= 3:
+      score += 20
+      reasons.append(f'Bullish Reversal OI (+{oi_score:g})')
 
-    pe_floors = sorted([s for s, _, a in pe_signals if 'Addition' in a and s <= close * 1.002])
+    pe_floors = sorted([s for s, _, a in pe_signals if 'Addition' in a and s <= close * 1.005])
     nearest_floor = pe_floors[-1] if pe_floors else round(close * 0.995, 2)
     if pe_floors:
       score += 25
-      reasons.append(f'PE Support floor at {nearest_floor:g}')
+      reasons.append(f'PE Support at {nearest_floor:g}')
 
-    at_par_ce = next((s for s, _, a in ce_signals if 'Addition' in a and abs(s - close) / close <= 0.0035), None)
+    at_par_ce = next((s for s, _, a in ce_signals if 'Addition' in a and abs(s - close) / close <= 0.004), None)
     below_windup = [s for s, _, a in ce_signals if 'Windup' in a and s < close]
     if at_par_ce is not None:
-      score += 25
-      reasons.append(f'ATM squeeze trigger at {at_par_ce:g}CE')
+      score += 20
+      reasons.append(f'ATM squeeze at {at_par_ce:g}CE')
     if below_windup:
       score += 10
-      reasons.append(f'Call sellers trapped below {max(below_windup):g}CE')
+      reasons.append(f'Sellers trapped below {max(below_windup):g}CE')
 
     above_windups = sorted([s for s, _, a in ce_signals if 'Windup' in a and s > close * 1.002])
     above_walls = sorted([s for s, _, a in ce_signals if 'Addition' in a and s > close * 1.0035])
-    if above_windups:
-      target = above_windups
-      score += 10
-      reasons.append(f'Open runway to {target:g}CE (Windup)')
-    elif above_walls:
-      target = above_walls
-      reasons.append(f'Resistance wall at {target:g}CE')
-    else:
-      target = round(close * 1.01, 2)
+    target = above_windups[0] if above_windups else (above_walls[0] if above_walls else round(close * 1.01, 2))
+    reasons.append(f'Target {target:g}CE')
 
     rec_strike = f'{at_par_ce:g} CE' if at_par_ce is not None else (f'{nearest_floor:g} CE' if pe_floors else 'ATM CE')
     entry_zone = f'Above {at_par_ce:g}' if at_par_ce is not None else f'Hold above {nearest_floor:g}'
     stop_loss = round(nearest_floor * 0.9975, 2)
     spot_reward, spot_risk = max(target - close, 0), max(close - stop_loss, 1.0)
 
-  elif 'BEARISH' in sentiment:
+  elif 'BEARISH' in sentiment or ('REVERSAL' in sentiment and oi_score < 0):
     direction = 'BEARISH'
-    if oi_score >= 4 and chg_1d <= -0.50:
+    if oi_score <= -3:
       score += 30
-      reasons.append(f'Strong Index drop ({chg_1d:.2f}%)')
-    elif chg_1d > -0.25:
-      score -= 20
-      reasons.append('Flat Index drop (<0.25%)')
+      reasons.append(f'Bearish OI Score ({oi_score:g})')
 
-    ce_ceilings = sorted([s for s, _, a in ce_signals if 'Addition' in a and s >= close * 0.998])
-    nearest_ceiling = ce_ceilings if ce_ceilings else round(close * 1.005, 2)
+    ce_ceilings = sorted([s for s, _, a in ce_signals if 'Addition' in a and s >= close * 0.995])
+    nearest_ceiling = ce_ceilings[0] if ce_ceilings else round(close * 1.005, 2)
     if ce_ceilings:
       score += 25
       reasons.append(f'CE Resistance wall at {nearest_ceiling:g}')
 
-    at_par_pe = next((s for s, _, a in pe_signals if 'Addition' in a and abs(s - close) / close <= 0.0035), None)
-    above_windup = [s for s, _, a in pe_signals if 'Windup' in a and s > close]
+    at_par_pe = next((s for s, _, a in pe_signals if 'Addition' in a and abs(s - close) / close <= 0.004), None)
     if at_par_pe is not None:
-      score += 25
-      reasons.append(f'ATM breakdown trigger at {at_par_pe:g}PE')
-    if above_windup:
-      score += 10
-      reasons.append(f'Put writers trapped above {min(above_windup):g}PE')
+      score += 20
+      reasons.append(f'ATM breakdown at {at_par_pe:g}PE')
 
     below_windups = sorted([s for s, _, a in pe_signals if 'Windup' in a and s < close * 0.998], reverse=True)
     below_floors = sorted([s for s, _, a in pe_signals if 'Addition' in a and s < close * 0.9965], reverse=True)
-    if below_windups:
-      target = below_windups
-      score += 10
-      reasons.append(f'Open path down to {target:g}PE (Windup)')
-    elif below_floors:
-      target = below_floors
-      reasons.append(f'Support floor at {target:g}PE')
-    else:
-      target = round(close * 0.99, 2)
+    target = below_windups[0] if below_windups else (below_floors[0] if below_floors else round(close * 0.99, 2))
+    reasons.append(f'Target {target:g}PE')
 
     rec_strike = f'{at_par_pe:g} PE' if at_par_pe is not None else (f'{nearest_ceiling:g} PE' if ce_ceilings else 'ATM PE')
     entry_zone = f'Below {at_par_pe:g}' if at_par_pe is not None else f'Stay below {nearest_ceiling:g}'
@@ -173,8 +138,8 @@ def analyze_index_row(row, only_indices=True):
     return None
 
   inst_label, inst_pts = detect_index_inst_move(direction, oi_score, chg_1d, ce_signals, pe_signals)
-  final_score = max(min(score + inst_pts * 3, 100), 0)
-  grade = 'HIGH' if final_score >= 75 else ('MODERATE' if final_score >= 50 else 'LOW / SKIP')
+  final_score = max(min(score + inst_pts * 4, 100), 0)
+  grade = 'HIGH' if final_score >= 70 else ('MODERATE' if final_score >= 45 else 'LOW / SKIP')
   rr_num = round(spot_reward / spot_risk, 1)
 
   return {
@@ -189,23 +154,67 @@ def analyze_index_row(row, only_indices=True):
   }
 
 
+def analyze_raw_option_chain(df):
+  """Handles Files 2, 3, and 4 (Strike-level Option Chain CSVs)."""
+  cols = set(df.columns)
+  if 'Index' in cols and 'Strike' in cols:
+    df = df.rename(columns={'Index': 'SYM', 'Strike': 'STRIKE', 'Type': 'TYP', 'OI': 'OI', 'OI_Chg': 'OI_CHG', 'Activity': 'ACT'})
+  elif 'STRIKE' in cols and 'OPTION_TYP' in cols:
+    df['SYM'] = 'BANKNIFTY (Single Chain)'
+    df = df.rename(columns={'OPTION_TYP': 'TYP', 'OPEN_INT': 'OI', 'CHG_IN_OI': 'OI_CHG', 'OI_ACTION': 'ACT'})
+  else:
+    return None
+
+  summaries = []
+  for sym, grp in df.groupby('SYM'):
+    ce = grp[grp['TYP'] == 'CE']
+    pe = grp[grp['TYP'] == 'PE']
+    if ce.empty or pe.empty:
+      continue
+
+    total_pe_oi, total_ce_oi = pe['OI'].sum(), ce['OI'].sum()
+    pcr = round(total_pe_oi / max(total_ce_oi, 1), 2)
+    pe_chg, ce_chg = pe['OI_CHG'].sum(), ce['OI_CHG'].sum()
+
+    top_ce = ce.sort_values(by='OI', ascending=False).iloc[0]
+    top_pe = pe.sort_values(by='OI', ascending=False).iloc[0]
+    max_ce_add = ce.sort_values(by='OI_CHG', ascending=False).iloc[0]
+    max_pe_add = pe.sort_values(by='OI_CHG', ascending=False).iloc[0]
+
+    if pcr >= 1.15 and pe_chg > ce_chg:
+      bias, rec = 'BULLISH (Put Writing Dominance)', f"{int(max_pe_add['STRIKE'])} CE"
+    elif pcr <= 0.85 and ce_chg > pe_chg:
+      bias, rec = 'BEARISH (Call Writing Dominance)', f"{int(max_ce_add['STRIKE'])} PE"
+    else:
+      bias, rec = 'RANGEBOUND / STRADDLE', f"Sell {int(top_pe['STRIKE'])}PE & {int(top_ce['STRIKE'])}CE"
+
+    summaries.append({
+        'INDEX': sym, 'PCR (OI)': pcr, 'NET_PE_OI_CHG': int(pe_chg), 'NET_CE_OI_CHG': int(ce_chg),
+        'MAX_PUT_SUPPORT': f"{int(top_pe['STRIKE'])} PE (OI: {int(top_pe['OI']):,})",
+        'MAX_CALL_RESISTANCE': f"{int(top_ce['STRIKE'])} CE (OI: {int(top_ce['OI']):,})",
+        'FRESH_PE_ADDITION': f"{int(max_pe_add['STRIKE'])} PE (+{int(max_pe_add['OI_CHG']):,})",
+        'FRESH_CE_ADDITION': f"{int(max_ce_add['STRIKE'])} CE (+{int(max_ce_add['OI_CHG']):,})",
+        'INSTITUTIONAL_BIAS': bias, 'SUGGESTED_PLAY': rec
+    })
+  return pd.DataFrame(summaries)
+
+
 st.sidebar.header('⚙️ Index Scanner Filters')
-filter_only_indices = st.sidebar.checkbox('Filter Only Known Indices (NIFTY, BANKNIFTY, etc.)', value=True)
-min_score = st.sidebar.slider('Minimum Setup Score (%)', 0, 100, 50, step=5)
-min_spot_move = st.sidebar.slider('Minimum Index Move (%)', 0.0, 5.0, 0.4, step=0.1)
-min_rr = st.sidebar.slider('Minimum Risk-to-Reward (1 : X)', 0.5, 5.0, 1.5, step=0.5)
+min_score = st.sidebar.slider('Minimum Setup Score (%)', 0, 100, 45, step=5)
+min_spot_move = st.sidebar.slider('Minimum Index Move (%)', 0.0, 5.0, 0.3, step=0.1)
+min_rr = st.sidebar.slider('Minimum Risk-to-Reward (1 : X)', 0.5, 5.0, 1.0, step=0.5)
 grade_filter = st.sidebar.multiselect('Setup Grade', ['HIGH', 'MODERATE', 'LOW / SKIP'], default=['HIGH', 'MODERATE'])
 only_heavy_inst = st.sidebar.checkbox('🔥 Show Only Heavy Institutional Moves', value=False)
 
-uploaded_file = st.file_uploader('Upload Index Sentiment Report CSV', type=['csv'])
+uploaded_file = st.file_uploader('Upload Index Sentiment OR Raw Option Chain CSV', type=['csv'])
 if uploaded_file is not None:
   try:
     raw_df = pd.read_csv(uploaded_file)
     raw_df.columns = [c.strip() for c in raw_df.columns]
-    parsed = [r for r in (analyze_index_row(row, filter_only_indices) for _, row in raw_df.iterrows()) if r is not None]
-    if not parsed:
-      st.warning('No matching Index rows found. Uncheck "Filter Only Known Indices" in the sidebar if your CSV uses custom index names.')
-    else:
+
+    # Mode 1: Sentiment Summary CSV (File 1)
+    if 'SENTIMENT' in raw_df.columns and 'OI_SCORE' in raw_df.columns:
+      parsed = [r for r in (analyze_sentiment_row(row) for _, row in raw_df.iterrows()) if r is not None]
       res_df = pd.DataFrame(parsed).sort_values(by=['SCORE_%', 'OI_SCORE'], ascending=False)
       filt_df = res_df[(res_df['SCORE_%'] >= min_score) & (res_df['SPOT_MOVE_%'] >= min_spot_move) & (res_df['RR_NUM'] >= min_rr) & (res_df['GRADE'].isin(grade_filter))]
       if only_heavy_inst:
@@ -213,15 +222,25 @@ if uploaded_file is not None:
       disp_df = filt_df.drop(columns=['RR_NUM'])
 
       c1, c2, c3, c4 = st.columns(4)
-      c1.metric('Indices Scanned', len(res_df))
+      c1.metric('Directional Indices', len(res_df))
       c2.metric('High Probability Setups', len(res_df[res_df['GRADE'] == 'HIGH']))
       c3.metric('🔥 Heavy Inst. Footprint', len(res_df[res_df['INST_ACTIVITY'].str.contains('HEAVY INST.')]))
       c4.metric('Filtered Matches', len(disp_df))
 
-      st.subheader('🎯 Index Option Trade Setups')
+      st.subheader('🎯 Index Sentiment Trade Setups')
       st.dataframe(disp_df, use_container_width=True, hide_index=True)
       st.download_button('📥 Download Index Trade Plan CSV', disp_df.to_csv(index=False).encode('utf-8'), 'index_trade_plan.csv', 'text/csv')
+
+    # Mode 2: Raw Option Chain CSV (Files 2, 3, 4)
+    else:
+      chain_df = analyze_raw_option_chain(raw_df)
+      if chain_df is not None and not chain_df.empty:
+        st.subheader('⛓️ Raw Option Chain Institutional Summary (PCR & Key Walls)')
+        st.dataframe(chain_df, use_container_width=True, hide_index=True)
+        st.download_button('📥 Download Chain Summary CSV', chain_df.to_csv(index=False).encode('utf-8'), 'option_chain_summary.csv', 'text/csv')
+      else:
+        st.error('Unrecognized CSV column structure.')
   except Exception as e:
     st.error(f'Error processing CSV file: {e}')
 else:
-  st.info('👆 Upload your downloaded Index CSV file above to generate the trade plan.')
+  st.info('👆 Upload any of your 4 Index CSV files above.')
